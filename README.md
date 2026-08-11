@@ -1,8 +1,8 @@
 # Family Assistant
 
-Assistant personnel **auto-hébergé pour un foyer de deux personnes** : tâches
-partagées, agenda Google, dépenses et équilibrage des comptes, trésorerie
-prévisionnelle, recettes & liste de courses, voyages, et un chat Claude qui
+Assistant personnel **auto-hébergé pour un foyer de deux adultes (avec ou sans enfants)**
+pour gérer l'intégralité de la maison : tâches partagées, agenda Google, dépenses et équilibrage des comptes,
+trésorerie prévisionnelle, recettes & liste de courses, voyages, et un chat Claude qui
 agit sur vos données.
 
 Ce projet a d'abord été construit **pour mon propre foyer**, puis rendu
@@ -34,6 +34,14 @@ trésorerie prévisionnelle, dépenses prévues, comptes bancaires) · Activité
 qui agissent sur le foyer) · Mariage (budget, plan d'épargne, invités) ·
 Bien-être (objectifs personnalisables par membre : compteurs journaliers /
 hebdomadaires / mensuels, cases à cocher, séances de sport) · Réglages.
+
+<img width="2226" height="1642" alt="image" src="https://github.com/user-attachments/assets/0d4fe23a-a16d-4144-9342-8639574092cd" />
+<img width="2156" height="1438" alt="image" src="https://github.com/user-attachments/assets/38e8dff8-a3c1-4a90-9118-59954d424f26" />
+<img width="2170" height="540" alt="image" src="https://github.com/user-attachments/assets/1dd4722e-0742-4a31-8df5-e2406019c6cb" />
+<img width="2110" height="1300" alt="image" src="https://github.com/user-attachments/assets/a9bb0caa-d6e7-4adf-9a11-6007808c6af5" />
+<img width="2174" height="1142" alt="image" src="https://github.com/user-attachments/assets/a706f3da-697f-40a9-ae1d-9544f50ca58a" />
+<img width="2156" height="1468" alt="image" src="https://github.com/user-attachments/assets/ecd24f53-a447-4d94-8102-29f432ed00ba" />
+
 
 ## Stack & coût
 
