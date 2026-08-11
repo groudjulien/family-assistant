@@ -1,0 +1,28 @@
+{
+  "name": "@gfa/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply gfa-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply gfa-db --remote"
+  },
+  "dependencies": {
+    "@gfa/shared": "workspace:*",
+    "drizzle-orm": "^0.36.4",
+    "hono": "^4.6.13",
+    "unpdf": "^0.12.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "drizzle-kit": "^0.28.1",
+    "typescript": "^5.6.3",
+    "wrangler": "^3.91.0"
+  }
+}

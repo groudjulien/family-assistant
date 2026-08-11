@@ -1,0 +1,192 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --paper: #f4f1ea;
+  --primary: rgb(91, 138, 78);
+  --rdp-font-family: inherit;
+}
+
+.dark {
+  color-scheme: dark;
+  --paper: #0b1220;
+  --rdp-accent-background-color: #1e293b;
+}
+/* react-day-picker déclare toutes ses variables sur `.rdp-root` : une surcharge
+   sur un ancêtre (`:root`, style inline) est donc ignorée — tout se règle ici. */
+.rdp-root {
+  font-size: 0.85rem;
+  --rdp-accent-color: rgb(91, 138, 78);
+  --rdp-accent-background-color: #eef3ec;
+  /* Cellules compactes : un mois tient dans la largeur d'une modale mobile. */
+  --rdp-day-width: 36px;
+  --rdp-day-height: 36px;
+  --rdp-day_button-width: 34px;
+  --rdp-day_button-height: 34px;
+  /* Bande de période : fond vert clair + texte foncé (lisible en clair ET sombre) */
+  --rdp-range_middle-background-color: #dce8d8;
+  --rdp-range_middle-color: #1e293b;
+}
+/* Jour sélectionné : en gras mais SANS grossir (react-day-picker met font-size: large par défaut) */
+.rdp-selected {
+  font-size: inherit !important;
+}
+.rdp-selected .rdp-day_button {
+  font-size: inherit !important;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply text-slate-900 antialiased dark:text-slate-100;
+  background: var(--paper);
+  margin: 0;
+}
+
+.card {
+  @apply rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900;
+}
+
+/* Dans @layer components pour que les utilitaires (hidden, md:hidden, rounded-full,
+   flex, text-xs…) puissent surcharger ces classes — sinon elles gagnent par ordre
+   de source car définies après @tailwind utilities. */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-700;
+  }
+  .btn-ghost {
+    @apply btn border border-[#e2dccd] bg-white text-slate-700 hover:bg-[#f1ede4] dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800;
+  }
+}
+
+.input {
+  @apply w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900;
+}
+
+/* ------------------------------------------------------------------ */
+/* Loader d'ouverture (composant AppLoader)                            */
+/* ------------------------------------------------------------------ */
+
+/* Secousse au tap sur l'illustration de démarrage. */
+.loader-wiggle {
+  animation: gfa-loader-wiggle 0.5s ease-in-out;
+}
+@keyframes gfa-loader-wiggle {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  25% {
+    transform: rotate(-8deg) scale(1.04);
+  }
+  75% {
+    transform: rotate(8deg) scale(1.04);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loader-wiggle {
+    animation: none;
+  }
+}
+
+/* Onglets de sous-menu (style "Bien être") */
+.subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid #d9d3c4;
+}
+.subtab {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 10px 16px;
+  cursor: pointer;
+  color: #7a7770;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.subtab:hover {
+  color: #1a1a18;
+}
+.subtab.active {
+  color: #1a1a18;
+  border-bottom-color: var(--primary);
+}
+.dark .subtabs {
+  border-bottom-color: #334155;
+}
+.dark .subtab:hover,
+.dark .subtab.active {
+  color: #f1f5f9;
+}
+
+/* ---------------- Thème Sport — aligné sur le design standard de l'app ---------------- */
+/* Les variables mappent la palette slate/brand standard pour rester cohérent avec .card. */
+.sport-theme {
+  --paper-2: #f1f5f9; /* slate-100 — puces / boutons +/- */
+  --pink: #0f172a; /* slate-900 — texte principal */
+  --pmuted: #64748b; /* slate-500 — texte discret */
+  --pline: #e2e8f0; /* slate-200 — bordures */
+  --pcard: #ffffff; /* fond des cartes */
+  --pgreen: #5b8a4e;
+  --pwarn: #d4a843;
+  --pfail: #b8453a;
+  --pviolet: #7a4ca8;
+  color: var(--pink);
+}
+.dark .sport-theme {
+  --paper-2: #1e293b; /* slate-800 */
+  --pink: #f1f5f9; /* slate-100 */
+  --pmuted: #94a3b8; /* slate-400 */
+  --pline: #1e293b; /* slate-800 — comme .card en dark */
+  --pcard: #0f172a; /* slate-900 — comme .card en dark */
+}
+.sport-theme .mono {
+  font-family: "JetBrains Mono", monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.s-card {
+  @apply rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900;
+}
+.s-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--pline);
+  flex-wrap: wrap;
+}
+.s-tab {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 10px 16px;
+  cursor: pointer;
+  color: var(--pmuted);
+  border: none;
+  background: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.s-tab:hover {
+  color: var(--pink);
+}
+.s-tab.active {
+  color: var(--pink);
+  border-bottom-color: var(--pgreen);
+}

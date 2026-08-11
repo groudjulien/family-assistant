@@ -1,0 +1,20 @@
+{
+  "name": "family-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./apps/*\" dev",
+    "dev:api": "pnpm --filter @gfa/api dev",
+    "dev:web": "pnpm --filter @gfa/web dev",
+    "build": "pnpm --filter @gfa/shared build && pnpm --filter @gfa/web build && pnpm --filter @gfa/api build",
+    "typecheck": "pnpm -r typecheck",
+    "db:generate": "pnpm --filter @gfa/api db:generate",
+    "db:migrate:local": "pnpm --filter @gfa/api db:migrate:local",
+    "db:migrate:remote": "pnpm --filter @gfa/api db:migrate:remote",
+    "release": "bash scripts/deploy.sh"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

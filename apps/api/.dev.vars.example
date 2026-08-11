@@ -1,0 +1,31 @@
+# Secrets de développement local (wrangler dev). Copier en `.dev.vars` (gitignoré).
+# En production, poser les mêmes valeurs avec `wrangler secret put <NOM>`.
+
+# URLs locales — à garder, sinon l'API attend l'Origin de production et bloque
+# les requêtes du front local (ce fichier surcharge les [vars] de wrangler.toml).
+APP_URL=http://localhost:5173
+API_URL=http://localhost:8787
+GOOGLE_REDIRECT_URI=http://localhost:8787/auth/google/callback
+
+# Google OAuth (requis) — cf. docs/google-oauth.md
+GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-xxx
+
+# Chaîne aléatoire longue (signe les sessions ET chiffre les clés API stockées en base)
+# Générer avec : openssl rand -hex 32
+SESSION_SECRET=change-me
+
+# Amorçage de l'allowlist (importée en base au premier login, puis gérée dans Réglages)
+# Format : email ou slot:email (slot = a | b)
+ALLOWED_EMAILS=a:toi@gmail.com,b:conjoint@gmail.com
+
+# Jeton du wizard d'installation (/setup) — généré par scripts/setup.sh en prod.
+# En local : n'importe quelle chaîne, ex. openssl rand -hex 24
+#SETUP_TOKEN=
+
+# Clés API optionnelles (repli global ; configurables par foyer dans Réglages → Paramètre)
+#ANTHROPIC_API_KEY=          # chat + générations IA — cf. docs/api-keys.md
+#LUNCHFLOW_API_KEY=          # synchro des soldes bancaires
+#PRIM_IDF_MOBILITE_API=      # transports Île-de-France
+#PRIM_JETON=
+#TMDB_API_KEY=               # films & streaming

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.dev.vars.back
+# Config Cloudflare par instance — copier wrangler.toml.example et remplir.
+apps/api/wrangler.toml
+# Config de déploiement par instance (VITE_API_URL, CF_PAGES_PROJECT…).
+scripts/deploy.env
+*.local
+.DS_Store
+apps/api/.drizzle/
+apps/api/seed/
+apps/web/dist/
+*.log
+SPECS.md

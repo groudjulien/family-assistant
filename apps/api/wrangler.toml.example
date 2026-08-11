@@ -1,0 +1,50 @@
+# Configuration Cloudflare Workers — MODÈLE.
+# Copiez ce fichier en `wrangler.toml` (non versionné) et remplacez les
+# valeurs REMPLACER_* par celles de votre compte Cloudflare.
+
+# Nom du Worker (libre — apparaît dans votre dashboard Cloudflare).
+name = "family-assistant-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-27"
+compatibility_flags = ["nodejs_compat"]
+
+# Cloudflare D1 (SQLite). Créez la base avec :
+#   wrangler d1 create family-assistant-db
+# puis collez le database_id retourné ci-dessous.
+[[d1_databases]]
+binding = "DB"
+database_name = "family-assistant-db"
+database_id = "REMPLACER_DATABASE_ID"
+migrations_dir = "migrations"
+
+# Cloudflare R2 (fichiers : billets de voyage, photos de recettes). Créez avec :
+#   wrangler r2 bucket create family-assistant-files
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "family-assistant-files"
+
+# Variables publiques (non secrètes). Les secrets se posent avec `wrangler secret put`.
+# APP_URL   = URL du front (Cloudflare Pages)
+# API_URL   = URL de ce Worker
+# GOOGLE_REDIRECT_URI = API_URL + /auth/google/callback (déclarée aussi côté Google Cloud)
+[vars]
+APP_URL = "https://REMPLACER_PROJET.pages.dev"
+API_URL = "https://REMPLACER_WORKER.workers.dev"
+GOOGLE_REDIRECT_URI = "https://REMPLACER_WORKER.workers.dev/auth/google/callback"
+
+# Pour le développement local, utilisez plutôt :
+# APP_URL = "http://localhost:5173"
+# API_URL = "http://localhost:8787"
+# GOOGLE_REDIRECT_URI = "http://localhost:8787/auth/google/callback"
+
+# Secrets à poser (PAS ici) :
+#   wrangler secret put GOOGLE_CLIENT_ID
+#   wrangler secret put GOOGLE_CLIENT_SECRET
+#   wrangler secret put SESSION_SECRET        (chaîne aléatoire longue — chiffre aussi les clés API stockées)
+#   wrangler secret put ALLOWED_EMAILS        (emails Google autorisés, séparés par des virgules)
+# Optionnels (configurables aussi dans Réglages, par foyer) :
+#   wrangler secret put ANTHROPIC_API_KEY     (chat + import de recettes)
+#   wrangler secret put LUNCHFLOW_API_KEY     (synchro des soldes bancaires)
+#   wrangler secret put PRIM_IDF_MOBILITE_API (transports Île-de-France)
+#   wrangler secret put PRIM_JETON
+#   wrangler secret put TMDB_API_KEY          (films)
