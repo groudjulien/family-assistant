@@ -335,9 +335,9 @@ function TaskRow({ task, reorderMode }: { task: TaskWithSubtasks; reorderMode: b
         )}
         <div className="hidden md:block">
           {toggle.isPending ? (
-            <Spinner className="h-5 w-5 text-brand-600" />
+            <Spinner className="h-7 w-7 text-brand-600" />
           ) : (
-            <Checkbox checked={task.status === "done"} onChange={() => toggle.mutate(task)} />
+            <Checkbox size="lg" checked={task.status === "done"} onChange={() => toggle.mutate(task)} />
           )}
         </div>
         <div className="flex-1 cursor-pointer" onClick={handleRowClick}>
@@ -398,7 +398,7 @@ function TaskRow({ task, reorderMode }: { task: TaskWithSubtasks; reorderMode: b
       </div>
 
       {open && (
-        <div className="mt-3 space-y-2 border-t border-slate-100 pt-3 dark:border-slate-800">
+        <div className="mt-3 space-y-0.5 border-t border-slate-100 pt-3 dark:border-slate-800">
           {reorderMode ? (
             task.subtasks.length > 0 ? (
               <DndContext sensors={subSensors} collisionDetection={closestCenter} onDragEnd={onSubDragEnd}>
@@ -406,7 +406,7 @@ function TaskRow({ task, reorderMode }: { task: TaskWithSubtasks; reorderMode: b
                   items={task.subtasks.map((s) => s.id)}
                   strategy={verticalListSortingStrategy}
                 >
-                  <div className="space-y-2">
+                  <div className="space-y-1">
                     {task.subtasks.map((s) => (
                       <SubtaskRow key={s.id} subtask={s} />
                     ))}
@@ -420,9 +420,10 @@ function TaskRow({ task, reorderMode }: { task: TaskWithSubtasks; reorderMode: b
             <>
               {/* Case et libellé agrandis + `py-1` : cible de clic plus large. */}
               {task.subtasks.map((s) => (
-                <div key={s.id} className="group/sub flex items-center gap-3 py-1 text-base">
+                <div key={s.id} className="group/sub flex items-center gap-2.5 py-0.5 text-base">
                   {/* Le libellé fait partie du bouton : cliquer le nom coche aussi. */}
                   <Checkbox
+                    size="lg"
                     checked={s.status === "done"}
                     onChange={() => toggleSub.mutate(s)}
                     label={
@@ -454,7 +455,7 @@ function TaskRow({ task, reorderMode }: { task: TaskWithSubtasks; reorderMode: b
                   e.preventDefault();
                   if (sub.trim()) addSub.mutate();
                 }}
-                className="flex gap-2 pt-1"
+                className="flex gap-2 pt-2"
               >
                 <input
                   value={sub}

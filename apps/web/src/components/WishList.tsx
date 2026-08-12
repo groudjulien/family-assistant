@@ -119,7 +119,11 @@ function WishRow({
   ].filter(Boolean) as { key: string; text: string }[];
 
   return (
-    <li className="group flex items-start gap-2 border-t border-slate-100 py-2 first:border-t-0 dark:border-slate-800">
+    // Mobile : pas de crayon (pas de survol) — l'édition se fait au double clic.
+    <li
+      onDoubleClick={onEdit}
+      className="group flex items-start gap-2 border-t border-slate-100 py-2 first:border-t-0 dark:border-slate-800"
+    >
       {showOwner ? (
         <WishAvatar owner={item.owner} className="mt-0.5 h-6 w-6 text-xs" />
       ) : (
@@ -137,6 +141,16 @@ function WishRow({
           <span className={`font-medium ${item.doneAt ? "text-slate-500 dark:text-slate-400" : ""}`}>
             {item.name}
           </span>
+          {/* Ordinateur : crayon juste après le nom, au survol de la ligne. */}
+          <button
+            type="button"
+            onClick={onEdit}
+            title="Modifier"
+            aria-label={`Modifier ${item.name}`}
+            className="hidden shrink-0 text-slate-400 transition hover:text-brand-600 md:inline-block md:opacity-0 md:group-hover:opacity-100"
+          >
+            ✎
+          </button>
           {item.feasibility && <FeasibilityTag value={item.feasibility} />}
           {item.url && (
             <a
@@ -162,15 +176,6 @@ function WishRow({
           </div>
         )}
       </div>
-      <button
-        type="button"
-        onClick={onEdit}
-        title="Modifier"
-        aria-label={`Modifier ${item.name}`}
-        className="shrink-0 text-slate-400 transition hover:text-brand-600 md:opacity-0 md:group-hover:opacity-100"
-      >
-        ✎
-      </button>
       <StarToggle on={item.starred} onToggle={onToggleStar} />
     </li>
   );
@@ -253,7 +258,7 @@ export default function WishList() {
                 <button
                   onClick={() => setModal({ item: null, owner })}
                   title={`Ajouter un souhait — ${ownerLabels[owner]}`}
-                  className="ml-auto hidden text-slate-400 transition hover:text-brand-600 md:block"
+                  className="btn-primary ml-auto hidden px-2.5 py-1 text-xs md:inline-flex"
                 >
                   + Ajouter
                 </button>

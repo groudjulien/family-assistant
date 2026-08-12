@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ShoppingItem, ShoppingFavorite } from "@gfa/shared";
 import { api } from "../lib/api";
 import PageLoader from "../components/PageLoader";
-import { Input } from "../components/ui";
+import { Input, Switch } from "../components/ui";
 import { searchProducts, iconFor } from "../lib/groceries";
 
 /**
@@ -95,6 +95,28 @@ function AddArticleForm({
 function ShoppingList() {
   const qc = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
+  /**
+   * Mode recette : on ajuste les quantités (moitié gauche = −, moitié droite = +)
+   * et une tuile ne se supprime plus au clic. Mode course (défaut) : l'inverse.
+   * Mémorisé d'une visite à l'autre.
+   */
+  const [recipeMode, setRecipeMode] = useState(() => {
+    try {
+      return localStorage.getItem("courses:recipeMode") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleRecipeMode = () =>
+    setRecipeMode((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem("courses:recipeMode", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
   // Snackbar « annuler » après suppression d'un article (4 s).
   const [undo, setUndo] = useState<{ name: string; quantity: number } | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout>>();
@@ -180,8 +202,13 @@ function ShoppingList() {
       </div>
 
       <div className="card">
-        <div className="mb-3 text-xs text-slate-400">
-          Touche un produit pour le retirer · − / + pour la quantité.
+        <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-400">
+          <Switch checked={recipeMode} onChange={toggleRecipeMode} label="Activer le mode recette" />
+          <span>
+            {recipeMode
+              ? "· Touche à gauche / à droite d'un produit pour sa quantité."
+              : "· Touche un produit pour le retirer."}
+          </span>
         </div>
         {(data ?? []).length === 0 ? (
           <div className="text-sm text-slate-400">Ta liste est vide. 🎉</div>
@@ -207,37 +234,59 @@ function ShoppingList() {
                     </svg>
                   </div>
                 )}
-                <button
-                  onClick={() => deleteItem(it)}
-                  disabled={deleting}
-                  className="flex flex-1 flex-col items-center justify-center gap-1 p-2 text-center"
-                  title="Retirer de la liste"
-                >
-                  <span className="text-4xl leading-none">{iconFor(it.name)}</span>
-                  <span className="line-clamp-2 text-xs font-medium leading-tight text-brand-800 dark:text-brand-50">
-                    {titleCase(it.name)}
-                  </span>
-                </button>
+                {recipeMode ? (
+                  <div className="flex flex-1 flex-col items-center justify-center gap-1 p-2 text-center">
+                    <span className="text-4xl leading-none">{iconFor(it.name)}</span>
+                    <span className="line-clamp-2 text-xs font-medium leading-tight text-brand-800 dark:text-brand-50">
+                      {titleCase(it.name)}
+                    </span>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => deleteItem(it)}
+                    disabled={deleting}
+                    className="flex flex-1 flex-col items-center justify-center gap-1 p-2 text-center"
+                    title="Retirer de la liste"
+                  >
+                    <span className="text-4xl leading-none">{iconFor(it.name)}</span>
+                    <span className="line-clamp-2 text-xs font-medium leading-tight text-brand-800 dark:text-brand-50">
+                      {titleCase(it.name)}
+                    </span>
+                  </button>
+                )}
                 {it.quantity > 1 && (
-                  <span className="absolute bottom-1 left-1 rounded-full bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                  // `pointer-events-none` : la pastille ne doit pas absorber le clic
+                  // de la moitié gauche en mode recette.
+                  <span className="pointer-events-none absolute bottom-1 left-1 rounded-full bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
                     ×{it.quantity}
                   </span>
                 )}
-                {/* − en haut à gauche, + en haut à droite */}
-                <button
-                  onClick={() => setQty.mutate({ id: it.id, quantity: it.quantity - 1 })}
-                  className="absolute left-1 top-1 flex h-6 w-6 items-center justify-center rounded-full border border-brand-300/60 bg-white/70 text-brand-700 hover:bg-brand-50 dark:border-brand-500/30 dark:bg-slate-900/70 dark:text-brand-100 dark:hover:bg-slate-800"
-                  title={it.quantity > 1 ? "Diminuer" : "Retirer"}
-                >
-                  −
-                </button>
-                <button
-                  onClick={() => setQty.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                  className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full border border-brand-300/60 bg-white/70 text-brand-700 hover:bg-brand-50 dark:border-brand-500/30 dark:bg-slate-900/70 dark:text-brand-100 dark:hover:bg-slate-800"
-                  title="Augmenter"
-                >
-                  +
-                </button>
+                {/* Mode recette : toute la moitié gauche retire une unité, toute la
+                    moitié droite en ajoute ; les ronds − / + sont centrés verticalement. */}
+                {recipeMode && (
+                  <>
+                    <button
+                      onClick={() => setQty.mutate({ id: it.id, quantity: it.quantity - 1 })}
+                      className="group/qty absolute inset-y-0 left-0 flex w-1/2 items-center justify-start pl-1"
+                      title={it.quantity > 1 ? "Diminuer" : "Retirer"}
+                      aria-label="Diminuer la quantité"
+                    >
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full border border-brand-300/60 bg-white/70 text-brand-700 transition group-hover/qty:bg-brand-50 dark:border-brand-500/30 dark:bg-slate-900/70 dark:text-brand-100 dark:group-hover/qty:bg-slate-800">
+                        −
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => setQty.mutate({ id: it.id, quantity: it.quantity + 1 })}
+                      className="group/qty absolute inset-y-0 right-0 flex w-1/2 items-center justify-end pr-1"
+                      title="Augmenter"
+                      aria-label="Augmenter la quantité"
+                    >
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full border border-brand-300/60 bg-white/70 text-brand-700 transition group-hover/qty:bg-brand-50 dark:border-brand-500/30 dark:bg-slate-900/70 dark:text-brand-100 dark:group-hover/qty:bg-slate-800">
+                        +
+                      </span>
+                    </button>
+                  </>
+                )}
               </div>
               );
             })}

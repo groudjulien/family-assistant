@@ -197,10 +197,11 @@ export function Checkbox({
 }: {
   checked: boolean;
   onChange: () => void;
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
   label?: ReactNode;
 }) {
-  const dim = size === "sm" ? "h-4 w-4 text-[10px]" : "h-5 w-5 text-xs";
+  const dim =
+    size === "sm" ? "h-4 w-4 text-[10px]" : size === "lg" ? "h-7 w-7 text-base" : "h-5 w-5 text-xs";
   const boxEl = (
     <span
       className={`flex ${dim} shrink-0 items-center justify-center rounded-md border leading-none transition ${
@@ -222,6 +223,43 @@ export function Checkbox({
     >
       {boxEl}
       {label && <span>{label}</span>}
+    </button>
+  );
+}
+
+/**
+ * Interrupteur (on/off) : pastille qui glisse dans un rail, vert quand actif.
+ * Pensé pour accompagner un libellé discret (taille d'un sous-titre).
+ */
+export function Switch({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: () => void;
+  label?: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={onChange}
+      className="inline-flex items-center gap-2 text-left"
+    >
+      {label && <span>{label}</span>}
+      <span
+        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition ${
+          checked ? "bg-brand-600" : "bg-slate-300 dark:bg-slate-600"
+        }`}
+      >
+        <span
+          className={`h-4 w-4 rounded-full bg-white shadow transition-transform ${
+            checked ? "translate-x-[1.125rem]" : "translate-x-0.5"
+          }`}
+        />
+      </span>
     </button>
   );
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -73,11 +73,13 @@ function DragHandle({ attributes, listeners }: SortableHandle) {
 
 function SortableItemRow({
   item,
+  reorderMode,
   onToggle,
   onRename,
   onRemove,
 }: {
   item: CustomListItem;
+  reorderMode: boolean;
   onToggle: () => void;
   onRename: (label: string) => void;
   onRemove: () => void;
@@ -87,6 +89,9 @@ function SortableItemRow({
   });
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.label);
+  // Clic simple = cocher, double clic = éditer (le tactile n'a pas de survol).
+  // Le minuteur évite de cocher deux fois avant d'ouvrir l'édition.
+  const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const commit = () => {
     setEditing(false);
@@ -94,17 +99,29 @@ function SortableItemRow({
     if (value && value !== item.label) onRename(value);
     else setDraft(item.label);
   };
+  const handleLabelClick = () => {
+    if (clickTimer.current) {
+      clearTimeout(clickTimer.current);
+      clickTimer.current = null;
+      setEditing(true);
+      return;
+    }
+    clickTimer.current = setTimeout(() => {
+      clickTimer.current = null;
+      onToggle();
+    }, 220);
+  };
 
   return (
     <div
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition }}
-      className={`flex items-center gap-2 rounded-xl px-2 py-1.5 ${
+      className={`group/item flex items-center gap-2.5 rounded-xl px-1 py-0.5 ${
         isDragging ? "bg-brand-50 dark:bg-slate-800" : ""
       }`}
     >
-      <DragHandle attributes={attributes} listeners={listeners} />
-      <Checkbox checked={item.done} onChange={onToggle} />
+      {reorderMode && <DragHandle attributes={attributes} listeners={listeners} />}
+      <Checkbox size="lg" checked={item.done} onChange={onToggle} />
       {editing ? (
         <input
           autoFocus
@@ -118,22 +135,32 @@ function SortableItemRow({
               setEditing(false);
             }
           }}
-          className="input flex-1 py-1 text-sm"
+          className="input flex-1 py-1"
         />
       ) : (
         <button
-          onClick={() => setEditing(true)}
-          className={`flex-1 truncate text-left text-sm ${
+          onClick={handleLabelClick}
+          className={`min-w-0 break-words text-left ${
             item.done ? "text-slate-400 line-through" : ""
           }`}
         >
           {item.label}
         </button>
       )}
+      {/* Ordinateur : crayon au survol de la ligne, juste après le nom. */}
+      {!editing && (
+        <button
+          onClick={() => setEditing(true)}
+          aria-label="Modifier l'élément"
+          className="hidden shrink-0 rounded-lg px-1 text-slate-300 opacity-0 transition hover:text-brand-600 group-hover/item:opacity-100 md:block"
+        >
+          ✎
+        </button>
+      )}
       <button
         onClick={onRemove}
         aria-label="Supprimer l'élément"
-        className="rounded-lg px-1.5 py-1 text-slate-300 transition hover:text-red-500"
+        className="ml-auto shrink-0 rounded-lg px-1 text-slate-300 transition hover:text-red-500"
       >
         ✕
       </button>
@@ -143,11 +170,11 @@ function SortableItemRow({
 
 function SortableListCard({
   list,
-  scope,
+  reorderMode,
   onChanged,
 }: {
   list: CustomList;
-  scope: ListScope;
+  reorderMode: boolean;
   onChanged: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -216,7 +243,7 @@ function SortableListCard({
       className={`card flex flex-col gap-2 ${isDragging ? "ring-2 ring-brand-400" : ""}`}
     >
       <div className="flex items-center gap-2">
-        <DragHandle attributes={attributes} listeners={listeners} />
+        {reorderMode && <DragHandle attributes={attributes} listeners={listeners} />}
         {renaming ? (
           <input
             autoFocus
@@ -233,7 +260,10 @@ function SortableListCard({
             className="input flex-1 py-1"
           />
         ) : (
-          <button onClick={() => setRenaming(true)} className="flex-1 truncate text-left font-semibold">
+          <button
+            onClick={() => setRenaming(true)}
+            className="flex-1 break-words text-left font-semibold"
+          >
             {list.name}
           </button>
         )}
@@ -264,6 +294,7 @@ function SortableListCard({
                 <SortableItemRow
                   key={item.id}
                   item={item}
+                  reorderMode={reorderMode}
                   onToggle={() => updateItem.mutate({ id: item.id, done: !item.done })}
                   onRename={(label) => updateItem.mutate({ id: item.id, label })}
                   onRemove={() => removeItem.mutate(item.id)}
@@ -291,9 +322,6 @@ function SortableListCard({
           +
         </button>
       </form>
-      {scope === "personal" && (
-        <p className="text-[11px] text-slate-400">Visible uniquement par toi.</p>
-      )}
     </div>
   );
 }
@@ -302,6 +330,8 @@ function CustomLists({ scope }: { scope: ListScope }) {
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  // Les poignées de glisser-déposer n'apparaissent qu'en mode réorganisation.
+  const [reorderMode, setReorderMode] = useState(false);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
   const key = ["lists", scope];
 
@@ -359,11 +389,24 @@ function CustomLists({ scope }: { scope: ListScope }) {
         </button>
       </form>
 
-      <p className="text-xs text-slate-400">
-        {scope === "shared"
-          ? "Listes partagées avec tout le foyer."
-          : "Listes personnelles : personne d'autre ne les voit."}
-      </p>
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs text-slate-400">
+          {scope === "shared"
+            ? "Listes partagées avec tout le foyer."
+            : "Listes personnelles : personne d'autre ne les voit."}
+        </p>
+        {lists.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setReorderMode((v) => !v)}
+            aria-pressed={reorderMode}
+            className={`shrink-0 text-xs ${reorderMode ? "btn-primary" : "btn-ghost"}`}
+          >
+            <span aria-hidden="true">{reorderMode ? "✓" : "⠿"}</span>
+            {reorderMode ? "Terminer" : "Réorganiser"}
+          </button>
+        )}
+      </div>
 
       {lists.length === 0 ? (
         <div className="card text-sm text-slate-400">
@@ -374,7 +417,12 @@ function CustomLists({ scope }: { scope: ListScope }) {
           <SortableContext items={lists.map((l) => l.id)} strategy={verticalListSortingStrategy}>
             <div className="grid items-start gap-4 lg:grid-cols-2">
               {lists.map((l) => (
-                <SortableListCard key={l.id} list={l} scope={scope} onChanged={invalidate} />
+                <SortableListCard
+                  key={l.id}
+                  list={l}
+                  reorderMode={reorderMode}
+                  onChanged={invalidate}
+                />
               ))}
             </div>
           </SortableContext>
