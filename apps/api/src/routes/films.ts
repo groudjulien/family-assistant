@@ -346,6 +346,7 @@ films.delete("/favorites/:externalId", async (c) => {
 
 /* ---------------- Masqués (ne plus proposer) ---------------- */
 
+// Triés par date de masquage décroissante (les plus récents en premier).
 films.get("/hidden", async (c) => {
   const rows = await c
     .get("db")
@@ -362,6 +363,7 @@ films.get("/hidden", async (c) => {
       providers: parseProviders(r.providers),
       year: r.year,
       audience: r.audience,
+      hiddenAt: r.createdAt,
     })),
   });
 });
@@ -370,6 +372,10 @@ films.post("/hidden", async (c) => {
   const db = c.get("db");
   const hid = c.get("household").id;
   const body = await parseBody(c, createFilmSeenSchema);
+  // Masquer un film le sort aussi de la liste « À voir » (favoris).
+  await db
+    .delete(filmFavorite)
+    .where(and(eq(filmFavorite.householdId, hid), eq(filmFavorite.externalId, body.externalId)));
   const existing = await db
     .select()
     .from(filmHidden)
@@ -405,6 +411,7 @@ films.delete("/hidden/:externalId", async (c) => {
 
 /* ---------------- Déjà vus ---------------- */
 
+// Triés par date de visionnage décroissante (les plus récents en premier).
 films.get("/seen", async (c) => {
   const rows = await c
     .get("db")
@@ -421,6 +428,7 @@ films.get("/seen", async (c) => {
       providers: parseProviders(r.providers),
       year: r.year,
       audience: r.audience,
+      seenAt: r.createdAt,
     })),
   });
 });
@@ -429,6 +437,11 @@ films.post("/seen", async (c) => {
   const db = c.get("db");
   const hid = c.get("household").id;
   const body = await parseBody(c, createFilmSeenSchema);
+  // Un film vu n'a plus rien à faire dans les favoris : on retire le cœur pour
+  // qu'il disparaisse de la liste et ne vive plus que dans « Vues ».
+  await db
+    .delete(filmFavorite)
+    .where(and(eq(filmFavorite.householdId, hid), eq(filmFavorite.externalId, body.externalId)));
   const existing = await db
     .select()
     .from(filmSeen)

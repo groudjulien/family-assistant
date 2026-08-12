@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useParams } from "react-router-dom";
 import { useMeQuery, MeProvider } from "./auth";
 import Layout from "./components/Layout";
 import AppLoader from "./components/AppLoader";
@@ -11,10 +11,26 @@ import Calendar from "./pages/Calendar";
 import Money from "./pages/Money";
 import Wedding from "./pages/Wedding";
 import Courses from "./pages/Courses";
+import Repas from "./pages/Repas";
 import Tools from "./pages/Tools";
+import Films from "./pages/Films";
+import Listes from "./pages/Listes";
+import Vacances from "./pages/Vacances";
 import Sport from "./pages/Sport";
 import Chat from "./pages/Chat";
 import Settings from "./pages/Settings";
+
+/** /courses/idees/<vue> → /repas/idees/<vue> (ancienne URL des idées repas). */
+function LegacyIdeasRedirect() {
+  const { view } = useParams();
+  return <Navigate to={`/repas/idees/${view}`} replace />;
+}
+
+/** /tools/<section>/<vue> → /<section>/<vue> (films et vacances sortis de /tools). */
+function LegacyToolsRedirect({ base }: { base: string }) {
+  const { view } = useParams();
+  return <Navigate to={`${base}/${view}`} replace />;
+}
 
 export default function App() {
   // `isPending` (et non `isLoading`) : pendant la restauration du cache persistant,
@@ -49,11 +65,30 @@ export default function App() {
           <Route path="/wedding" element={<PageGate variant="mariage"><Wedding /></PageGate>} />
           <Route path="/wedding/:tab" element={<PageGate variant="mariage"><Wedding /></PageGate>} />
           <Route path="/courses" element={<PageGate variant="repas"><Courses /></PageGate>} />
-          <Route path="/courses/:tab/:view" element={<PageGate variant="repas"><Courses /></PageGate>} />
-        <Route path="/courses/:tab" element={<PageGate variant="repas"><Courses /></PageGate>} />
+          {/* Anciennes URLs : /courses portait aussi recettes et idées repas,
+              parties dans /repas. On redirige (liens partagés, dernier chemin
+              mémorisé par useLastPaths). */}
+          <Route path="/courses/liste" element={<Navigate to="/courses" replace />} />
+          <Route path="/courses/recettes" element={<Navigate to="/repas/recettes" replace />} />
+          <Route path="/courses/idees" element={<Navigate to="/repas/idees" replace />} />
+          <Route path="/courses/idees/:view" element={<LegacyIdeasRedirect />} />
+          <Route path="/repas" element={<PageGate variant="repas"><Repas /></PageGate>} />
+          <Route path="/repas/:tab" element={<PageGate variant="repas"><Repas /></PageGate>} />
+          <Route path="/repas/:tab/:view" element={<PageGate variant="repas"><Repas /></PageGate>} />
           <Route path="/tools" element={<PageGate variant="activites"><Tools /></PageGate>} />
           <Route path="/tools/:tab" element={<PageGate variant="activites"><Tools /></PageGate>} />
-          <Route path="/tools/:tab/:view" element={<PageGate variant="activites"><Tools /></PageGate>} />
+          <Route path="/listes" element={<Listes />} />
+          <Route path="/listes/:tab" element={<Listes />} />
+          <Route path="/tools/wish" element={<Navigate to="/listes/wishlist" replace />} />
+          <Route path="/films" element={<PageGate variant="activites"><Films /></PageGate>} />
+          <Route path="/films/:view" element={<PageGate variant="activites"><Films /></PageGate>} />
+          <Route path="/vacances" element={<PageGate variant="activites"><Vacances /></PageGate>} />
+          <Route path="/vacances/:view" element={<PageGate variant="activites"><Vacances /></PageGate>} />
+          {/* Anciennes URLs : films et vacances étaient des onglets de /tools. */}
+          <Route path="/tools/films" element={<Navigate to="/films" replace />} />
+          <Route path="/tools/films/:view" element={<LegacyToolsRedirect base="/films" />} />
+          <Route path="/tools/vacances" element={<Navigate to="/vacances" replace />} />
+          <Route path="/tools/vacances/:view" element={<LegacyToolsRedirect base="/vacances" />} />
           <Route path="/sport" element={<PageGate variant="bienetre"><Sport /></PageGate>} />
           <Route path="/sport/:member" element={<PageGate variant="bienetre"><Sport /></PageGate>} />
           <Route path="/sport/:member/:view" element={<PageGate variant="bienetre"><Sport /></PageGate>} />

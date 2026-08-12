@@ -39,7 +39,7 @@ import { useMe } from "../auth";
 import { api } from "../lib/api";
 import { useLastView } from "../lib/lastView";
 import PageLoader from "../components/PageLoader";
-import { Select, SubNav } from "../components/ui";
+import { Select } from "../components/ui";
 
 /* ---------------- constantes ---------------- */
 const MONTHS = [
@@ -183,37 +183,15 @@ const VIEWS: View[] = ["quotidien", "stats", "objectifs"];
 
 export default function Sport() {
   const me = useMe();
-  const navigate = useNavigate();
   const { member: param, view: viewParam, sub: subParam } = useParams();
 
-  // Pas de membre dans l'URL → redirige vers le membre connecté
-  if (!param) return <Navigate to={`/sport/${me.member}`} replace />;
-
-  const member = param === "b" ? "b" : "a";
-  const members = me.household.members;
+  // Chacun ne voit que ses propres objectifs : l'URL est toujours réalignée sur
+  // le membre connecté (l'API refuse de toute façon la lecture d'un autre membre).
+  if (param !== me.member) return <Navigate to={`/sport/${me.member}`} replace />;
 
   return (
     <div className="space-y-4 pb-24 md:pb-0">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Bien-être 🏋️</h1>
-        <SubNav
-          value={member}
-          onChange={(v) => navigate(`/sport/${v}`)}
-          items={[
-            { value: "a", label: members.a.name },
-            { value: "b", label: members.b.name },
-          ]}
-        />
-      </div>
-
-      {/* Chaque membre a ses objectifs ; seul l'intéressé peut les modifier. */}
-      <Tracker
-        key={member}
-        member={member}
-        canEdit={me.member === member}
-        view={viewParam}
-        sub={subParam}
-      />
+      <Tracker key={me.member} member={me.member} canEdit view={viewParam} sub={subParam} />
     </div>
   );
 }

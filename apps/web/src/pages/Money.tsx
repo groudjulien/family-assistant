@@ -46,7 +46,7 @@ import { TX_TYPE_LABEL, TX_TYPES } from "@gfa/shared";
 import { useMe } from "../auth";
 import { api, ApiError } from "../lib/api";
 import PageLoader from "../components/PageLoader";
-import { eur, eurToCents, dateFr, todayIso } from "../lib/format";
+import { eur, eurToCents, dateFr, dateFrShort, todayIso } from "../lib/format";
 import { Select, MultiSelect, Checkbox, DateInput, Input, SubNav, PillToggle, DateRangeCalendar } from "../components/ui";
 import { Indicator } from "../components/Indicator";
 import { ExpenseFormModal, type ExpenseFormValues } from "../components/ExpenseForm";
@@ -3216,10 +3216,17 @@ function RecurringModal({
 
 /* ---------------- Trésorerie ---------------- */
 
+/** Clé stable d'une dépense à venir (pas d'id renvoyé par /api/cashflow). */
+const cashflowEntryKey = (e: Cashflow["upcoming"][number]) =>
+  `${e.accountId}|${e.date}|${e.label}|${e.amount}`;
+
 function Tresorerie() {
   const [openAcct, setOpenAcct] = useState<string | null>(null);
   // 0 = mois courant, 1 = mois suivant, etc. (prévision jusqu'à la fin de ce mois-là)
   const [monthOffset, setMonthOffset] = useState(0);
+  // Dépenses à venir décochées au clic : barrées et sorties du calcul (local, non persisté).
+  const [excluded, setExcluded] = useState<Record<string, boolean>>({});
+  const toggleExcluded = (key: string) => setExcluded((x) => ({ ...x, [key]: !x[key] }));
 
   const now = new Date();
   const target = new Date(now.getFullYear(), now.getMonth() + monthOffset + 1, 0, 23, 59, 59);
@@ -3300,8 +3307,14 @@ function Tresorerie() {
       .filter((e) => e.accountId === a.accountId && e.amount < 0)
       .sort((x, y) => x.date.localeCompare(y.date));
     const open = openAcct === a.accountId;
+    // Dépenses décochées : réintégrées au solde prévisionnel (montants négatifs → total positif).
+    const skipped = debits
+      .filter((e) => excluded[cashflowEntryKey(e)])
+      .reduce((s, e) => s - e.amount, 0);
+    const totalDebits = a.totalDebits - skipped;
     // Mois suivant : on ignore les rentrées d'argent (salaire, virements) → solde - dépenses.
-    const projected = monthOffset > 0 ? a.currentBalance - a.totalDebits : a.projectedBalance;
+    const projected =
+      (monthOffset > 0 ? a.currentBalance - a.totalDebits : a.projectedBalance) + skipped;
     return (
       <div key={a.accountId} className="card">
         <button
@@ -3321,7 +3334,7 @@ function Tresorerie() {
           </div>
           <div>
             <div className="text-xs text-slate-400">Reste à débiter</div>
-            <div className={`font-medium tabular-nums ${debitColor(a.totalDebits)}`}>-{eur(a.totalDebits)}</div>
+            <div className={`font-medium tabular-nums ${debitColor(totalDebits)}`}>-{eur(totalDebits)}</div>
           </div>
           <div>
             <div className="text-xs text-slate-400">Reste à vivre restant</div>
@@ -3337,19 +3350,35 @@ function Tresorerie() {
             {debits.length === 0 ? (
               <div className="text-sm text-slate-400">Aucune dépense à débiter.</div>
             ) : (
-              debits.map((e, i) => (
-                <div
-                  key={i}
-                  className="border-b border-slate-50 py-1 text-sm dark:border-slate-800 md:flex md:items-center md:gap-2"
-                >
-                  {/* Mobile : description sur la 1re ligne, date + montant sur la 2e. */}
-                  <span className="block truncate md:order-2 md:flex-1">{e.label}</span>
-                  <span className="mt-0.5 flex items-center justify-between gap-2 md:mt-0 md:contents">
-                    <span className="text-slate-500 md:order-1 md:w-20 md:shrink-0">{dateFr(e.date)}</span>
-                    <span className="shrink-0 tabular-nums text-red-600 md:order-3">{eur(e.amount)}</span>
-                  </span>
-                </div>
-              ))
+              debits.map((e, i) => {
+                const key = cashflowEntryKey(e);
+                const off = !!excluded[key];
+                return (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => toggleExcluded(key)}
+                    aria-pressed={off}
+                    title={off ? "Reprendre en compte" : "Ignorer dans le calcul"}
+                    className={`w-full border-b border-slate-50 py-1 text-left text-sm transition dark:border-slate-800 md:flex md:items-center md:gap-2 ${
+                      off ? "text-slate-400 line-through dark:text-slate-500" : ""
+                    }`}
+                  >
+                    {/* Mobile : description sur la 1re ligne, date + montant sur la 2e. */}
+                    <span className="block truncate md:order-2 md:flex-1">{e.label}</span>
+                    <span className="mt-0.5 flex items-center justify-between gap-2 md:mt-0 md:contents">
+                      <span className={`md:order-1 md:w-14 md:shrink-0 ${off ? "" : "text-slate-500"}`}>
+                        {dateFrShort(e.date)}
+                      </span>
+                      <span
+                        className={`shrink-0 tabular-nums md:order-3 ${off ? "" : "text-red-600"}`}
+                      >
+                        {eur(e.amount)}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })
             )}
           </div>
         )}

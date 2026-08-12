@@ -226,12 +226,22 @@ activities.get("/", async (c) => {
     .orderBy(asc(activityFeed.name));
   if (cities.length === 0 && feeds.length === 0) return c.json({ activities: [] });
 
+  // Une activité masquée ou déjà retenue (« À faire ») n'est plus proposée :
+  // elle ne vit que dans son onglet.
   const hiddenRows = await c
     .get("db")
     .select()
     .from(activityHidden)
     .where(eq(activityHidden.householdId, hid));
-  const hidden = new Set(hiddenRows.map((h) => h.externalId));
+  const favRows = await c
+    .get("db")
+    .select()
+    .from(activityFavorite)
+    .where(eq(activityFavorite.householdId, hid));
+  const hidden = new Set([
+    ...hiddenRows.map((h) => h.externalId),
+    ...favRows.map((f) => f.externalId),
+  ]);
   const blocked = (parts: (string | null | undefined)[]) => {
     const text = normalize(parts.filter(Boolean).join(" "));
     return BLOCKED.some((w) => text.includes(w));
@@ -329,6 +339,15 @@ activities.post("/hidden", async (c) => {
   const db = c.get("db");
   const hid = c.get("household").id;
   const body = await parseBody(c, createActivityFavoriteSchema);
+  // Masquer une activité la sort aussi de la liste « À faire » (favoris).
+  await db
+    .delete(activityFavorite)
+    .where(
+      and(
+        eq(activityFavorite.householdId, hid),
+        eq(activityFavorite.externalId, body.externalId),
+      ),
+    );
   const existing = await db
     .select()
     .from(activityHidden)

@@ -26,7 +26,7 @@ const sport = new Hono<AppContext>();
 
 const slot = (raw: string) => (raw === "b" ? "b" : "a");
 
-/** Chacun ne saisit et ne configure que ses propres objectifs. */
+/** Chacun ne lit, ne saisit et ne configure que ses propres objectifs. */
 function assertSelf(c: Context<AppContext>, member: string) {
   if (c.get("user").member !== member) return c.json({ error: "forbidden_member" }, 403);
   return null;
@@ -49,6 +49,8 @@ sport.get("/:member/config", async (c) => {
   const db = c.get("db");
   const hid = c.get("household").id;
   const member = slot(c.req.param("member"));
+  const denied = assertSelf(c, member);
+  if (denied) return denied;
 
   const [activities, sessions, goals] = await Promise.all([
     db
@@ -409,6 +411,8 @@ sport.put("/:member/goals/reorder", async (c) => {
 sport.get("/:member/logs", async (c) => {
   const db = c.get("db");
   const member = slot(c.req.param("member"));
+  const denied = assertSelf(c, member);
+  if (denied) return denied;
   const rows = await db
     .select()
     .from(wellnessLog)

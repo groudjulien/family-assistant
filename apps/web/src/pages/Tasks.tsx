@@ -98,7 +98,7 @@ function SubtaskRow({ subtask }: { subtask: Task }) {
     <div
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition, touchAction: "pan-y" }}
-      className={`relative flex items-center gap-2 rounded-lg bg-slate-50 px-2 py-1.5 text-sm dark:bg-slate-800/60 ${
+      className={`relative flex items-center gap-2 rounded-lg bg-slate-50 px-2 py-2 text-base dark:bg-slate-800/60 ${
         isDragging ? "opacity-60" : ""
       }`}
     >
@@ -398,7 +398,7 @@ function TaskRow({ task, reorderMode }: { task: TaskWithSubtasks; reorderMode: b
       </div>
 
       {open && (
-        <div className="mt-3 space-y-1 border-t border-slate-100 pt-3 dark:border-slate-800">
+        <div className="mt-3 space-y-2 border-t border-slate-100 pt-3 dark:border-slate-800">
           {reorderMode ? (
             task.subtasks.length > 0 ? (
               <DndContext sensors={subSensors} collisionDetection={closestCenter} onDragEnd={onSubDragEnd}>
@@ -406,7 +406,7 @@ function TaskRow({ task, reorderMode }: { task: TaskWithSubtasks; reorderMode: b
                   items={task.subtasks.map((s) => s.id)}
                   strategy={verticalListSortingStrategy}
                 >
-                  <div className="space-y-1">
+                  <div className="space-y-2">
                     {task.subtasks.map((s) => (
                       <SubtaskRow key={s.id} subtask={s} />
                     ))}
@@ -418,12 +418,23 @@ function TaskRow({ task, reorderMode }: { task: TaskWithSubtasks; reorderMode: b
             )
           ) : (
             <>
+              {/* Case et libellé agrandis + `py-1` : cible de clic plus large. */}
               {task.subtasks.map((s) => (
-                <div key={s.id} className="group/sub flex items-center gap-2 text-sm">
-                  <Checkbox size="sm" checked={s.status === "done"} onChange={() => toggleSub.mutate(s)} />
-                  <span className={s.status === "done" ? "text-slate-400 line-through" : ""}>
-                    {s.title}
-                  </span>
+                <div key={s.id} className="group/sub flex items-center gap-3 py-1 text-base">
+                  {/* Le libellé fait partie du bouton : cliquer le nom coche aussi. */}
+                  <Checkbox
+                    checked={s.status === "done"}
+                    onChange={() => toggleSub.mutate(s)}
+                    label={
+                      <span
+                        className={`text-base ${
+                          s.status === "done" ? "text-slate-400 line-through" : ""
+                        }`}
+                      >
+                        {s.title}
+                      </span>
+                    }
+                  />
                   <button
                     onClick={() => setEditing(s)}
                     className="text-slate-300 opacity-0 transition hover:text-brand-600 group-hover/sub:opacity-100"
@@ -451,7 +462,9 @@ function TaskRow({ task, reorderMode }: { task: TaskWithSubtasks; reorderMode: b
                   placeholder="Ajouter une sous-tâche…"
                   className="input"
                 />
-                <button className="btn-ghost">+</button>
+                <button className="btn-primary shrink-0" aria-label="Ajouter la sous-tâche">
+                  +
+                </button>
               </form>
             </>
           )}

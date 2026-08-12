@@ -24,6 +24,7 @@ import tripsRoutes from "./routes/trips";
 import transitRoutes from "./routes/transit";
 import lunchflowRoutes from "./routes/lunchflow";
 import wishRoutes from "./routes/wish";
+import listsRoutes from "./routes/lists";
 import setupRoutes from "./routes/setup";
 
 const app = new Hono<AppContext>();
@@ -96,6 +97,7 @@ api.route("/films", filmsRoutes);
 api.route("/trips", tripsRoutes);
 api.route("/lunchflow", lunchflowRoutes);
 api.route("/wish", wishRoutes);
+api.route("/lists", listsRoutes);
 app.route("/api", api);
 
 export default app;

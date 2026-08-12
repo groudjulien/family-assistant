@@ -17,6 +17,13 @@ export const dateFr = (iso: string): string => {
   return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short", year: "numeric" });
 };
 
+/** Date sans l'année : « 15 août » */
+export const dateFrShort = (iso: string): string => {
+  if (!iso) return "";
+  const d = new Date(iso.length <= 10 ? `${iso}T00:00:00` : iso);
+  return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short" });
+};
+
 export const monthFr = (ym: string): string => {
   const [y, m] = ym.split("-");
   return new Date(Number(y), Number(m) - 1, 1).toLocaleDateString("fr-FR", {

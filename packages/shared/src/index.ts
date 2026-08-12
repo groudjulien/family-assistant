@@ -1192,6 +1192,51 @@ export const reorderFavoritesSchema = z.object({
   orderedIds: z.array(z.string()),
 });
 
+/* ------------------------------------------------------------------ */
+/* Listes libres (menu « Listes »)                                     */
+/* ------------------------------------------------------------------ */
+
+/** `shared` = visible de tout le foyer ; `personal` = privée à son créateur. */
+export const LIST_SCOPES = ["shared", "personal"] as const;
+export type ListScope = (typeof LIST_SCOPES)[number];
+
+export const customListItemSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  done: z.boolean(),
+});
+export type CustomListItem = z.infer<typeof customListItemSchema>;
+
+export const customListSchema = z.object({
+  id: z.string(),
+  scope: z.enum(LIST_SCOPES),
+  name: z.string(),
+  items: z.array(customListItemSchema),
+});
+export type CustomList = z.infer<typeof customListSchema>;
+
+export const createCustomListSchema = z.object({
+  scope: z.enum(LIST_SCOPES),
+  name: z.string().trim().min(1).max(80),
+});
+
+export const updateCustomListSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+});
+
+export const createCustomListItemSchema = z.object({
+  label: z.string().trim().min(1).max(200),
+});
+
+export const updateCustomListItemSchema = z.object({
+  label: z.string().trim().min(1).max(200).optional(),
+  done: z.boolean().optional(),
+});
+
+export const reorderIdsSchema = z.object({
+  orderedIds: z.array(z.string()),
+});
+
 export const MEAT_TYPES = ["poulet", "veau", "porc", "boeuf", "agneau", "canard", "poisson"] as const;
 export type MeatType = (typeof MEAT_TYPES)[number];
 export const MEAT_META: Record<MeatType, { icon: string; label: string }> = {

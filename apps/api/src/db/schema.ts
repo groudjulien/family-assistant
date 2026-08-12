@@ -633,6 +633,26 @@ export const wish = sqliteTable("wish", {
   createdAt: text("created_at").notNull(),
 });
 
+/** Listes libres du menu « Listes » : partagées au foyer ou personnelles. */
+export const customList = sqliteTable("custom_list", {
+  id: text("id").primaryKey(),
+  householdId: text("household_id").notNull(),
+  scope: text("scope").notNull(), // shared | personal
+  ownerId: text("owner_id"), // user.id quand scope = personal, null si partagée
+  name: text("name").notNull(),
+  position: integer("position").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+});
+
+export const customListItem = sqliteTable("custom_list_item", {
+  id: text("id").primaryKey(),
+  listId: text("list_id").notNull(),
+  label: text("label").notNull(),
+  done: integer("done").notNull().default(0),
+  position: integer("position").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+});
+
 export const session = sqliteTable("session", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),

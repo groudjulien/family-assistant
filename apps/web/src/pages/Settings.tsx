@@ -41,7 +41,13 @@ import { PersonAvatar, PersonPicker, usePackingPersons, useMembers, MemberAvatar
 import { useMe } from "../auth";
 import { api } from "../lib/api";
 import { Select, SearchSelect, SubNav, Input } from "../components/ui";
-import { NAV, ALWAYS_VISIBLE_NAV, orderedNav, type NavItem } from "../components/Layout";
+import {
+  NAV,
+  ALWAYS_VISIBLE_NAV,
+  orderedNav,
+  newSeparatorKey,
+  type NavItem,
+} from "../components/Layout";
 import { getStoredTheme, setTheme, type Theme } from "../lib/theme";
 import {
   getLoaderDelay,
@@ -85,6 +91,7 @@ function SortableMenuItem({
   hidden,
   canHide,
   onToggleHidden,
+  onRemove,
   onUp,
   onDown,
   isFirst,
@@ -94,6 +101,7 @@ function SortableMenuItem({
   hidden: boolean;
   canHide: boolean;
   onToggleHidden: () => void;
+  onRemove: () => void;
   onUp: () => void;
   onDown: () => void;
   isFirst: boolean;
@@ -109,7 +117,9 @@ function SortableMenuItem({
       className={`flex items-center gap-3 rounded-xl border px-3 py-2 text-sm ${
         isDragging
           ? "border-brand-400 bg-brand-50 dark:bg-slate-800"
-          : "border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900"
+          : item.separator
+            ? "border-dashed border-slate-300 bg-slate-50 dark:border-slate-700 dark:bg-slate-800/50"
+            : "border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900"
       } ${hidden ? "opacity-50" : ""}`}
     >
       <button
@@ -120,9 +130,29 @@ function SortableMenuItem({
       >
         ⠿
       </button>
-      <span>{item.icon}</span>
-      <span className={`font-medium ${hidden ? "line-through" : ""}`}>{item.label}</span>
+      {item.separator ? (
+        <span className="flex flex-1 items-center gap-2 text-xs text-slate-400">
+          <span className="h-px flex-1 bg-slate-300 dark:bg-slate-600" />
+          Séparateur
+          <span className="h-px flex-1 bg-slate-300 dark:bg-slate-600" />
+        </span>
+      ) : (
+        <>
+          <span>{item.icon}</span>
+          <span className={`font-medium ${hidden ? "line-through" : ""}`}>{item.label}</span>
+        </>
+      )}
       <div className="ml-auto flex items-center gap-1">
+        {item.separator && (
+          <button
+            onClick={onRemove}
+            aria-label="Retirer le séparateur"
+            title="Retirer le séparateur"
+            className="rounded-lg px-2 py-1 text-slate-400 transition hover:bg-slate-100 hover:text-red-500 dark:hover:bg-slate-800"
+          >
+            ✕
+          </button>
+        )}
         {canHide && (
           <button
             onClick={onToggleHidden}
@@ -282,6 +312,21 @@ function MenuOrderCard() {
       return next;
     });
   };
+  // Séparateurs : ajoutés en fin de liste (puis déplaçables comme un menu).
+  const addSeparator = () => {
+    setOrder((prev) => {
+      const next = [...prev, { to: newSeparatorKey(), label: "", icon: "", separator: true as const }];
+      save.mutate({ order: next.map((n) => n.to), hidden });
+      return next;
+    });
+  };
+  const removeAt = (index: number) => {
+    setOrder((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      save.mutate({ order: next.map((n) => n.to), hidden });
+      return next;
+    });
+  };
   const reset = () => {
     setOrder(NAV);
     setHidden([]);
@@ -297,7 +342,8 @@ function MenuOrderCard() {
       </div>
       <p className="mb-3 mt-1 text-xs text-slate-400">
         Glisse les menus pour choisir leur ordre, et utilise l'œil pour masquer ceux qui ne
-        t'intéressent pas. Réglage propre à ton compte.
+        t'intéressent pas. Les séparateurs tracent un trait entre deux groupes de menus dans le
+        menu latéral. Réglage propre à ton compte.
       </p>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
         <SortableContext items={order.map((n) => n.to)} strategy={verticalListSortingStrategy}>
@@ -307,8 +353,9 @@ function MenuOrderCard() {
                 key={n.to}
                 item={n}
                 hidden={hidden.includes(n.to)}
-                canHide={!ALWAYS_VISIBLE_NAV.includes(n.to)}
+                canHide={!n.separator && !ALWAYS_VISIBLE_NAV.includes(n.to)}
                 onToggleHidden={() => toggleHidden(n.to)}
+                onRemove={() => removeAt(i)}
                 onUp={() => move(i, -1)}
                 onDown={() => move(i, 1)}
                 isFirst={i === 0}
@@ -318,6 +365,20 @@ function MenuOrderCard() {
           </div>
         </SortableContext>
       </DndContext>
+      <button onClick={addSeparator} className="btn-ghost mt-3 w-full justify-center gap-2 text-xs">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          className="h-4 w-4"
+          aria-hidden="true"
+        >
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+        Ajouter un séparateur
+      </button>
     </div>
   );
 }
@@ -1971,8 +2032,10 @@ export default function Settings() {
       {/* Foyer (60%) + Apparence (40%) — tout sur une ligne dans chaque carte */}
       <div className="grid gap-4 lg:grid-cols-5">
         <div className="card lg:col-span-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-3">
+          {/* Mobile : bouton de déconnexion sur la ligne du dessous (sinon l'email
+              déborde et crée un scroll latéral). */}
+          <div className="flex flex-col items-start gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex w-full min-w-0 items-center gap-3 md:w-auto">
               {me.avatarUrl && (
                 <img
                   src={me.avatarUrl}
@@ -2010,7 +2073,8 @@ export default function Settings() {
         </div>
 
         <div className="card lg:col-span-2">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          {/* Même logique : les deux thèmes passent sous le titre sur mobile. */}
+          <div className="flex flex-col items-start gap-3 md:flex-row md:items-center md:justify-between">
             <div className="text-sm font-semibold">🎨 Apparence</div>
             <div className="flex gap-2">
               {([
@@ -2086,30 +2150,35 @@ export default function Settings() {
               value={newCity}
               onChange={(e) => setNewCity(e.target.value)}
               placeholder="Ajouter une ville…"
-              className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+              className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
             />
-            <button className="btn-primary" disabled={addCity.isPending || !newCity.trim()}>
+            <button
+              className="btn-primary shrink-0"
+              disabled={addCity.isPending || !newCity.trim()}
+            >
               Ajouter
             </button>
           </form>
 
           <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
             <div className="text-sm font-semibold">Flux RSS d'agendas</div>
-            <p className="mb-3 mt-1 text-xs text-slate-400">
+            {/* `break-words` : l'URL d'exemple est un mot insécable qui poussait
+                la carte au-delà de l'écran sur mobile (scroll latéral). */}
+            <p className="mb-3 mt-1 break-words text-xs text-slate-400">
               Pour les villes absentes d'OpenAgenda : ajoute le flux RSS des événements de leur
-              site (ex. <code>https://www.ma-ville.fr/evenement/feed/</code>).
+              site (ex. <code className="break-all">https://www.ma-ville.fr/evenement/feed/</code>).
             </p>
             <div className="mb-3 space-y-1.5">
               {(activityFeeds ?? []).map((f) => (
                 <div
                   key={f.id}
-                  className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800"
+                  className="flex min-w-0 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800"
                 >
-                  <span className="font-medium">{f.name}</span>
+                  <span className="max-w-[40%] truncate font-medium">{f.name}</span>
                   <span className="min-w-0 flex-1 truncate text-xs text-slate-400">{f.url}</span>
                   <button
                     onClick={() => removeFeed.mutate(f.id)}
-                    className="text-slate-300 hover:text-red-500"
+                    className="shrink-0 text-slate-300 hover:text-red-500"
                     title="Retirer"
                   >
                     ✕
@@ -2138,7 +2207,7 @@ export default function Settings() {
                 value={newFeed.url}
                 onChange={(e) => setNewFeed({ ...newFeed, url: e.target.value })}
                 placeholder="URL du flux RSS…"
-                className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
               />
               <button
                 className="btn-primary"
