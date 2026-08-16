@@ -79,7 +79,9 @@ export default function App() {
           <Route path="/tools/:tab" element={<PageGate variant="activites"><Tools /></PageGate>} />
           <Route path="/listes" element={<Listes />} />
           <Route path="/listes/:tab" element={<Listes />} />
+          <Route path="/listes/:tab/:view" element={<Listes />} />
           <Route path="/tools/wish" element={<Navigate to="/listes/wishlist" replace />} />
+          <Route path="/tools/wish/:view" element={<LegacyToolsRedirect base="/listes/wishlist" />} />
           <Route path="/films" element={<PageGate variant="activites"><Films /></PageGate>} />
           <Route path="/films/:view" element={<PageGate variant="activites"><Films /></PageGate>} />
           <Route path="/vacances" element={<PageGate variant="activites"><Vacances /></PageGate>} />

@@ -1077,6 +1077,8 @@ function WeekMealPlan() {
   const [count, setCount] = useState("5");
   const [maxPrep, setMaxPrep] = useState("");
   const [maxTotal, setMaxTotal] = useState("45");
+  // Mobile : les paramètres vivent dans une modale ouverte par le bouton flottant.
+  const [paramsOpen, setParamsOpen] = useState(false);
 
   const { data: plan, isLoading } = useQuery({
     queryKey: ["meal-plan"],
@@ -1099,7 +1101,10 @@ function WeekMealPlan() {
         maxPrepMinutes: maxPrep ? Number(maxPrep) : null,
         maxTotalMinutes: maxTotal ? Number(maxTotal) : null,
       }),
-    onSuccess: invalidate,
+    onSuccess: () => {
+      setParamsOpen(false);
+      invalidate();
+    },
     onError: (e) =>
       toast.error(
         e instanceof ApiError && e.message.includes("no_candidates")
@@ -1131,103 +1136,96 @@ function WeekMealPlan() {
   if (isLoading) return <PageLoader variant="repas" />;
   const recipes = plan?.recipes ?? [];
 
+  // Champs de génération, partagés par la carte (ordinateur) et la modale (mobile).
+  const paramFields = (
+    <>
+      <label className="text-xs text-slate-400">
+        Nombre de repas
+        <input
+          type="number"
+          min={1}
+          max={14}
+          value={count}
+          onChange={(e) => setCount(e.target.value)}
+          className="input mt-1 w-24"
+        />
+      </label>
+      <label className="text-xs text-slate-400">
+        🔪 Préparation max
+        <div className="mt-1">
+          <Select
+            className="w-36"
+            value={maxPrep}
+            onChange={setMaxPrep}
+            placeholder="Peu importe"
+            options={[
+              { value: "", label: "Peu importe" },
+              { value: "15", label: "≤ 15 min" },
+              { value: "30", label: "≤ 30 min" },
+              { value: "45", label: "≤ 45 min" },
+              { value: "60", label: "≤ 1 h" },
+            ]}
+          />
+        </div>
+      </label>
+      <label className="text-xs text-slate-400">
+        ⏱️ Temps total max
+        <div className="mt-1">
+          <Select
+            className="w-36"
+            value={maxTotal}
+            onChange={setMaxTotal}
+            placeholder="Peu importe"
+            options={[
+              { value: "", label: "Peu importe" },
+              { value: "20", label: "≤ 20 min" },
+              { value: "30", label: "≤ 30 min" },
+              { value: "45", label: "≤ 45 min" },
+              { value: "60", label: "≤ 1 h" },
+              { value: "120", label: "≤ 2 h" },
+            ]}
+          />
+        </div>
+      </label>
+    </>
+  );
+  const generateButton = (
+    <button
+      type="button"
+      onClick={() => generate.mutate()}
+      disabled={generate.isPending}
+      className="btn-primary"
+    >
+      {generate.isPending ? "Génération…" : plan ? "🔄 Regénérer les repas" : "✨ Générer les repas"}
+    </button>
+  );
+
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3 pb-24 md:pb-0">
       <p className="text-xs text-slate-400">
         Une sélection variée piochée dans Mes recettes (jamais deux fois la même viande ni le même
         féculent), figée et partagée avec tout le foyer jusqu'à la prochaine génération.
       </p>
 
-      {/* Paramètres + génération */}
-      <div className="card flex flex-wrap items-end gap-3">
-        <label className="text-xs text-slate-400">
-          Nombre de repas
-          <input
-            type="number"
-            min={1}
-            max={14}
-            value={count}
-            onChange={(e) => setCount(e.target.value)}
-            className="input mt-1 w-24"
-          />
-        </label>
-        <label className="text-xs text-slate-400">
-          🔪 Préparation max
-          <div className="mt-1">
-            <Select
-              className="w-36"
-              value={maxPrep}
-              onChange={setMaxPrep}
-              placeholder="Peu importe"
-              options={[
-                { value: "", label: "Peu importe" },
-                { value: "15", label: "≤ 15 min" },
-                { value: "30", label: "≤ 30 min" },
-                { value: "45", label: "≤ 45 min" },
-                { value: "60", label: "≤ 1 h" },
-              ]}
-            />
-          </div>
-        </label>
-        <label className="text-xs text-slate-400">
-          ⏱️ Temps total max
-          <div className="mt-1">
-            <Select
-              className="w-36"
-              value={maxTotal}
-              onChange={setMaxTotal}
-              placeholder="Peu importe"
-              options={[
-                { value: "", label: "Peu importe" },
-                { value: "20", label: "≤ 20 min" },
-                { value: "30", label: "≤ 30 min" },
-                { value: "45", label: "≤ 45 min" },
-                { value: "60", label: "≤ 1 h" },
-                { value: "120", label: "≤ 2 h" },
-              ]}
-            />
-          </div>
-        </label>
-        <button
-          type="button"
-          onClick={() => generate.mutate()}
-          disabled={generate.isPending}
-          className="btn-primary"
-        >
-          {generate.isPending ? "Génération…" : plan ? "🔄 Regénérer la semaine" : "✨ Générer la semaine"}
-        </button>
+      {/* Paramètres + génération : inline sur ordinateur, modale (bouton « + ») sur mobile. */}
+      <div className="card hidden flex-wrap items-end gap-3 md:flex">
+        {paramFields}
+        {generateButton}
       </div>
 
       {!plan ? (
         <div className="card text-sm text-slate-400">
-          Aucune semaine générée pour le moment. Choisis tes paramètres et clique sur « Générer la
-          semaine ».
+          Aucune semaine générée pour le moment — choisis tes paramètres et lance « Générer les
+          repas ».
         </div>
       ) : (
         <>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-xs text-slate-400">
-              Semaine générée le {dateFr(plan.createdAt)} — {recipes.length} repas
-              {recipes.length < plan.count
-                ? ` (pas assez de plats compatibles pour en proposer ${plan.count})`
-                : ""}
-              .
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                const all = recipes.flatMap((r) => selectedIngredients(r));
-                if (all.length === 0) {
-                  toast.error("Aucun ingrédient à ajouter.");
-                  return;
-                }
-                addToList.mutate(all);
-              }}
-              disabled={addToList.isPending}
-              className="btn-primary"
-            >
-              + Liste de course
-            </button>
+          <div className="text-xs text-slate-400">
+            Semaine générée le {dateFr(plan.createdAt)} — {recipes.length} repas
+            {recipes.length < plan.count
+              ? ` (pas assez de plats compatibles pour en proposer ${plan.count})`
+              : ""}
+            .
           </div>
 
           <div className="grid items-stretch gap-4 md:grid-cols-3">
@@ -1291,7 +1289,67 @@ function WeekMealPlan() {
               </div>
             ))}
           </div>
+
+          {/* Ajout groupé des ingrédients : en fin de page, après toutes les recettes. */}
+          <div className="flex justify-center pt-1">
+            <button
+              type="button"
+              onClick={() => {
+                const all = recipes.flatMap((r) => selectedIngredients(r));
+                if (all.length === 0) {
+                  toast.error("Aucun ingrédient à ajouter.");
+                  return;
+                }
+                addToList.mutate(all);
+              }}
+              disabled={addToList.isPending}
+              className="btn-primary"
+            >
+              Ajouter les ingrédients à la liste de course
+            </button>
+          </div>
         </>
+      )}
+
+      {/* Bouton flottant d'ouverture des paramètres (mobile uniquement). */}
+      <button
+        type="button"
+        onClick={() => setParamsOpen(true)}
+        aria-label="Générer des repas"
+        className="btn-primary fixed bottom-6 right-6 z-30 flex h-14 w-14 items-center justify-center rounded-full p-0 shadow-lg md:hidden"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          className="h-6 w-6"
+          aria-hidden="true"
+        >
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      </button>
+
+      {paramsOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center"
+          onClick={() => setParamsOpen(false)}
+        >
+          <div className="card my-4 w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-lg font-bold">Générer des repas</h2>
+              <button
+                onClick={() => setParamsOpen(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex flex-wrap items-end gap-3">{paramFields}</div>
+            <div className="mt-4 flex justify-end">{generateButton}</div>
+          </div>
+        </div>
       )}
 
       {modal &&

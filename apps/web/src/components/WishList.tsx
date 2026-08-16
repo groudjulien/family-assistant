@@ -14,6 +14,7 @@ import { useMe } from "../auth";
 import { MemberAvatar } from "./MemberAvatar";
 import { api } from "../lib/api";
 import { dateFr, todayIso } from "../lib/format";
+import { useLastView } from "../lib/lastView";
 
 /* ---------------- Briques d'affichage ---------------- */
 
@@ -188,7 +189,14 @@ export default function WishList() {
   const ownerLabels = wishOwnerLabels(useMe().household.members);
   const navigate = useNavigate();
   const { view } = useParams();
-  const statut: "afaire" | "fait" = view === "fait" ? "fait" : "afaire";
+  // Sous-menu de niveau 2 (/listes/wishlist/<vue>) : mémorisé d'une visite à l'autre.
+  const statut = useLastView(
+    "listes:wishlist",
+    ["afaire", "fait"],
+    "afaire",
+    view,
+    "/listes/wishlist",
+  ) as "afaire" | "fait";
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState<{ item: Wish | null; owner: WishOwner } | null>(null);
 
@@ -221,7 +229,7 @@ export default function WishList() {
         <span aria-hidden="true" />
         <PillToggle
           value={statut}
-          onChange={(v) => navigate(`/tools/wish/${v}`)}
+          onChange={(v) => navigate(`/listes/wishlist/${v}`)}
           items={[
             { value: "afaire", label: "À faire" },
             { value: "fait", label: "Fait" },

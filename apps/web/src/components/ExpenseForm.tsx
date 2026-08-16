@@ -15,6 +15,12 @@ export type ExpenseFormValues = {
   category?: string | null;
 };
 
+/**
+ * Clé de répartition : clé du foyer, moitié-moitié, ou 100 % à la charge d'un
+ * membre (achat avancé pour l'autre — la dépense part alors entièrement en dette).
+ */
+type SplitMode = "key" | "50" | "a" | "b";
+
 // Formulaire réutilisable de dépense partagée (équilibrage + dépenses de voyage).
 export function ExpenseFormModal({
   title,
@@ -48,7 +54,8 @@ export function ExpenseFormModal({
     label: initial?.label ?? "",
     amount: initial?.amount ?? 0,
     date: initial?.date ?? todayIso(),
-    split: "key" as "50" | "key",
+    // key = clé du foyer, 50 = moitié-moitié, a/b = 100 % à charge de ce membre
+    split: "key" as SplitMode,
     category: (initialCategory !== undefined ? initialCategory : defaultCategory) as string | null,
   });
   // Champs obligatoires manquants après une tentative d'envoi (bordure rouge).
@@ -63,7 +70,13 @@ export function ExpenseFormModal({
     }
     const cents = eurToCents(form.amount);
     const aShare =
-      form.split === "50" ? Math.round(cents / 2) : Math.round((cents * splitA) / 100);
+      form.split === "50"
+        ? Math.round(cents / 2)
+        : form.split === "a"
+          ? cents
+          : form.split === "b"
+            ? 0
+            : Math.round((cents * splitA) / 100);
     const bShare = cents - aShare;
     onSave({
       label: form.label,
@@ -170,10 +183,12 @@ export function ExpenseFormModal({
             Répartition
             <Select
               value={form.split}
-              onChange={(v) => setForm({ ...form, split: v as "50" | "key" })}
+              onChange={(v) => setForm({ ...form, split: v as SplitMode })}
               options={[
                 { value: "key", label: `Clé du foyer (${splitA}/${splitB})` },
                 { value: "50", label: "50 / 50" },
+                { value: "a", label: `100 % pour ${personMeta("a")?.name ?? "A"}` },
+                { value: "b", label: `100 % pour ${personMeta("b")?.name ?? "B"}` },
               ]}
             />
           </div>
