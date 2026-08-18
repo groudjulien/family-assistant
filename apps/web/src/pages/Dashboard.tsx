@@ -568,7 +568,7 @@ function TransitCard() {
               {secondary.map((m) => (
                 <span key={m.key} className="flex items-center gap-1">
                   <span
-                    className="flex h-5 min-w-5 items-center justify-center rounded px-1 text-[10px] font-bold text-white"
+                    className="flex h-5 min-w-5 items-center justify-center rounded px-1 text-2xs font-bold text-white"
                     style={{ backgroundColor: m.color }}
                   >
                     {m.key}

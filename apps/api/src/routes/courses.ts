@@ -11,9 +11,13 @@ import {
   bulkImportRecipesSchema,
   updateRecipeSchema,
   updateExcludedIngredientsSchema,
+  categoryFor,
   generateIdeasSchema,
   generateMealPlanSchema,
   replaceMealPlanRecipeSchema,
+  addMealPlanRecipeSchema,
+  mealPlanRecipeSchema,
+  setMealCookedSchema,
 } from "@gfa/shared";
 import { shoppingItem, shoppingFavorite, recipe, recipeIdea, mealPlan, household } from "../db/schema";
 import { callClaude, resolveAnthropicKey } from "../lib/anthropic";
@@ -26,8 +30,12 @@ const courses = new Hono<AppContext>();
 
 /* ---------------- Liste à acheter ---------------- */
 
-// Ajoute un article ; si un article de même nom existe déjà, incrémente sa quantité.
-async function addOrIncrement(db: Db, hid: string, rawName: string) {
+/**
+ * Ajoute un article ; si un article de même nom existe déjà, incrémente sa
+ * quantité. Le rayon est résolu ici plutôt que par l'appelant, pour que tous
+ * les chemins d'ajout (saisie, liste d'une recette, import) en aient un.
+ */
+async function addOrIncrement(db: Db, hid: string, rawName: string, category?: string | null) {
   const name = rawName.trim();
   if (!name) return;
   const existing = await db
@@ -50,6 +58,7 @@ async function addOrIncrement(db: Db, hid: string, rawName: string) {
       householdId: hid,
       name,
       quantity: 1,
+      category: category ?? categoryFor(name),
       createdAt: nowIso(),
     });
   }
@@ -68,7 +77,7 @@ courses.get("/items", async (c) => {
 courses.post("/items", async (c) => {
   const db = c.get("db");
   const body = await parseBody(c, createShoppingItemSchema);
-  await addOrIncrement(db, c.get("household").id, body.name);
+  await addOrIncrement(db, c.get("household").id, body.name, body.category);
   return c.json({ ok: true }, 201);
 });
 
@@ -76,11 +85,18 @@ courses.patch("/items/:id", async (c) => {
   const db = c.get("db");
   const id = c.req.param("id");
   const body = await parseBody(c, updateShoppingItemSchema);
-  if (body.quantity <= 0) {
+  // Quantité à zéro = article acheté : la ligne disparaît de la liste.
+  if (body.quantity !== undefined && body.quantity <= 0) {
     await db.delete(shoppingItem).where(eq(shoppingItem.id, id));
-  } else {
-    await db.update(shoppingItem).set({ quantity: body.quantity }).where(eq(shoppingItem.id, id));
+    return c.json({ ok: true });
   }
+  await db
+    .update(shoppingItem)
+    .set({
+      ...(body.quantity !== undefined && { quantity: body.quantity }),
+      ...(body.category !== undefined && { category: body.category }),
+    })
+    .where(eq(shoppingItem.id, id));
   return c.json({ ok: true });
 });
 
@@ -510,11 +526,85 @@ courses.get("/meal-plan", async (c) => {
     maxPrepMinutes: plan.maxPrepMinutes,
     maxTotalMinutes: plan.maxTotalMinutes,
     createdAt: plan.createdAt,
+    cooked: parseCooked(plan.cooked),
     recipes: ids
       .map((id) => byId.get(id))
       .filter((r): r is RecipeRow => r !== undefined)
       .map(mapRecipeRow),
   });
+});
+
+/** Parse défensif de la colonne `cooked` → { recipeId: date ISO }. */
+function parseCooked(raw: string | null): Record<string, string> {
+  if (!raw) return {};
+  try {
+    const v = JSON.parse(raw);
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const out: Record<string, string> = {};
+      for (const [k, d] of Object.entries(v)) if (typeof d === "string") out[k] = d;
+      return out;
+    }
+  } catch {
+    /* colonne illisible : on repart d'un menu vierge de cases cochées */
+  }
+  return {};
+}
+
+/** Charge le menu du foyer, ou `null` s'il n'y en a pas encore. */
+async function loadPlan(db: Db, hid: string) {
+  const rows = await db.select().from(mealPlan).where(eq(mealPlan.householdId, hid)).limit(1);
+  return rows[0] ?? null;
+}
+
+/** Coche (ou décoche) un repas du menu comme cuisiné. */
+courses.post("/meal-plan/cooked", async (c) => {
+  const db = c.get("db");
+  const hid = c.get("household").id;
+  const body = await parseBody(c, setMealCookedSchema);
+  const plan = await loadPlan(db, hid);
+  if (!plan) return c.json({ error: "no_plan" }, 404);
+  const cooked = parseCooked(plan.cooked);
+  if (body.done) cooked[body.recipeId] = nowIso();
+  else delete cooked[body.recipeId];
+  await db
+    .update(mealPlan)
+    .set({ cooked: JSON.stringify(cooked) })
+    .where(eq(mealPlan.id, plan.id));
+  return c.json({ ok: true });
+});
+
+/** Retire un repas du menu (il redevient piochable). */
+courses.post("/meal-plan/remove", async (c) => {
+  const db = c.get("db");
+  const hid = c.get("household").id;
+  const body = await parseBody(c, mealPlanRecipeSchema);
+  const plan = await loadPlan(db, hid);
+  if (!plan) return c.json({ error: "no_plan" }, 404);
+  const ids: string[] = safeArray(plan.recipeIds).filter((id) => id !== body.recipeId);
+  const cooked = parseCooked(plan.cooked);
+  delete cooked[body.recipeId];
+  await db
+    .update(mealPlan)
+    .set({ recipeIds: JSON.stringify(ids), cooked: JSON.stringify(cooked), count: ids.length })
+    .where(eq(mealPlan.id, plan.id));
+  return c.json({ ok: true });
+});
+
+/** Remonte un repas en tête du menu (l'ordre est celui où l'on cuisine). */
+courses.post("/meal-plan/move-top", async (c) => {
+  const db = c.get("db");
+  const hid = c.get("household").id;
+  const body = await parseBody(c, mealPlanRecipeSchema);
+  const plan = await loadPlan(db, hid);
+  if (!plan) return c.json({ error: "no_plan" }, 404);
+  const ids: string[] = safeArray(plan.recipeIds);
+  if (!ids.includes(body.recipeId)) return c.json({ error: "not_in_plan" }, 404);
+  const next = [body.recipeId, ...ids.filter((id) => id !== body.recipeId)];
+  await db
+    .update(mealPlan)
+    .set({ recipeIds: JSON.stringify(next) })
+    .where(eq(mealPlan.id, plan.id));
+  return c.json({ ok: true });
 });
 
 // Génère (ou regénère) le plan de la semaine et le fige pour tout le foyer.
@@ -524,24 +614,84 @@ courses.post("/meal-plan/generate", async (c) => {
   const body = await parseBody(c, generateMealPlanSchema);
 
   const rows = await db.select().from(recipe).where(eq(recipe.householdId, hid));
-  const candidates = planCandidates(rows, body.maxPrepMinutes ?? null, body.maxTotalMinutes ?? null);
-  if (candidates.length === 0) return c.json({ error: "no_candidates" }, 422);
+  const existing = await loadPlan(db, hid);
 
-  const picked = pickVaried(candidates, body.count);
-  const existing = await db.select().from(mealPlan).where(eq(mealPlan.householdId, hid)).limit(1);
+  // Régénérer garde les repas déjà cuisinés : ils restent en tête du menu et
+  // sortent du vivier, pour ne pas être reproposés la semaine suivante.
+  const cooked = existing ? parseCooked(existing.cooked) : {};
+  const keptIds = existing
+    ? safeArray(existing.recipeIds).filter((id: string) => cooked[id])
+    : [];
+  const kept = keptIds
+    .map((id) => rows.find((r) => r.id === id))
+    .filter((r): r is RecipeRow => r !== undefined);
+
+  const candidates = planCandidates(
+    rows.filter((r) => !cooked[r.id]),
+    body.maxPrepMinutes ?? null,
+    body.maxTotalMinutes ?? null,
+  );
+  if (candidates.length === 0 && kept.length === 0) return c.json({ error: "no_candidates" }, 422);
+
+  const picked = pickVaried(candidates, Math.max(0, body.count - kept.length));
   const values = {
-    recipeIds: JSON.stringify(picked.map((r) => r.id)),
+    recipeIds: JSON.stringify([...kept.map((r) => r.id), ...picked.map((r) => r.id)]),
+    cooked: JSON.stringify(Object.fromEntries(kept.map((r) => [r.id, cooked[r.id]]))),
     count: body.count,
     maxPrepMinutes: body.maxPrepMinutes ?? null,
     maxTotalMinutes: body.maxTotalMinutes ?? null,
     createdAt: nowIso(),
   };
-  if (existing[0]) {
-    await db.update(mealPlan).set(values).where(eq(mealPlan.id, existing[0].id));
+  if (existing) {
+    await db.update(mealPlan).set(values).where(eq(mealPlan.id, existing.id));
   } else {
     await db.insert(mealPlan).values({ id: newId(), householdId: hid, ...values });
   }
   return c.json({ ok: true, picked: picked.length, requested: body.count }, 201);
+});
+
+/**
+ * Ajoute une recette au menu de la semaine (« Cuisiner ce soir » depuis une
+ * recette). Crée le plan s'il n'existe pas encore, et ne double pas une recette
+ * déjà présente — l'appel doit rester idempotent, on peut toucher deux fois.
+ */
+courses.post("/meal-plan/add", async (c) => {
+  const db = c.get("db");
+  const hid = c.get("household").id;
+  const body = await parseBody(c, addMealPlanRecipeSchema);
+
+  const exists = (
+    await db
+      .select({ id: recipe.id })
+      .from(recipe)
+      .where(and(eq(recipe.householdId, hid), eq(recipe.id, body.recipeId)))
+      .limit(1)
+  )[0];
+  if (!exists) return c.json({ error: "not_found" }, 404);
+
+  const rows = await db.select().from(mealPlan).where(eq(mealPlan.householdId, hid)).limit(1);
+  const plan = rows[0];
+  if (!plan) {
+    await db.insert(mealPlan).values({
+      id: newId(),
+      householdId: hid,
+      recipeIds: JSON.stringify([body.recipeId]),
+      count: 1,
+      maxPrepMinutes: null,
+      maxTotalMinutes: null,
+      createdAt: nowIso(),
+    });
+    return c.json({ ok: true, added: true }, 201);
+  }
+
+  const ids: string[] = safeArray(plan.recipeIds);
+  if (ids.includes(body.recipeId)) return c.json({ ok: true, added: false });
+  ids.push(body.recipeId);
+  await db
+    .update(mealPlan)
+    .set({ recipeIds: JSON.stringify(ids), count: ids.length })
+    .where(eq(mealPlan.id, plan.id));
+  return c.json({ ok: true, added: true });
 });
 
 // Remplace UNE recette du plan par une autre (variée par rapport au reste du plan).
@@ -559,6 +709,17 @@ courses.post("/meal-plan/replace", async (c) => {
 
   const recipes = await db.select().from(recipe).where(eq(recipe.householdId, hid));
   const byId = new Map(recipes.map((r) => [r.id, r]));
+
+  // Remplacement choisi à la main : on le prend tel quel, sans contrainte de
+  // variété — c'est un choix explicite, pas un tirage.
+  if (body.withRecipeId) {
+    if (!byId.has(body.withRecipeId)) return c.json({ error: "not_found" }, 404);
+    if (ids.includes(body.withRecipeId)) return c.json({ error: "already_in_plan" }, 409);
+    ids[idx] = body.withRecipeId;
+    await db.update(mealPlan).set({ recipeIds: JSON.stringify(ids) }).where(eq(mealPlan.id, plan.id));
+    return c.json({ ok: true, id: body.withRecipeId });
+  }
+
   const candidates = planCandidates(recipes, plan.maxPrepMinutes, plan.maxTotalMinutes).filter(
     (r) => !ids.includes(r.id),
   );

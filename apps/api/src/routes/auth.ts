@@ -140,6 +140,18 @@ auth.get("/me", requireAuth, (c) => {
     // Préférence utilisateur, sinon défaut du foyer (défini par le wizard).
     menuOrder: parseStringArray(u.menuOrder) ?? parseStringArray(h.defaultMenuOrder),
     menuHidden: parseStringArray(u.menuHidden) ?? parseStringArray(h.defaultMenuHidden),
+    // { "sep:<id>": "Au quotidien" } — parsé défensivement (colonne TEXT libre).
+    menuGroups: (() => {
+      try {
+        const v = u.menuGroups ? JSON.parse(u.menuGroups) : null;
+        if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+        const out: Record<string, string> = {};
+        for (const [k, name] of Object.entries(v)) if (typeof name === "string") out[k] = name;
+        return out;
+      } catch {
+        return null;
+      }
+    })(),
     widgetPrefs: (() => {
       try {
         const v = u.widgetPrefs ? JSON.parse(u.widgetPrefs) : null;
@@ -158,6 +170,15 @@ auth.get("/me", requireAuth, (c) => {
       try {
         const v = h.expenseCategories ? JSON.parse(h.expenseCategories) : null;
         return Array.isArray(v) ? v : null;
+      } catch {
+        return null;
+      }
+    })(),
+    // Rayons de la liste de courses ; null = DEFAULT_SHOPPING_CATEGORIES.
+    shoppingCategories: (() => {
+      try {
+        const v = h.shoppingCategories ? JSON.parse(h.shoppingCategories) : null;
+        return Array.isArray(v) && v.length > 0 ? v : null;
       } catch {
         return null;
       }
@@ -208,6 +229,7 @@ auth.get("/me", requireAuth, (c) => {
           return WEDDING_DAYS_DEFAULT;
         }
       })(),
+      weddingTargetDate: h.weddingTargetDate,
     },
   });
 });

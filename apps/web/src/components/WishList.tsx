@@ -9,9 +9,10 @@ import {
   WISH_FEASIBILITY_META,
   WISH_ICONS,
 } from "@gfa/shared";
-import { Input, DateInput, PillToggle } from "./ui";
+import { Input, DateInput, FilterChips, MobileActionBar, SearchField } from "./ui";
 import { useMe } from "../auth";
 import { MemberAvatar } from "./MemberAvatar";
+import { usePageHeader } from "./PageHeader";
 import { api } from "../lib/api";
 import { dateFr, todayIso } from "../lib/format";
 import { useLastView } from "../lib/lastView";
@@ -43,20 +44,10 @@ export function WishAvatar({
 }
 
 const FEASIBILITY_TONE: Record<WishFeasibility, string> = {
-  easy: "bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-300",
-  doable: "bg-orange-100 text-orange-700 dark:bg-orange-500/15 dark:text-orange-300",
-  hard: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+  easy: "bg-brand-100 text-brand-700",
+  doable: "bg-warning-soft text-warning",
+  hard: "bg-danger-soft text-danger",
 };
-
-function FeasibilityTag({ value }: { value: WishFeasibility }) {
-  return (
-    <span
-      className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase ${FEASIBILITY_TONE[value]}`}
-    >
-      {WISH_FEASIBILITY_META[value].label}
-    </span>
-  );
-}
 
 function LinkIcon() {
   return (
@@ -64,10 +55,10 @@ function LinkIcon() {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="2"
+      strokeWidth="1.85"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="h-3.5 w-3.5"
+      className="h-4 w-4"
     >
       <path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4.93" />
       <path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07L13 19.07" />
@@ -75,114 +66,141 @@ function LinkIcon() {
   );
 }
 
-/** Étoile de mise en avant : contour transparent, pleine et jaune quand cochée. */
+/**
+ * Étoile de priorité. C'est le seul ambre de la page, et il porte une
+ * information : ce souhait passe avant les autres.
+ */
 function StarToggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   return (
     <button
       type="button"
-      onClick={onToggle}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
       aria-pressed={on}
-      title={on ? "Retirer de la mise en avant" : "Mettre en avant"}
-      className={`shrink-0 transition ${
-        on ? "text-yellow-400" : "text-slate-300 hover:text-yellow-400 dark:text-slate-600"
+      title={on ? "Retirer des priorités" : "Mettre en priorité"}
+      className={`flex h-tap w-tap shrink-0 items-center justify-center transition ${
+        on ? "text-warning" : "text-ink-3 hover:text-warning"
       }`}
     >
       <svg
         viewBox="0 0 24 24"
         fill={on ? "currentColor" : "none"}
         stroke="currentColor"
-        strokeWidth="2"
+        strokeWidth="1.85"
         strokeLinecap="round"
         strokeLinejoin="round"
-        className="h-4 w-4"
+        className="h-[22px] w-[22px]"
       >
-        <path d="M12 3l2.7 5.7 6.3.9-4.5 4.4 1 6.2-5.5-2.9-5.5 2.9 1-6.2L3 9.6l6.3-.9z" />
+        <path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.9L12 17l-5.2 2.8 1-5.9L3.5 9.8l5.9-.9z" />
       </svg>
     </button>
   );
 }
 
-/** Ligne d'un souhait : icône + nom + tag, puis les détails renseignés. */
+/**
+ * Ligne d'un souhait : tuile emoji, nom, ligne de contexte, étoile.
+ *
+ * Toute la ligne ouvre l'édition — l'étoile est le seul autre point cliquable,
+ * et elle arrête la propagation. Deux cibles par ligne, pas cinq.
+ */
 function WishRow({
   item,
+  ownerLabel,
   onEdit,
   onToggleStar,
-  showOwner = false,
+  last,
 }: {
   item: Wish;
+  /** Affiché dans la ligne de contexte quand la vue mélange les propriétaires. */
+  ownerLabel?: string;
   onEdit: () => void;
   onToggleStar: () => void;
-  showOwner?: boolean;
+  last: boolean;
 }) {
-  const details = [
-    item.address && { key: "address", text: `📍 ${item.address}` },
-    item.date && { key: "date", text: `📅 ${dateFr(item.date)}` },
-  ].filter(Boolean) as { key: string; text: string }[];
+  const meta = [
+    ownerLabel,
+    item.feasibility ? WISH_FEASIBILITY_META[item.feasibility].label : null,
+    item.address,
+    item.date ? dateFr(item.date) : null,
+    item.doneAt ? `Réalisé le ${dateFr(item.doneAt)}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
-    // Mobile : pas de crayon (pas de survol) — l'édition se fait au double clic.
-    <li
-      onDoubleClick={onEdit}
-      className="group flex items-start gap-2 border-t border-slate-100 py-2 first:border-t-0 dark:border-slate-800"
-    >
-      {showOwner ? (
-        <WishAvatar owner={item.owner} className="mt-0.5 h-6 w-6 text-xs" />
-      ) : (
-        <span className="mt-0.5 w-6 shrink-0 text-center text-base leading-none" aria-hidden="true">
-          {item.icon ?? "•"}
+    <div className={`flex min-h-[60px] items-center gap-3 ${last ? "" : "border-b border-hairline"}`}>
+      <button
+        type="button"
+        onClick={onEdit}
+        className="flex min-w-0 flex-1 items-center gap-3 py-2 text-left"
+      >
+        <span
+          aria-hidden="true"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-lg"
+        >
+          {item.icon ?? "⭐"}
         </span>
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {showOwner && item.icon && (
-            <span aria-hidden="true" className="text-base leading-none">
-              {item.icon}
+        <span className="min-w-0 flex-1">
+          <span className={`block font-medium ${item.doneAt ? "text-ink-2" : ""}`}>{item.name}</span>
+          {(meta || item.description) && (
+            <span className="mt-0.5 block truncate text-xs text-ink-2">
+              {meta || item.description}
             </span>
           )}
-          <span className={`font-medium ${item.doneAt ? "text-slate-500 dark:text-slate-400" : ""}`}>
-            {item.name}
-          </span>
-          {/* Ordinateur : crayon juste après le nom, au survol de la ligne. */}
-          <button
-            type="button"
-            onClick={onEdit}
-            title="Modifier"
-            aria-label={`Modifier ${item.name}`}
-            className="hidden shrink-0 text-slate-400 transition hover:text-brand-600 md:inline-block md:opacity-0 md:group-hover:opacity-100"
-          >
-            ✎
-          </button>
-          {item.feasibility && <FeasibilityTag value={item.feasibility} />}
-          {item.url && (
-            <a
-              href={item.url}
-              target="_blank"
-              rel="noreferrer"
-              title={item.url}
-              className="text-slate-400 transition hover:text-brand-600"
-            >
-              <LinkIcon />
-            </a>
-          )}
-        </div>
-        {item.description && (
-          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{item.description}</p>
-        )}
-        {(details.length > 0 || item.doneAt) && (
-          <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-slate-400">
-            {details.map((d) => (
-              <span key={d.key}>{d.text}</span>
-            ))}
-            {item.doneAt && <span className="text-brand-600">✓ Réalisé le {dateFr(item.doneAt)}</span>}
-          </div>
-        )}
-      </div>
+        </span>
+      </button>
+      {item.url && (
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noreferrer"
+          title={item.url}
+          onClick={(e) => e.stopPropagation()}
+          aria-label={`Ouvrir le lien de ${item.name}`}
+          className="flex h-tap w-8 shrink-0 items-center justify-center text-ink-3 transition hover:text-brand-600"
+        >
+          <LinkIcon />
+        </a>
+      )}
       <StarToggle on={item.starred} onToggle={onToggleStar} />
-    </li>
+    </div>
+  );
+}
+
+/** Section titrée + carte à filets. */
+function WishSection({
+  title,
+  count,
+  starred,
+  children,
+}: {
+  title: string;
+  count?: number;
+  starred?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-1.5 px-0.5">
+        {starred && (
+          <svg viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5 text-warning" aria-hidden="true">
+            <path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.9L12 17l-5.2 2.8 1-5.9L3.5 9.8l5.9-.9z" />
+          </svg>
+        )}
+        <div className="eyebrow">{title}</div>
+        {count !== undefined && <div className="eyebrow">· {count}</div>}
+      </div>
+      <div className="card px-4 py-0">{children}</div>
+    </div>
   );
 }
 
 /* ---------------- Page ---------------- */
+
+/** Vues de la WishList : « tous » puis un onglet par propriétaire. */
+const WISH_VIEWS = ["tous", ...WISH_OWNERS] as const;
 
 export default function WishList() {
   const qc = useQueryClient();
@@ -190,14 +208,15 @@ export default function WishList() {
   const navigate = useNavigate();
   const { view } = useParams();
   // Sous-menu de niveau 2 (/listes/wishlist/<vue>) : mémorisé d'une visite à l'autre.
-  const statut = useLastView(
+  const owner = useLastView(
     "listes:wishlist",
-    ["afaire", "fait"],
-    "afaire",
+    WISH_VIEWS,
+    "tous",
     view,
     "/listes/wishlist",
-  ) as "afaire" | "fait";
+  ) as (typeof WISH_VIEWS)[number];
   const [search, setSearch] = useState("");
+  const [showDone, setShowDone] = useState(false);
   const [modal, setModal] = useState<{ item: Wish | null; owner: WishOwner } | null>(null);
 
   const { data: wishes } = useQuery({
@@ -210,108 +229,121 @@ export default function WishList() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["wishes"] }),
   });
 
-  const q = search.trim().toLowerCase();
-  const matches = (w: Wish) => !q || w.name.toLowerCase().includes(q);
-  // Les souhaits mis en avant (⭐) remontent en tête de leur liste.
-  const starredFirst = (a: Wish, b: Wish) => Number(b.starred) - Number(a.starred);
   const all = wishes ?? [];
-  const todo = all.filter((w) => !w.doneAt && matches(w)).sort(starredFirst);
-  const done = all
-    .filter((w) => w.doneAt && matches(w))
-    .sort((a, b) => starredFirst(a, b) || (b.doneAt ?? "").localeCompare(a.doneAt ?? ""));
+  // L'en-tête compte tout le foyer : c'est un état des lieux, pas le filtre en cours.
+  const totalTodo = all.filter((w) => !w.doneAt).length;
+  const totalDone = all.length - totalTodo;
+  usePageHeader(
+    "WishList",
+    `${totalTodo} à réaliser · ${totalDone} faite${totalDone > 1 ? "s" : ""}`,
+  );
+
+  const q = search.trim().toLowerCase();
+  const visible = all.filter(
+    (w) =>
+      (owner === "tous" || w.owner === owner) &&
+      (!q || w.name.toLowerCase().includes(q) || (w.description ?? "").toLowerCase().includes(q)),
+  );
+  const priorities = visible.filter((w) => !w.doneAt && w.starred);
+  const rest = visible.filter((w) => !w.doneAt && !w.starred);
+  const done = visible
+    .filter((w) => w.doneAt)
+    .sort((a, b) => (b.doneAt ?? "").localeCompare(a.doneAt ?? ""));
+
+  // Le propriétaire n'est rappelé dans la ligne que si la vue les mélange.
+  const labelOf = (w: Wish) => (owner === "tous" ? ownerLabels[w.owner] : undefined);
+  const rowsOf = (items: Wish[]) =>
+    items.map((w, i) => (
+      <WishRow
+        key={w.id}
+        item={w}
+        ownerLabel={labelOf(w)}
+        onEdit={() => setModal({ item: w, owner: w.owner })}
+        onToggleStar={() => toggleStar.mutate(w)}
+        last={i === items.length - 1}
+      />
+    ));
 
   return (
-    <div className="flex flex-col gap-4 pb-24 md:pb-0">
-      {/* Sous-menus À faire / Fait — une URL par vue */}
-      {/* Grille 1fr/auto/1fr : la bascule reste centrée dans la page malgré le
-          bouton d'action à droite (et sans risque de chevauchement). */}
-      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-        <span aria-hidden="true" />
-        <PillToggle
-          value={statut}
+    <div className="flex flex-col gap-4 pb-28 md:pb-0">
+      <div className="flex items-center gap-2">
+        <FilterChips
+          value={owner}
           onChange={(v) => navigate(`/listes/wishlist/${v}`)}
           items={[
-            { value: "afaire", label: "À faire" },
-            { value: "fait", label: "Fait" },
+            { value: "tous", label: "Tous" },
+            ...WISH_OWNERS.map((o) => ({ value: o, label: ownerLabels[o] })),
           ]}
+          className="min-w-0 flex-1"
         />
-        {/* Ordinateur : bouton en haut. Mobile : bouton flottant en bas à droite. */}
-        <div className="flex justify-end">
-          <button
-            onClick={() => setModal({ item: null, owner: "commun" })}
-            className="btn-primary hidden md:inline-flex"
-          >
-            + Créer un souhait
-          </button>
-        </div>
+        {/* Ordinateur : bouton ici. Mobile : barre d'action en bas. */}
+        <button
+          onClick={() => setModal({ item: null, owner: owner === "tous" ? "commun" : owner })}
+          className="btn-primary hidden shrink-0 md:inline-flex"
+        >
+          + Créer un souhait
+        </button>
       </div>
 
-      <input
-        type="search"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Rechercher un souhait…"
-        className="input"
-      />
+      <SearchField value={search} onChange={setSearch} placeholder="Chercher un souhait…" />
 
-      {statut === "afaire" ? (
-        WISH_OWNERS.map((owner) => {
-          const items = todo.filter((w) => w.owner === owner);
-          return (
-            <div key={owner} className="card">
-              <div className="mb-1 flex items-center gap-2">
-                <WishAvatar owner={owner} />
-                <div className="text-sm font-semibold">{ownerLabels[owner]}</div>
-                <span className="text-xs text-slate-400">{items.length}</span>
-                <button
-                  onClick={() => setModal({ item: null, owner })}
-                  title={`Ajouter un souhait — ${ownerLabels[owner]}`}
-                  className="btn-primary ml-auto hidden px-2.5 py-1 text-xs md:inline-flex"
-                >
-                  + Ajouter
-                </button>
-              </div>
-              {items.length === 0 ? (
-                <div className="text-sm text-slate-400">
-                  {q ? "Aucun souhait ne correspond." : "Aucun souhait pour l'instant."}
-                </div>
-              ) : (
-                <ul>
-                  {items.map((w) => (
-                    <WishRow
-                      key={w.id}
-                      item={w}
-                      onEdit={() => setModal({ item: w, owner: w.owner })}
-                      onToggleStar={() => toggleStar.mutate(w)}
-                    />
-                  ))}
-                </ul>
-              )}
-            </div>
-          );
-        })
-      ) : (
-        <div className="card">
-          <div className="mb-1 text-sm font-semibold">Souhaits réalisés</div>
-          {done.length === 0 ? (
-            <div className="text-sm text-slate-400">
-              {q ? "Aucun souhait réalisé ne correspond." : "Rien de réalisé pour l'instant."}
-            </div>
-          ) : (
-            <ul>
-              {done.map((w) => (
-                <WishRow
-                  key={w.id}
-                  item={w}
-                  showOwner
-                  onEdit={() => setModal({ item: w, owner: w.owner })}
-                  onToggleStar={() => toggleStar.mutate(w)}
-                />
-              ))}
-            </ul>
+      {priorities.length > 0 && (
+        <WishSection title="Priorités" starred>
+          {rowsOf(priorities)}
+        </WishSection>
+      )}
+
+      {rest.length > 0 && (
+        <WishSection title={priorities.length > 0 ? "Tout le reste" : "À réaliser"} count={rest.length}>
+          {rowsOf(rest)}
+        </WishSection>
+      )}
+
+      {priorities.length === 0 && rest.length === 0 && (
+        <div className="card text-center">
+          <div className="font-semibold">
+            {q ? "Aucun souhait ne correspond." : "Aucun souhait pour l'instant."}
+          </div>
+          {!q && (
+            <button
+              onClick={() => setModal({ item: null, owner: owner === "tous" ? "commun" : owner })}
+              className="btn-primary mt-3"
+            >
+              Ajouter le premier
+            </button>
           )}
         </div>
       )}
+
+      {done.length > 0 && (
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowDone((v) => !v)}
+            aria-expanded={showDone}
+            className="mb-2 flex min-h-tap w-full items-center gap-1.5 px-0.5"
+          >
+            <span className="eyebrow">Réalisés · {done.length}</span>
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.85"
+              strokeLinecap="round"
+              className={`h-4 w-4 text-ink-3 transition ${showDone ? "rotate-180" : ""}`}
+              aria-hidden="true"
+            >
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </button>
+          {showDone && <div className="card px-4 py-0">{rowsOf(done)}</div>}
+        </div>
+      )}
+
+      <MobileActionBar
+        label="Nouveau souhait"
+        onClick={() => setModal({ item: null, owner: owner === "tous" ? "commun" : owner })}
+      />
 
       {modal && (
         <WishModal
@@ -325,26 +357,6 @@ export default function WishList() {
           }}
         />
       )}
-
-      {/* Bouton flottant de création (mobile uniquement) */}
-      <button
-        type="button"
-        onClick={() => setModal({ item: null, owner: "commun" })}
-        aria-label="Créer un souhait"
-        className="btn-primary fixed bottom-6 right-6 z-30 flex h-14 w-14 items-center justify-center rounded-full p-0 shadow-lg md:hidden"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          className="h-6 w-6"
-          aria-hidden="true"
-        >
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </button>
     </div>
   );
 }
@@ -413,13 +425,13 @@ function WishModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center"
       onClick={onClose}
     >
       <div className="card max-h-[85vh] w-full max-w-md overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-lg font-bold">{isEdit ? "Modifier le souhait" : "Nouveau souhait"}</h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+          <h2 className="text-lg font-semibold">{isEdit ? "Modifier le souhait" : "Nouveau souhait"}</h2>
+          <button onClick={onClose} className="text-ink-2 hover:text-ink">
             ✕
           </button>
         </div>
@@ -432,7 +444,7 @@ function WishModal({
         >
           {/* Pour qui : avatars des membres + « famille » pour un souhait commun */}
           <div>
-            <div className="mb-1 text-xs text-slate-400">Pour qui ?</div>
+            <div className="mb-1 text-xs text-ink-2">Pour qui ?</div>
             <div className="flex gap-2">
               {WISH_OWNERS.map((o) => (
                 <button
@@ -443,7 +455,7 @@ function WishModal({
                   className={`flex flex-1 items-center justify-center gap-2 rounded-xl border px-2 py-2 text-sm transition ${
                     form.owner === o
                       ? "border-brand-500 text-brand-700 ring-1 ring-brand-500 dark:text-brand-100"
-                      : "border-slate-300 text-slate-500 hover:border-brand-400 dark:border-slate-700 dark:text-slate-300"
+                      : "border-line text-ink-2 hover:border-brand-400"
                   }`}
                 >
                   <WishAvatar owner={o} className="h-7 w-7 text-sm" />
@@ -462,13 +474,13 @@ function WishModal({
 
           {/* Icône (optionnelle) */}
           <div>
-            <div className="mb-1 text-xs text-slate-400">Icône (optionnel)</div>
-            <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto rounded-xl border border-slate-200 p-2 dark:border-slate-700">
+            <div className="mb-1 text-xs text-ink-2">Icône (optionnel)</div>
+            <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto rounded-xl border border-line p-2">
               <button
                 type="button"
                 onClick={() => setForm({ ...form, icon: "" })}
                 title="Aucune icône"
-                className={`h-8 w-8 rounded-lg text-xs text-slate-400 transition hover:bg-slate-100 dark:hover:bg-slate-800 ${
+                className={`h-8 w-8 rounded-lg text-xs text-ink-2 transition hover:bg-surface-2 ${
                   form.icon === "" ? "bg-brand-100 dark:bg-brand-500/20" : ""
                 }`}
               >
@@ -480,7 +492,7 @@ function WishModal({
                   type="button"
                   onClick={() => setForm({ ...form, icon: ic })}
                   aria-pressed={form.icon === ic}
-                  className={`h-8 w-8 rounded-lg text-base transition hover:bg-slate-100 dark:hover:bg-slate-800 ${
+                  className={`h-8 w-8 rounded-lg text-base transition hover:bg-surface-2 ${
                     form.icon === ic ? "bg-brand-100 dark:bg-brand-500/20" : ""
                   }`}
                 >
@@ -492,7 +504,7 @@ function WishModal({
 
           {/* Faisabilité */}
           <div>
-            <div className="mb-1 text-xs text-slate-400">Faisabilité (optionnel)</div>
+            <div className="mb-1 text-xs text-ink-2">Faisabilité (optionnel)</div>
             <div className="flex flex-wrap gap-2">
               {WISH_FEASIBILITIES.map((f) => (
                 <button
@@ -503,7 +515,7 @@ function WishModal({
                   className={`rounded-full px-3 py-1 text-xs transition ${
                     form.feasibility === f
                       ? `${FEASIBILITY_TONE[f]} ring-1 ring-brand-500`
-                      : "border border-slate-300 text-slate-500 hover:border-brand-400 dark:border-slate-700 dark:text-slate-300"
+                      : "border border-line text-ink-2 hover:border-brand-400"
                   }`}
                 >
                   {WISH_FEASIBILITY_META[f].label}
@@ -529,7 +541,7 @@ function WishModal({
             value={form.address}
             onChange={(e) => setForm({ ...form, address: e.target.value })}
           />
-          <label className="block text-xs text-slate-400">
+          <label className="block text-xs text-ink-2">
             Date (optionnel)
             <div className="mt-1">
               <DateInput value={form.date} onChange={(d) => setForm({ ...form, date: d })} />
@@ -550,9 +562,9 @@ function WishModal({
                     type="button"
                     onClick={() => setDone.mutate(null)}
                     disabled={pending}
-                    className="shrink-0 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:text-brand-700 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                    className="btn-ghost shrink-0 text-sm disabled:opacity-60"
                   >
-                    ↩︎ Remettre à faire
+                    Remettre à faire
                   </button>
                 ) : (
                   <button
@@ -575,7 +587,7 @@ function WishModal({
                 onClick={() => {
                   if (confirm(`Supprimer « ${item!.name} » ?`)) remove.mutate();
                 }}
-                className="mr-auto text-sm font-medium text-red-500 hover:text-red-600"
+                className="mr-auto text-sm font-medium text-danger"
               >
                 Supprimer
               </button>

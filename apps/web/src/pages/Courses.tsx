@@ -1,10 +1,19 @@
-import { useState, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { ShoppingItem, ShoppingFavorite } from "@gfa/shared";
+import {
+  DEFAULT_SHOPPING_CATEGORIES,
+  FALLBACK_SHOPPING_CATEGORY,
+  categoryFor,
+  iconFor,
+  searchProducts,
+  type ShoppingCategory,
+  type ShoppingItem,
+} from "@gfa/shared";
 import { api } from "../lib/api";
 import PageLoader from "../components/PageLoader";
-import { Input, Switch } from "../components/ui";
-import { searchProducts, iconFor } from "../lib/groceries";
+import { Input, MobileActionBar, Select, Switch } from "../components/ui";
+import { usePageHeader } from "../components/PageHeader";
+import { useMe } from "../auth";
 
 /**
  * Courses : uniquement la liste à acheter (un seul écran, donc pas de
@@ -15,72 +24,74 @@ export default function Courses() {
   return <ShoppingList />;
 }
 
-/* ---------------- À acheter (style Bring!) ---------------- */
-
 // Affichage : une majuscule au début de chaque mot (sans toucher au stockage).
 const titleCase = (s: string) =>
   s.replace(/(^|[\s\-'’])(\p{L})/gu, (_, sep, ch) => sep + ch.toUpperCase());
 
-// Formulaire d'ajout d'un article (réutilisé inline sur ordinateur et en modale
-// sur mobile). Gère sa propre saisie + suggestions ; se vide après ajout.
+/** Rayons du foyer (Réglages → Courses), sinon les rayons par défaut. */
+function useShoppingCategories(): ShoppingCategory[] {
+  const me = useMe();
+  return useMemo(
+    () => me.shoppingCategories ?? DEFAULT_SHOPPING_CATEGORIES.map((c) => ({ ...c })),
+    [me.shoppingCategories],
+  );
+}
+
+/**
+ * Formulaire d'ajout. Le rayon est pré-rempli dès que le produit est reconnu du
+ * catalogue ; sinon il reste sur le rayon de repli, et c'est à la saisie de le
+ * corriger — d'où le sélecteur toujours visible.
+ */
 function AddArticleForm({
   onAdd,
-  onFavorite,
   autoFocus,
 }: {
-  onAdd: (name: string) => void;
-  onFavorite: (name: string) => void;
+  onAdd: (name: string, category: string) => void;
   autoFocus?: boolean;
 }) {
+  const categories = useShoppingCategories();
   const [name, setName] = useState("");
+  const [category, setCategory] = useState<string | null>(null); // null = déduit du nom
   const suggestions = searchProducts(name);
-  const submit = (n: string) => {
-    if (n.trim()) {
-      onAdd(n.trim());
-      setName("");
-    }
+
+  /** Rayon du catalogue, ramené au repli s'il a été supprimé des réglages. */
+  const guessFor = (value: string) => {
+    const key = value.trim() ? categoryFor(value) : FALLBACK_SHOPPING_CATEGORY;
+    return categories.some((c) => c.key === key) ? key : FALLBACK_SHOPPING_CATEGORY;
   };
+  // Ce que montre le sélecteur : le choix explicite, sinon le rayon déduit.
+  const effective = category ?? guessFor(name);
+
+  const submit = (value: string, cat?: string) => {
+    const n = value.trim();
+    if (!n) return;
+    onAdd(n, cat ?? category ?? guessFor(n));
+    setName("");
+    setCategory(null);
+  };
+
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
         submit(name);
       }}
-      className="space-y-2"
+      className="space-y-3"
     >
-      <div className="flex gap-2">
-        <Input
-          autoFocus={autoFocus}
-          placeholder="Ajouter un article…"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <div className="flex shrink-0 gap-2">
-          <button className="btn-primary">Ajouter</button>
-          <button
-            type="button"
-            disabled={!name.trim()}
-            onClick={() => {
-              if (name.trim()) {
-                onFavorite(name.trim());
-                setName("");
-              }
-            }}
-            className="flex items-center rounded-xl border border-brand-600 bg-white px-3 text-brand-600 transition hover:bg-brand-600 hover:text-white disabled:opacity-40 dark:bg-slate-900"
-            title="Mettre en favoris"
-          >
-            ★
-          </button>
-        </div>
-      </div>
+      <Input
+        autoFocus={autoFocus}
+        placeholder="Ajouter un article…"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+      />
       {suggestions.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {suggestions.map((p) => (
             <button
               key={p.name}
               type="button"
-              onClick={() => submit(p.name)}
-              className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1 text-sm hover:border-brand-400 hover:bg-brand-50 dark:border-slate-700 dark:bg-slate-800"
+              onClick={() => submit(p.name, guessFor(p.name))}
+              className="flex min-h-tap items-center gap-1.5 rounded-full border border-line bg-surface px-3 text-sm hover:bg-surface-2"
             >
               <span>{p.emoji}</span>
               {p.name}
@@ -88,17 +99,94 @@ function AddArticleForm({
           ))}
         </div>
       )}
+      <div>
+        <div className="mb-1 text-xs text-ink-2">Rayon</div>
+        <Select
+          value={effective}
+          onChange={setCategory}
+          options={categories.map((c) => ({ value: c.key, label: c.name }))}
+        />
+      </div>
+      <button className="btn-primary w-full">Ajouter</button>
     </form>
   );
 }
 
+/* ---------------- Liste mobile, par rayon ---------------- */
+
+function AisleRow({
+  item,
+  pending,
+  onCheck,
+  onQty,
+  last,
+}: {
+  item: ShoppingItem;
+  /** Retrait en cours : la rangée s'estompe le temps de l'aller-retour réseau. */
+  pending: boolean;
+  onCheck: () => void;
+  onQty: (quantity: number) => void;
+  last: boolean;
+}) {
+  return (
+    <div
+      className={`flex min-h-16 items-center gap-3 ${last ? "" : "border-b border-hairline"} ${
+        pending ? "opacity-40" : ""
+      }`}
+    >
+      <button
+        type="button"
+        onClick={onCheck}
+        disabled={pending}
+        role="checkbox"
+        aria-checked={false}
+        aria-label={`${item.name} : pris`}
+        className="-ml-2 flex h-tap w-tap shrink-0 items-center justify-center"
+      >
+        <span className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-300 bg-white text-base leading-none transition dark:border-slate-600 dark:bg-slate-800" />
+      </button>
+      <span
+        aria-hidden="true"
+        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-xl"
+      >
+        {iconFor(item.name)}
+      </span>
+      {/* Pas de `truncate` : un nom long doit rester lisible en rayon, quitte à
+          passer sur deux lignes (la rangée grandit). */}
+      <span className="min-w-0 flex-1 py-2 font-medium">{titleCase(item.name)}</span>
+      <div className="flex shrink-0 items-center">
+        <button
+          type="button"
+          onClick={() => onQty(item.quantity - 1)}
+          aria-label="Diminuer la quantité"
+          className="flex h-tap w-10 items-center justify-center text-xl font-semibold text-ink-2"
+        >
+          −
+        </button>
+        <span className="min-w-6 text-center font-semibold">{item.quantity}</span>
+        <button
+          type="button"
+          onClick={() => onQty(item.quantity + 1)}
+          aria-label="Augmenter la quantité"
+          className="flex h-tap w-10 items-center justify-center text-xl font-semibold text-brand-600"
+        >
+          +
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Page ---------------- */
+
 function ShoppingList() {
   const qc = useQueryClient();
+  const categories = useShoppingCategories();
   const [addOpen, setAddOpen] = useState(false);
   /**
-   * Mode recette : on ajuste les quantités (moitié gauche = −, moitié droite = +)
-   * et une tuile ne se supprime plus au clic. Mode course (défaut) : l'inverse.
-   * Mémorisé d'une visite à l'autre.
+   * Mode recette (ordinateur) : on ajuste les quantités et une tuile ne se
+   * supprime plus au clic. Sans objet sur mobile, dont la liste porte déjà des
+   * boutons − / + permanents.
    */
   const [recipeMode, setRecipeMode] = useState(() => {
     try {
@@ -128,15 +216,11 @@ function ShoppingList() {
     queryFn: () => api.get<ShoppingItem[]>("/api/courses/items"),
   });
   const listLoading = !data;
-  const { data: favorites } = useQuery({
-    queryKey: ["shopping-favorites"],
-    queryFn: () => api.get<ShoppingFavorite[]>("/api/courses/favorites"),
-  });
   const invalidate = () => qc.invalidateQueries({ queryKey: ["shopping-items"] });
-  const invalidateFav = () => qc.invalidateQueries({ queryKey: ["shopping-favorites"] });
 
   const add = useMutation({
-    mutationFn: (n: string) => api.post("/api/courses/items", { name: n }),
+    mutationFn: ({ name, category }: { name: string; category: string }) =>
+      api.post("/api/courses/items", { name, category }),
     onSuccess: invalidate,
   });
   const setQty = useMutation({
@@ -178,166 +262,179 @@ function ShoppingList() {
     if (undo) restore.mutate(undo);
     clearUndo();
   };
-  const addFavorite = useMutation({
-    mutationFn: (n: string) => api.post("/api/courses/favorites", { name: n }),
-    onSuccess: invalidateFav,
-  });
-  const removeFavorite = useMutation({
-    mutationFn: (id: string) => api.del(`/api/courses/favorites/${id}`),
-    onSuccess: invalidateFav,
-  });
 
-  const sortedFavorites = [...(favorites ?? [])].sort((a, b) => a.name.localeCompare(b.name, "fr"));
+  const items = data ?? [];
+  const remaining = items.length;
+  usePageHeader(
+    "Courses",
+    remaining > 0 ? `Liste commune · ${remaining} article${remaining > 1 ? "s" : ""}` : "Liste commune",
+  );
+
+  // Un rayon inconnu (supprimé des réglages) retombe sur le rayon de repli.
+  const known = new Set(categories.map((c) => c.key));
+  const aisleOf = (it: ShoppingItem) =>
+    it.category && known.has(it.category) ? it.category : FALLBACK_SHOPPING_CATEGORY;
+  const aisles = categories
+    .map((c) => ({ ...c, items: items.filter((it) => aisleOf(it) === c.key) }))
+    .filter((a) => a.items.length > 0);
 
   if (listLoading) return <PageLoader variant="repas" />;
 
   return (
-    <div className="space-y-4 pb-24 md:pb-0">
-      {/* Ordinateur : formulaire d'ajout inline. Mobile : FAB + modale (ci-dessous). */}
+    <div className="flex flex-col gap-4 pb-28 md:pb-0">
+      {/* Ordinateur : formulaire d'ajout inline. Mobile : barre d'action + modale. */}
       <div className="card hidden md:block">
-        <AddArticleForm
-          onAdd={(n) => add.mutate(n)}
-          onFavorite={(n) => addFavorite.mutate(n)}
-        />
+        <AddArticleForm onAdd={(name, category) => add.mutate({ name, category })} />
       </div>
 
-      <div className="card">
-        <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-400">
-          <Switch checked={recipeMode} onChange={toggleRecipeMode} label="Activer le mode recette" />
-          <span>
-            {recipeMode
-              ? "· Touche à gauche / à droite d'un produit pour sa quantité."
-              : "· Touche un produit pour le retirer."}
-          </span>
+      {items.length === 0 ? (
+        <div className="card text-center">
+          <div className="font-semibold">Ta liste est vide. 🎉</div>
+          <button onClick={() => setAddOpen(true)} className="btn-primary mt-3">
+            Ajouter un produit
+          </button>
         </div>
-        {(data ?? []).length === 0 ? (
-          <div className="text-sm text-slate-400">Ta liste est vide. 🎉</div>
-        ) : (
-          <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6">
-            {data!.map((it) => {
-              const deleting = deletingIds.has(it.id);
+      ) : (
+        <>
+          {/* Mobile : liste par rayon. */}
+          <div className="flex flex-col gap-5 md:hidden">
+            {aisles.map((a) => {
               return (
-              <div
-                key={it.id}
-                className="relative flex aspect-square flex-col rounded-2xl bg-brand-100 dark:bg-brand-600/20"
-              >
-                {deleting && (
-                  <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-brand-100/80 dark:bg-brand-600/40">
-                    <svg
-                      className="h-7 w-7 animate-spin text-brand-600 dark:text-brand-200"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      aria-label="Suppression…"
-                    >
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
-                    </svg>
+                <div key={a.key}>
+                  <div className="mb-2 flex items-baseline justify-between px-0.5">
+                    <div className="eyebrow">{a.name}</div>
+                    <div className="text-xs text-ink-2">
+                      {a.items.length} à prendre
+                    </div>
                   </div>
-                )}
-                {recipeMode ? (
-                  <div className="flex flex-1 flex-col items-center justify-center gap-1 p-2 text-center">
-                    <span className="text-4xl leading-none">{iconFor(it.name)}</span>
-                    <span className="line-clamp-2 text-xs font-medium leading-tight text-brand-800 dark:text-brand-50">
-                      {titleCase(it.name)}
-                    </span>
+                  <div className="card px-4 py-0">
+                    {a.items.map((it, i) => (
+                      <AisleRow
+                        key={it.id}
+                        item={it}
+                        pending={deletingIds.has(it.id)}
+                        onCheck={() => deleteItem(it)}
+                        onQty={(q) => (q <= 0 ? deleteItem(it) : setQty.mutate({ id: it.id, quantity: q }))}
+                        last={i === a.items.length - 1}
+                      />
+                    ))}
                   </div>
-                ) : (
-                  <button
-                    onClick={() => deleteItem(it)}
-                    disabled={deleting}
-                    className="flex flex-1 flex-col items-center justify-center gap-1 p-2 text-center"
-                    title="Retirer de la liste"
-                  >
-                    <span className="text-4xl leading-none">{iconFor(it.name)}</span>
-                    <span className="line-clamp-2 text-xs font-medium leading-tight text-brand-800 dark:text-brand-50">
-                      {titleCase(it.name)}
-                    </span>
-                  </button>
-                )}
-                {it.quantity > 1 && (
-                  // `pointer-events-none` : la pastille ne doit pas absorber le clic
-                  // de la moitié gauche en mode recette.
-                  <span className="pointer-events-none absolute bottom-1 left-1 rounded-full bg-brand-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                    ×{it.quantity}
-                  </span>
-                )}
-                {/* Mode recette : toute la moitié gauche retire une unité, toute la
-                    moitié droite en ajoute ; les ronds − / + sont centrés verticalement. */}
-                {recipeMode && (
-                  <>
-                    <button
-                      onClick={() => setQty.mutate({ id: it.id, quantity: it.quantity - 1 })}
-                      className="group/qty absolute inset-y-0 left-0 flex w-1/2 items-center justify-start pl-1"
-                      title={it.quantity > 1 ? "Diminuer" : "Retirer"}
-                      aria-label="Diminuer la quantité"
-                    >
-                      <span className="flex h-6 w-6 items-center justify-center rounded-full border border-brand-300/60 bg-white/70 text-brand-700 transition group-hover/qty:bg-brand-50 dark:border-brand-500/30 dark:bg-slate-900/70 dark:text-brand-100 dark:group-hover/qty:bg-slate-800">
-                        −
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => setQty.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                      className="group/qty absolute inset-y-0 right-0 flex w-1/2 items-center justify-end pr-1"
-                      title="Augmenter"
-                      aria-label="Augmenter la quantité"
-                    >
-                      <span className="flex h-6 w-6 items-center justify-center rounded-full border border-brand-300/60 bg-white/70 text-brand-700 transition group-hover/qty:bg-brand-50 dark:border-brand-500/30 dark:bg-slate-900/70 dark:text-brand-100 dark:group-hover/qty:bg-slate-800">
-                        +
-                      </span>
-                    </button>
-                  </>
-                )}
-              </div>
+                </div>
               );
             })}
           </div>
-        )}
-      </div>
 
-      <div className="card">
-        <div className="mb-2 text-sm font-semibold">
-          Favoris <span className="text-xs font-normal text-slate-400">— touche pour ajouter à la liste</span>
-        </div>
-        {sortedFavorites.length === 0 ? (
-          <div className="text-sm text-slate-400">
-            Aucun favori. Tape un produit puis touche ★.
-          </div>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {sortedFavorites.map((f) => (
-              <div
-                key={f.id}
-                className="group flex items-center gap-1.5 rounded-full border border-slate-200 bg-white py-1 pl-3 pr-2 text-sm dark:border-slate-700 dark:bg-slate-800"
-              >
-                <button
-                  onClick={() => add.mutate(f.name)}
-                  className="flex items-center gap-1.5"
-                  title="Ajouter à la liste"
-                >
-                  <span className="text-base">{iconFor(f.name)}</span>
-                  {titleCase(f.name)}
-                </button>
-                <button
-                  onClick={() => removeFavorite.mutate(f.id)}
-                  className="ml-0.5 text-slate-300 opacity-0 transition group-hover:opacity-100 hover:text-red-500"
-                  title="Retirer des favoris"
-                >
-                  ✕
-                </button>
+          {/* Ordinateur : tuiles. */}
+          <div className="card hidden md:block">
+            <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-2">
+              <Switch checked={recipeMode} onChange={toggleRecipeMode} label="Activer le mode recette" />
+              <span>
+                {recipeMode
+                  ? "· Touche à gauche / à droite d'un produit pour sa quantité."
+                  : "· Touche un produit pour le retirer."}
+              </span>
+            </div>
+            {aisles.map((a) => (
+              <div key={a.key} className="mb-4 last:mb-0">
+                <div className="eyebrow mb-2">{a.name}</div>
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6">
+                  {a.items.map((it) => {
+                    const deleting = deletingIds.has(it.id);
+                    return (
+                      <div
+                        key={it.id}
+                        className="relative flex aspect-square flex-col rounded-2xl bg-brand-100 dark:bg-brand-600/20"
+                      >
+                        {deleting && (
+                          <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-brand-100/80 dark:bg-brand-600/40">
+                            <svg
+                              className="h-7 w-7 animate-spin text-brand-600 dark:text-brand-200"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              aria-label="Suppression…"
+                            >
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z" />
+                            </svg>
+                          </div>
+                        )}
+                        {recipeMode ? (
+                          <div className="flex flex-1 flex-col items-center justify-center gap-1 p-2 text-center">
+                            <span className="text-4xl leading-none">{iconFor(it.name)}</span>
+                            <span className="line-clamp-2 text-xs font-medium leading-tight text-brand-800 dark:text-brand-50">
+                              {titleCase(it.name)}
+                            </span>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => deleteItem(it)}
+                            disabled={deleting}
+                            className="flex flex-1 flex-col items-center justify-center gap-1 p-2 text-center"
+                            title="Retirer de la liste"
+                          >
+                            <span className="text-4xl leading-none">{iconFor(it.name)}</span>
+                            <span className="line-clamp-2 text-xs font-medium leading-tight text-brand-800 dark:text-brand-50">
+                              {titleCase(it.name)}
+                            </span>
+                          </button>
+                        )}
+                        {it.quantity > 1 && (
+                          // `pointer-events-none` : la pastille ne doit pas absorber le clic
+                          // de la moitié gauche en mode recette.
+                          <span className="pointer-events-none absolute bottom-1 left-1 rounded-full bg-brand-600 px-1.5 py-0.5 text-2xs font-bold text-on-brand">
+                            ×{it.quantity}
+                          </span>
+                        )}
+                        {recipeMode && (
+                          <>
+                            <button
+                              onClick={() => setQty.mutate({ id: it.id, quantity: it.quantity - 1 })}
+                              className="group/qty absolute inset-y-0 left-0 flex w-1/2 items-center justify-start pl-1"
+                              title={it.quantity > 1 ? "Diminuer" : "Retirer"}
+                              aria-label="Diminuer la quantité"
+                            >
+                              <span className="flex h-6 w-6 items-center justify-center rounded-full border border-line bg-surface text-ink-2">
+                                −
+                              </span>
+                            </button>
+                            <button
+                              onClick={() => setQty.mutate({ id: it.id, quantity: it.quantity + 1 })}
+                              className="group/qty absolute inset-y-0 right-0 flex w-1/2 items-center justify-end pr-1"
+                              title="Augmenter"
+                              aria-label="Augmenter la quantité"
+                            >
+                              <span className="flex h-6 w-6 items-center justify-center rounded-full border border-line bg-surface text-brand-600">
+                                +
+                              </span>
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             ))}
           </div>
-        )}
-      </div>
+        </>
+      )}
 
-      {/* Snackbar d'annulation après suppression. */}
+      {/* Notification d'annulation : un article coché part tout de suite, celle-ci
+          laisse 4 s pour le remettre. Posée au-dessus de la barre d'action sur
+          mobile (`bottom-24`) pour ne pas la recouvrir. */}
       {undo && (
-        <div className="pointer-events-none fixed inset-x-0 bottom-6 z-40 flex justify-center px-4">
-          <div className="pointer-events-auto flex items-center gap-3 rounded-xl bg-slate-900 px-4 py-2.5 text-sm text-white shadow-lg dark:bg-slate-700">
-            <span>« {titleCase(undo.name)} » supprimé</span>
+        <div
+          role="status"
+          className="pointer-events-none fixed inset-x-0 bottom-24 z-40 flex justify-center px-4 md:bottom-6"
+        >
+          <div className="pointer-events-auto flex max-w-full items-center gap-2 rounded-full border border-line bg-surface-2 py-1.5 pl-4 pr-1.5 text-sm shadow-xl">
+            <span aria-hidden="true">{iconFor(undo.name)}</span>
+            <span className="min-w-0 truncate">
+              <b className="font-semibold">{titleCase(undo.name)}</b> retiré
+            </span>
             <button
               onClick={undoDelete}
-              className="font-semibold text-brand-300 hover:text-brand-200"
+              className="flex min-h-tap shrink-0 items-center rounded-full px-3 font-semibold text-brand-600 hover:bg-surface"
             >
               Annuler
             </button>
@@ -345,42 +442,30 @@ function ShoppingList() {
         </div>
       )}
 
-      {/* Mobile : bouton flottant + modale d'ajout. */}
-      <button
-        type="button"
-        onClick={() => setAddOpen(true)}
-        aria-label="Ajouter un article"
-        className="btn-primary fixed bottom-6 right-6 z-30 flex h-14 w-14 items-center justify-center rounded-full p-0 shadow-lg md:hidden"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          className="h-6 w-6"
-          aria-hidden="true"
-        >
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </button>
+      <MobileActionBar label="Ajouter un produit" onClick={() => setAddOpen(true)} />
 
       {addOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center md:hidden"
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center"
           onClick={() => setAddOpen(false)}
         >
           <div className="card w-full max-w-md" onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-lg font-bold">Ajouter un article</h2>
-              <button onClick={() => setAddOpen(false)} className="text-slate-400 hover:text-slate-600">
+              <h2 className="text-lg font-semibold">Ajouter un produit</h2>
+              <button
+                onClick={() => setAddOpen(false)}
+                aria-label="Fermer"
+                className="text-ink-2 hover:text-ink"
+              >
                 ✕
               </button>
             </div>
             <AddArticleForm
               autoFocus
-              onAdd={(n) => add.mutate(n)}
-              onFavorite={(n) => addFavorite.mutate(n)}
+              onAdd={(name, category) => {
+                add.mutate({ name, category });
+                setAddOpen(false);
+              }}
             />
           </div>
         </div>

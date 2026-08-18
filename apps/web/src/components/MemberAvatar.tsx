@@ -79,7 +79,7 @@ export function PersonPicker({
   value,
   onChange,
   showName = false,
-  className = "h-5 w-5 text-[10px]",
+  className = "h-5 w-5 text-2xs",
 }: {
   value: PackingPerson;
   onChange: (person: PackingPerson) => void;
@@ -115,11 +115,11 @@ export function PersonPicker({
                   setOpen(false);
                   if (p.id !== value) onChange(p.id);
                 }}
-                className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition hover:bg-[#f1ede4] dark:hover:bg-slate-800 ${
+                className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition hover:bg-surface-2 ${
                   p.id === value ? "font-semibold text-brand-600" : "text-slate-700 dark:text-slate-200"
                 }`}
               >
-                <PersonAvatar id={p.id} className="h-5 w-5 text-[10px]" />
+                <PersonAvatar id={p.id} className="h-5 w-5 text-2xs" />
                 {p.label}
                 {p.id === value && <span className="ml-auto text-brand-600">✓</span>}
               </button>

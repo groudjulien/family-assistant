@@ -1,19 +1,7 @@
 import { useState, useEffect, useRef, Fragment, type ReactNode } from "react";
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  PieChart,
-  Pie,
-  Cell,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-} from "recharts";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   DndContext,
   closestCenter,
@@ -41,18 +29,67 @@ import type {
   PlannedExpense,
   LunchflowAccount,
   BankTransaction,
+  MoneySummary,
+  TransferCheck,
+  UtilityData,
+  UtilityReading,
 } from "@gfa/shared";
 import { TX_TYPE_LABEL, TX_TYPES } from "@gfa/shared";
 import { useMe } from "../auth";
 import { api, ApiError } from "../lib/api";
 import PageLoader from "../components/PageLoader";
-import { eur, eurToCents, dateFr, dateFrShort, todayIso } from "../lib/format";
-import { Select, MultiSelect, Checkbox, DateInput, Input, SubNav, PillToggle, DateRangeCalendar } from "../components/ui";
+import {
+  eur,
+  eur0,
+  eurToCents,
+  dateFr,
+  dateFrShort,
+  monthFr,
+  relativeFr,
+  todayIso,
+} from "../lib/format";
+import type { OverflowItem } from "../components/ui";
+import {
+  Select,
+  MultiSelect,
+  Checkbox,
+  Switch,
+  DateInput,
+  Input,
+  SubNav,
+  PillToggle,
+  DateRangeCalendar,
+  MobileActionBar,
+  OverflowMenu,
+  ActionSheet,
+  FilterChips,
+  SearchField,
+  Sheet,
+  SheetRow,
+} from "../components/ui";
+import {
+  IconAlert,
+  IconArrowRight,
+  IconBank,
+  IconBolt,
+  IconCalendar,
+  IconCheck,
+  IconChevronDown,
+  IconChevronLeft,
+  IconChevronRight,
+  IconFilter,
+  IconMoney,
+  IconScale,
+  IconTrend,
+  IconWave,
+} from "../components/icons";
+import { useLastView } from "../lib/lastView";
 import { Indicator } from "../components/Indicator";
 import { ExpenseFormModal, type ExpenseFormValues } from "../components/ExpenseForm";
 import { MemberAvatar } from "../components/MemberAvatar";
 import { useToast } from "../components/Toast";
 import { useExpenseCategories, categoryMeta } from "../lib/categories";
+import { usePageHeader, usePageChrome, usePageTabs } from "../components/PageHeader";
 
 type Tab = "depenses" | "tresorerie" | "equilibrage" | "prevue" | "elec" | "comptes";
 
@@ -88,6 +125,17 @@ const KNOWN_BANKS: { match: string; label: string; bg: string }[] = [
 ];
 const BADGE_COLORS = ["#64748b", "#0f766e", "#7c3aed", "#b45309", "#be123c", "#1d4ed8", "#4d7c0f"];
 
+/**
+ * Nom de compte débarrassé de sa banque : la pastille la porte déjà, la ligne
+ * n'a besoin que de ce qui distingue le compte (« LCL joint » → « joint »).
+ */
+function shortAccountName(name: string): string {
+  const bank = KNOWN_BANKS.find((b) => name.toLowerCase().includes(b.match));
+  if (!bank) return name;
+  const rest = name.replace(new RegExp(bank.match.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"), "").trim();
+  return rest || name;
+}
+
 /** Petit badge coloré déduit du nom du compte (banque connue, sinon initiales). */
 function BankBadge({ name, size = "md" }: { name: string; size?: "sm" | "md" }) {
   const n = name.toLowerCase();
@@ -107,64 +155,290 @@ function BankBadge({ name, size = "md" }: { name: string; size?: "sm" | "md" }) 
     for (const ch of n) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
     bg = BADGE_COLORS[Math.abs(hash) % BADGE_COLORS.length];
   }
-  const dim = size === "sm" ? "h-5 w-5 text-[8px]" : "h-8 w-8 text-[10px]";
+  // Rond comme les avatars des membres : les deux se côtoient dans les mêmes
+  // listes. Et assez large pour un libellé de 3 lettres à 11 px — en 20 px,
+  // « LCL » débordait de sa pastille.
+  const dim = size === "sm" ? "h-7 w-7" : "h-9 w-9";
   return (
     <span
-      className={`flex shrink-0 items-center justify-center rounded-lg font-bold text-white ${dim}`}
+      className={`flex shrink-0 items-center justify-center rounded-full text-2xs font-bold leading-none tracking-tight text-white ${dim}`}
       style={{ backgroundColor: bg }}
       title={name}
     >
-      {label}
+      {label.slice(0, 3)}
     </span>
   );
 }
 
-const MONEY_TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: "depenses", label: "Dépenses", icon: "💸" },
-  { id: "tresorerie", label: "Trésorerie", icon: "📊" },
-  { id: "equilibrage", label: "Équilibrage", icon: "⚖️" },
-  { id: "prevue", label: "Prévue", icon: "🗓️" },
-  { id: "elec", label: "Électricité", icon: "⚡" },
-  { id: "comptes", label: "Comptes bancaires", icon: "🏦" },
+/**
+ * Onglets d'Argent. `group` découpe le hub mobile : ce qu'on **suit** (des
+ * chiffres du mois) et ce qu'on **gère** (des références qui bougent peu).
+ */
+const MONEY_TABS: { id: Tab; label: string; title?: string; group: "suivre" | "gerer" }[] = [
+  { id: "depenses", label: "Dépenses", group: "suivre" },
+  { id: "tresorerie", label: "Trésorerie", group: "suivre" },
+  { id: "equilibrage", label: "Équilibrage", group: "suivre" },
+  // `title` : le nom complet en tête de page, quand l'onglet doit rester court.
+  { id: "prevue", label: "Prévue", title: "Dépenses prévues", group: "suivre" },
+  { id: "elec", label: "Électricité", group: "gerer" },
+  { id: "comptes", label: "Comptes bancaires", group: "gerer" },
 ];
 
-export default function Money() {
-  const navigate = useNavigate();
-  const { tab: tabParam, view: viewParam } = useParams();
-  const tab: Tab = MONEY_TABS.some((t) => t.id === tabParam) ? (tabParam as Tab) : "depenses";
+/** Sommaire de la section, partagé par le hub et l'onglet Dépenses. */
+function useMoneySummary() {
+  return useQuery({
+    queryKey: ["money-summary"],
+    queryFn: () => api.get<MoneySummary>("/api/money/summary"),
+  });
+}
 
+/**
+ * Le chiffre-héros du foyer : ce qui reste après tout ce qui est déjà engagé
+ * d'ici la fin du mois, et d'où ça vient. Même carte en tête du sommaire de la
+ * section et de l'onglet Dépenses — c'est le repère commun des deux écrans.
+ */
+function LivingCard({ split }: { split: MoneySummary["split"] }) {
+  // Une part négative (découvert) ne se dessine pas : la barre tombe à zéro et
+  // le montant passe en rouge, ce qui dit déjà l'essentiel.
+  const free = Math.max(0, split.freeCents);
+  const base = split.chargesCents + split.variablesCents + free;
+  const pct = (v: number) => (base > 0 ? Math.round((v / base) * 100) : 0);
+  const pCharges = pct(split.chargesCents);
+  const pVariables = pct(split.variablesCents);
   return (
-    <div className="space-y-4">
-      <SubNav
-        value={tab}
-        onChange={(v) => navigate(`/money/${v}`)}
-        items={MONEY_TABS.map((t) => ({ value: t.id, label: t.label, icon: t.icon }))}
-      />
-      {tab === "depenses" && <Depenses view={viewParam} />}
-      {tab === "tresorerie" && <Tresorerie />}
-      {tab === "equilibrage" && <Equilibrage />}
-      {tab === "prevue" && <Prevue view={viewParam} />}
-      {tab === "elec" && <Electricite />}
-      {tab === "comptes" && <Transactions view={viewParam} />}
+    <div className="card">
+      <div className="text-sm text-ink-2">Reste à vivre du foyer</div>
+      <div className={`mt-1 text-3xl font-bold ${split.freeCents < 0 ? "text-danger" : ""}`}>
+        {eur(split.freeCents)}
+      </div>
+      <div className="mt-4 flex h-2 overflow-hidden rounded-full bg-surface-2">
+        <span className="block bg-brand-600" style={{ width: `${pCharges}%` }} />
+        <span className="block bg-warning" style={{ width: `${pVariables}%` }} />
+      </div>
+      <div className="mt-2 flex justify-between text-xs text-slate-400">
+        <span>Charges {pCharges} %</span>
+        <span>Variables {pVariables} %</span>
+        <span>Libre {Math.max(0, 100 - pCharges - pVariables)} %</span>
+      </div>
     </div>
   );
 }
 
-/* ---------------- Comptes bancaires : soldes des comptes ---------------- */
+/** « d'août 2026 » / « de mars 2026 » — l'élision devant une voyelle. */
+function ofMonthFr(year: number, month: number): string {
+  const name = new Date(year, month - 1, 1).toLocaleDateString("fr-FR", { month: "long" });
+  return /^[aeiouyéè]/i.test(name) ? `d'${name} ${year}` : `de ${name} ${year}`;
+}
 
-// Horodatage court "12 juin, 14:32" pour la dernière synchro LunchFlow.
+const HUB_ICON: Record<Tab, (p: { size?: number; className?: string }) => JSX.Element> = {
+  depenses: IconTrend,
+  tresorerie: IconWave,
+  equilibrage: IconScale,
+  prevue: IconCalendar,
+  elec: IconBolt,
+  comptes: IconBank,
+};
+
+export default function Money() {
+  const navigate = useNavigate();
+  const isMobile = useIsMobile();
+  const monthLabel = new Date().toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+  const { tab: tabParam, view: viewParam } = useParams();
+  const tab: Tab = MONEY_TABS.some((t) => t.id === tabParam) ? (tabParam as Tab) : "depenses";
+  // `/money` sans onglet = sommaire de la section (mobile). Sur ordinateur, les
+  // onglets sont toujours là : la page ouvre directement Dépenses, comme avant.
+  const hub = isMobile && !tabParam;
+  // Le « ⋯ » de la barre appartient au shell : un onglet ne peut pas le
+  // déclarer lui-même (l'effet du parent passe après et l'écraserait). Seule
+  // Électricité en a un pour l'instant — le tarif du kWh, qui chiffre la page.
+  const [elecPrice, setElecPrice] = useState(false);
+
+  usePageHeader(
+    hub
+      ? "Argent"
+      : (() => {
+          const cur = MONEY_TABS.find((t) => t.id === tab);
+          return cur?.title ?? cur?.label ?? "Argent";
+        })(),
+    hub
+      ? `${monthLabel} · Foyer`
+      : // Trésorerie porte ses propres sélecteurs de mois : annoncer le mois
+        // courant dans l'en-tête contredirait la vue qu'on regarde.
+        tab === "tresorerie"
+        ? "Argent"
+        : `Argent · ${monthLabel}`,
+  );
+  // Depuis un onglet, la barre mobile porte un retour vers le sommaire — c'est
+  // lui qui remplace la rangée d'onglets (plus appelée : `usePageTabs`).
+  usePageChrome(
+    tabParam ? "/money" : null,
+    tab === "elec" ? [{ label: "Prix du kWh", onClick: () => setElecPrice(true) }] : [],
+  );
+
+  return (
+    <div className="flex flex-col gap-4">
+      <SubNav
+        value={tab}
+        onChange={(v) => navigate(`/money/${v}`)}
+        items={MONEY_TABS.map((t) => ({ value: t.id, label: t.label }))}
+        className="hidden md:block"
+      />
+      {hub ? (
+        <MoneyHub />
+      ) : (
+        <>
+          {tab === "depenses" && <Depenses view={viewParam} />}
+          {tab === "tresorerie" && <Tresorerie view={viewParam} />}
+          {tab === "equilibrage" && <Equilibrage />}
+          {tab === "prevue" && <Prevue view={viewParam} />}
+          {tab === "elec" && (
+            <Electricite
+              view={viewParam}
+              priceOpen={elecPrice}
+              onPriceOpen={setElecPrice}
+            />
+          )}
+          {tab === "comptes" && <Transactions view={viewParam} />}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Hub de section (mobile) ---------------- */
+
+/** Rangée du sommaire : rubrique, ce qu'elle contient, son chiffre. */
+function HubRow({
+  tab,
+  sub,
+  value,
+  tone = "default",
+  last,
+}: {
+  tab: Tab;
+  sub: string;
+  value: string;
+  tone?: "default" | "danger" | "warning";
+  last: boolean;
+}) {
+  const Icon = HUB_ICON[tab];
+  const label = MONEY_TABS.find((t) => t.id === tab)?.label ?? "";
+  const toneClass =
+    tone === "danger" ? "text-danger" : tone === "warning" ? "text-warning" : "text-ink";
+  return (
+    <div className={last ? "" : "border-b border-hairline"}>
+      <Link to={`/money/${tab}`} className="flex min-h-[64px] items-center gap-3 py-2.5">
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-ink-2">
+          <Icon size={20} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-base font-semibold">{label}</span>
+          <span className="block truncate text-xs text-slate-400">{sub}</span>
+        </span>
+        <span className={`shrink-0 text-base font-semibold ${toneClass}`}>{value}</span>
+        <IconChevronRight size={20} className="shrink-0 text-slate-400" />
+      </Link>
+    </div>
+  );
+}
+
+/**
+ * Sommaire chiffré de la section. Un seul appel (`/api/money/summary`) : six
+ * requêtes séparées auraient rendu l'écran d'entrée plus lent que les onglets
+ * qu'il résume.
+ */
+function MoneyHub() {
+  const navigate = useNavigate();
+  const me = useMe();
+  const members = me.household.members;
+  const { data } = useMoneySummary();
+
+  if (!data) return <PageLoader variant="argent" />;
+
+  const eq = data.equilibrage;
+  const elec = data.electricite;
+  const suivre = MONEY_TABS.filter((t) => t.group === "suivre");
+  const gerer = MONEY_TABS.filter((t) => t.group === "gerer");
+
+  const subOf: Record<Tab, string> = {
+    depenses: `${data.depenses.count} charge${data.depenses.count > 1 ? "s" : ""} fixe${
+      data.depenses.count > 1 ? "s" : ""
+    }`,
+    tresorerie: `${data.tresorerie.accounts} compte${data.tresorerie.accounts > 1 ? "s" : ""} · aujourd'hui`,
+    equilibrage:
+      eq.amount === 0
+        ? "Tout est équilibré"
+        : `${members[eq.fromUser].name} doit à ${members[eq.toUser].name}`,
+    prevue: `${data.prevue.count} à venir`,
+    elec: elec ? `relevé ${ofMonthFr(elec.year, elec.month)}` : "aucun relevé",
+    comptes: data.comptes.names.join(" · ") || "aucun compte",
+  };
+  const valueOf: Record<Tab, { value: string; tone?: "danger" | "warning" }> = {
+    depenses: { value: `−${eur0(data.depenses.monthlyCents)}`, tone: "danger" },
+    tresorerie: { value: eur0(data.tresorerie.balanceCents) },
+    equilibrage:
+      eq.amount === 0
+        ? { value: "0 €" }
+        : { value: `+${eur0(eq.amount)}`, tone: "warning" },
+    prevue: { value: `−${eur0(data.prevue.totalCents)}`, tone: "danger" },
+    elec: { value: elec ? `${elec.kwh} kWh` : "—" },
+    comptes: { value: String(data.comptes.count) },
+  };
+
+  const section = (title: string, tabs: typeof MONEY_TABS) => (
+    <div className="flex flex-col gap-2">
+      <div className="eyebrow">{title}</div>
+      <div className="card">
+        {tabs.map((t, i) => (
+          <HubRow
+            key={t.id}
+            tab={t.id}
+            sub={subOf[t.id]}
+            value={valueOf[t.id].value}
+            tone={valueOf[t.id].tone}
+            last={i === tabs.length - 1}
+          />
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-5 pb-28">
+      <LivingCard split={data.split} />
+
+      {section("Suivre", suivre)}
+      {section("Gérer", gerer)}
+
+      <MobileActionBar
+        label="Nouvelle dépense"
+        onClick={() => navigate("/money/equilibrage?nouvelle=1")}
+      />
+    </div>
+  );
+}
+
+/* ---------------- Comptes bancaires ---------------- */
+
+/**
+ * Deux écrans, pas un. Les opérations avaient leur propre recherche et leurs
+ * propres filtres collés sous les comptes : c'était une deuxième page.
+ */
+const COMPTES_VIEWS = ["comptes", "operations"] as const;
+
+// Horodatage long « le 12 août à 20:03 » — la ligne de pied de la feuille de réglages.
 function syncTimeFr(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "";
   return d.toLocaleString("fr-FR", {
-    day: "2-digit",
-    month: "short",
+    day: "numeric",
+    month: "long",
     hour: "2-digit",
     minute: "2-digit",
   });
 }
 
-// Icône chaîne (associer / lien LunchFlow).
+// Icône chaîne (lier une opération à une dépense).
 function LinkIcon({ className = "h-4 w-4" }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
@@ -174,63 +448,150 @@ function LinkIcon({ className = "h-4 w-4" }: { className?: string }) {
   );
 }
 
-// Icône crayon (éditer le solde manuel).
-function PencilIcon({ className = "h-4 w-4" }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
-      <path d="M12 20h9" />
-      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-    </svg>
-  );
-}
-
-// Icône rafraîchir (forcer la synchro).
-function RefreshIcon({ className = "h-4 w-4" }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
-      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-      <path d="M21 3v6h-6" />
-    </svg>
-  );
-}
-
-// Icône import de fichier (upload d'un relevé PDF).
-function UploadIcon({ className = "h-4 w-4" }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-      <path d="M17 8l-5-5-5 5" />
-      <path d="M12 3v12" />
-    </svg>
-  );
-}
+const ACCOUNT_TYPE_OPTIONS = [
+  { value: "checking", label: "🏦 Courant" },
+  { value: "savings", label: "🐖 Épargne" },
+  { value: "investment", label: "📈 Investissement" },
+];
 
 /**
- * Carte d'un compte bancaire : solde + état LunchFlow (synchro / date / erreur).
- * Sélectionnable au clic (filtre les transactions). Comptes non connectés :
- * édition manuelle du solde (crayon → input + OK). Comptes connectés : bouton de
- * resynchronisation forcée. Icône 🔗 pour gérer l'association LunchFlow.
+ * Épargne et courants ne répondent pas à la même question : mélanger 500 € de
+ * livret aux comptes du quotidien faussait la lecture du disponible. Un groupe
+ * par nature, dans cet ordre.
  */
-function AccountCard({
+const ACCOUNT_GROUPS = [
+  { type: "checking", title: "Comptes courants", short: "Courants" },
+  { type: "savings", title: "Épargne", short: "Épargne" },
+  { type: "investment", title: "Investissement", short: "Placé" },
+] as const;
+
+const accountTypeLabel = (type: string) =>
+  ({ checking: "Compte courant", savings: "Épargne", investment: "Investissement" })[type] ??
+  "Compte";
+
+/**
+ * Ce que chaque ligne dit d'elle-même : d'où vient son solde et s'il est encore
+ * bon. « synchro : 11 août, 20:03 » en gris pâle sous certaines cartes ne le
+ * disait pas — et ne disait rien du tout des comptes saisis à la main.
+ */
+type SyncTone = "ok" | "warn" | "bad";
+function syncStateOf(a: Account): { tone: SyncTone; text: string } {
+  if (!a.lunchflowAccountId)
+    return {
+      tone: "warn",
+      text: a.balanceUpdatedAt
+        ? `Saisi à la main · ${dateFrShort(a.balanceUpdatedAt)}`
+        : "Saisi à la main",
+    };
+  if (a.lunchflowError) return { tone: "bad", text: "Reconnexion nécessaire" };
+  if (!a.lunchflowSyncedAt) return { tone: "warn", text: "Jamais synchronisé" };
+  return { tone: "ok", text: `Synchro ${relativeFr(a.lunchflowSyncedAt)}` };
+}
+
+const SYNC_TEXT: Record<SyncTone, string> = {
+  ok: "text-brand-600",
+  warn: "text-warning",
+  bad: "text-danger",
+};
+const SYNC_DOT: Record<SyncTone, string> = {
+  ok: "bg-brand-600",
+  warn: "bg-warning",
+  bad: "bg-danger",
+};
+
+/** L'état de synchro d'un compte, en une ligne : pastille + phrase. */
+function SyncLine({ account: a }: { account: Account }) {
+  const s = syncStateOf(a);
+  return (
+    // `items-start` + décalage de la pastille : « Reconnexion nécessaire » ne
+    // tient pas sur une ligne à côté d'un solde, il passe donc à la ligne — un
+    // état de synchro coupé au milieu ne dit plus rien.
+    <span className={`flex items-start gap-1.5 text-xs ${SYNC_TEXT[s.tone]}`}>
+      <span
+        className={`mt-[0.3rem] h-1.5 w-1.5 shrink-0 rounded-full ${SYNC_DOT[s.tone]}`}
+        aria-hidden
+      />
+      <span>{s.text}</span>
+    </span>
+  );
+}
+
+/** Les trois points de fin de ligne — ici purement indicatifs : la ligne entière ouvre la feuille. */
+function DotsGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5" aria-hidden="true">
+      <circle cx="5.5" cy="12" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <circle cx="18.5" cy="12" r="1.6" />
+    </svg>
+  );
+}
+
+/* ---------------- Feuille de réglages d'un compte ---------------- */
+
+/**
+ * Tout ce qu'on peut faire d'un compte, au même endroit : son solde, ce à quoi
+ * il sert, sa connexion, sa suppression. Remplace les quatre cibles de 20 px
+ * dispersées dans les coins de l'ancienne carte, dont le sens changeait d'une
+ * carte à l'autre.
+ */
+function AccountSheet({
   account: a,
-  selected,
-  onSelect,
+  onClose,
   onOpenLink,
 }: {
   account: Account;
-  selected: boolean;
-  onSelect: () => void;
+  onClose: () => void;
   onOpenLink: () => void;
 }) {
+  const me = useMe();
   const qc = useQueryClient();
   const toast = useToast();
-  const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const linked = !!a.lunchflowAccountId;
-  const stop = (e: React.MouseEvent) => e.stopPropagation();
+  const [balance, setBalance] = useState((a.currentBalance / 100).toFixed(2).replace(".", ","));
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
-  // Import d'un relevé PDF : Claude en extrait les transactions côté back.
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["accounts"] });
+    qc.invalidateQueries({ queryKey: ["balance"] });
+    qc.invalidateQueries({ queryKey: ["cashflow"] });
+    qc.invalidateQueries({ queryKey: ["money-summary"] });
+  };
+
+  const patchAccount = useMutation({
+    mutationFn: (payload: {
+      type?: string;
+      isPrimary?: boolean;
+      forecast?: boolean;
+      currentBalance?: number;
+    }) => api.patch(`/api/accounts/${a.id}`, payload),
+    onSuccess: invalidate,
+  });
+  const setDefaultAccount = useMutation({
+    mutationFn: (accountId: string | null) =>
+      api.patch("/api/household/default-account", { accountId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
+  });
+  const forceSync = useMutation({
+    mutationFn: () => api.post(`/api/lunchflow/sync/${a.id}`, {}),
+    onSuccess: () => {
+      invalidate();
+      qc.invalidateQueries({ queryKey: ["bank-transactions"] });
+      toast.success("Compte synchronisé");
+    },
+    onError: () => toast.error("Synchro impossible"),
+  });
+  const removeAccount = useMutation({
+    mutationFn: () => api.del(`/api/accounts/${a.id}`),
+    onSuccess: () => {
+      invalidate();
+      qc.invalidateQueries({ queryKey: ["bank-transactions"] });
+      qc.invalidateQueries({ queryKey: ["recurring"] });
+      onClose();
+    },
+  });
+  // Import d'un relevé PDF : Claude en extrait les opérations côté back.
   const importPdf = useMutation({
     mutationFn: (file: File) => {
       const form = new FormData();
@@ -244,192 +605,219 @@ function AccountCard({
       qc.invalidateQueries({ queryKey: ["bank-transactions"] });
       toast.success(
         r.added > 0
-          ? `${r.added} transaction(s) importée(s)${r.skipped > 0 ? `, ${r.skipped} déjà présente(s)` : ""}`
+          ? `${r.added} opération(s) importée(s)${r.skipped > 0 ? `, ${r.skipped} déjà présente(s)` : ""}`
           : r.total > 0
-            ? "Toutes les transactions du relevé sont déjà importées"
-            : "Aucune transaction trouvée dans le relevé",
+            ? "Toutes les opérations du relevé sont déjà importées"
+            : "Aucune opération trouvée dans le relevé",
       );
     },
     onError: (e) => {
       const raw = e instanceof ApiError ? e.message : "";
-      const code = raw.includes("no-key")
-        ? "Clé Claude manquante (Réglages)"
-        : raw.includes("no-text")
-          ? "Ce PDF ne contient pas de texte (relevé scanné ?)"
-          : raw.includes("too-large")
-            ? "Fichier trop volumineux (max 15 Mo)"
-            : raw.includes("not-pdf")
-              ? "Le fichier doit être un PDF"
-              : "Échec de l'import du relevé";
-      toast.error(code);
+      toast.error(
+        raw.includes("no-key")
+          ? "Clé Claude manquante (Réglages)"
+          : raw.includes("no-text")
+            ? "Ce PDF ne contient pas de texte (relevé scanné ?)"
+            : raw.includes("too-large")
+              ? "Fichier trop volumineux (max 15 Mo)"
+              : raw.includes("not-pdf")
+                ? "Le fichier doit être un PDF"
+                : "Échec de l'import du relevé",
+      );
     },
   });
 
-  const updateBalance = useMutation({
-    mutationFn: (cents: number) => api.patch(`/api/accounts/${a.id}`, { currentBalance: cents }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["accounts"] });
-      setEditing(false);
-    },
-  });
-  const forceSync = useMutation({
-    mutationFn: () => api.post(`/api/lunchflow/sync/${a.id}`, {}),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["accounts"] });
-      qc.invalidateQueries({ queryKey: ["bank-transactions"] });
-    },
-  });
-
-  const iconBtn =
-    "shrink-0 rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-brand-600 dark:hover:bg-slate-800 disabled:opacity-40";
+  const parsedBalance = Number(balance.replace(/\s/g, "").replace(",", "."));
+  const balanceDirty =
+    Number.isFinite(parsedBalance) && eurToCents(parsedBalance) !== a.currentBalance;
+  const ownerName = a.owner === "joint" ? "Commun" : me.household.members[a.owner].name;
 
   return (
-    <div
-      onClick={onSelect}
-      className={`card cursor-pointer transition ${selected ? "ring-2 ring-brand-500" : "hover:border-brand-400"}`}
-      title="Cliquer pour filtrer les transactions de ce compte"
+    <Sheet
+      title={a.name}
+      subtitle={`${accountTypeLabel(a.type)} · ${syncStateOf(a).text.toLowerCase()}`}
+      thumbnail={<BankBadge name={a.name} />}
+      onClose={onClose}
     >
-      <div className="flex items-center gap-1.5">
-        <BankBadge name={a.name} size="sm" />
-        <span className="min-w-0 flex-1 truncate text-xs font-medium">{a.name}</span>
-        <button
-          onClick={(e) => {
-            stop(e);
-            onOpenLink();
-          }}
-          title={linked ? "Gérer la connexion LunchFlow" : "Connecter à LunchFlow"}
-          className={`shrink-0 rounded-lg p-1 transition-colors hover:bg-slate-100 dark:hover:bg-slate-800 ${
-            a.lunchflowError
-              ? "text-red-500"
-              : linked
-                ? "text-brand-600"
-                : "text-slate-400 hover:text-brand-600"
-          }`}
-        >
-          <LinkIcon />
-        </button>
+      {/* Le solde : la seule donnée qu'on vient vraiment corriger. */}
+      <div className="border-b border-hairline px-4 py-3">
+        <div className="text-xs text-slate-400">Solde actuel</div>
+        {linked ? (
+          <div className="mt-1 flex items-center gap-3">
+            <span className="text-2xl font-bold">{eur(a.currentBalance)}</span>
+            <button
+              type="button"
+              onClick={() => forceSync.mutate()}
+              disabled={forceSync.isPending}
+              className="btn-ghost ml-auto text-sm disabled:opacity-40"
+            >
+              {forceSync.isPending ? "Synchro…" : "Synchroniser"}
+            </button>
+          </div>
+        ) : (
+          <div className="mt-1 flex items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Input
+                type="text"
+                inputMode="decimal"
+                value={balance}
+                onChange={(e) => setBalance(e.target.value)}
+                className="pr-8 text-lg font-semibold"
+                aria-label="Solde actuel"
+              />
+              <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
+                €
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => patchAccount.mutate({ currentBalance: eurToCents(parsedBalance) })}
+              disabled={!balanceDirty || patchAccount.isPending}
+              className="btn-primary shrink-0 disabled:opacity-40"
+            >
+              Valider
+            </button>
+          </div>
+        )}
+        <div className="mt-2 text-xs text-slate-400">
+          {linked
+            ? a.lunchflowSyncedAt
+              ? `Dernière synchro ${syncTimeFr(a.lunchflowSyncedAt)}`
+              : "Jamais synchronisé"
+            : a.balanceUpdatedAt
+              ? `Dernière mise à jour ${syncTimeFr(a.balanceUpdatedAt)}`
+              : "Jamais mis à jour"}
+        </div>
+        {a.lunchflowError && (
+          <div className="mt-2 rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">
+            Dernière synchro en échec : {a.lunchflowError}
+          </div>
+        )}
       </div>
 
-      {editing ? (
-        <div className="mt-1 flex items-center gap-1" onClick={stop}>
-          <input
-            type="number"
-            step="0.01"
-            value={val}
-            autoFocus
-            onChange={(e) => setVal(e.target.value)}
-            className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1 text-right text-sm tabular-nums outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900"
-          />
-          <button
-            onClick={() => {
-              const num = parseFloat(val);
-              if (!isNaN(num)) updateBalance.mutate(eurToCents(num));
-            }}
-            disabled={updateBalance.isPending}
-            className="btn-primary shrink-0 px-2 py-1 text-xs"
-          >
-            OK
-          </button>
-        </div>
-      ) : (
-        <div className="mt-1 flex items-center gap-1.5">
-          <span className="text-xl font-bold tabular-nums">{eur(a.currentBalance)}</span>
-          {!linked && (
-            <button
-              onClick={(e) => {
-                stop(e);
-                setVal((a.currentBalance / 100).toString());
-                setEditing(true);
-              }}
-              title="Modifier le solde"
-              className={iconBtn}
-            >
-              <PencilIcon />
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Compte non connecté : import d'un relevé PDF (icône en bas à droite). */}
-      {!linked && (
-        <div className="mt-1 flex items-center text-[11px]">
-          {importPdf.isPending && <span className="text-slate-400">Import en cours…</span>}
-          <input
-            ref={fileRef}
-            type="file"
-            accept="application/pdf,.pdf"
-            className="hidden"
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => {
-              e.stopPropagation();
-              const f = e.target.files?.[0];
-              e.target.value = ""; // permet de ré-importer le même fichier
-              if (f) importPdf.mutate(f);
-            }}
-          />
-          <button
-            onClick={(e) => {
-              stop(e);
-              fileRef.current?.click();
-            }}
-            disabled={importPdf.isPending}
-            title="Importer un relevé de compte (PDF)"
-            className={`${iconBtn} ml-auto`}
-          >
-            <UploadIcon className={`h-4 w-4 ${importPdf.isPending ? "animate-pulse" : ""}`} />
-          </button>
-        </div>
-      )}
-
-      {linked && (
-        <div className="mt-1 flex items-center gap-1 text-[11px]">
-          <div className="min-w-0 flex-1">
-            {a.lunchflowError ? (
-              <button
-                onClick={(e) => {
-                  stop(e);
-                  onOpenLink();
-                }}
-                className="flex items-start gap-1 text-left text-red-500 hover:underline"
-              >
-                <span>⚠️</span>
-                <span className="min-w-0 truncate">{a.lunchflowError}</span>
-              </button>
-            ) : (
-              <span className="text-slate-400">
-                {a.lunchflowSyncedAt ? `synchro : ${syncTimeFr(a.lunchflowSyncedAt)}` : "jamais synchronisé"}
-              </span>
-            )}
+      <div className="flex flex-col divide-y divide-hairline">
+        <div className="flex items-center gap-3 px-4 py-3">
+          <span className="min-w-0 flex-1 text-base font-medium">Type de compte</span>
+          <div className="w-44 shrink-0">
+            <Select
+              value={a.type}
+              onChange={(v) => patchAccount.mutate({ type: v })}
+              options={ACCOUNT_TYPE_OPTIONS}
+            />
           </div>
-          <button
-            onClick={(e) => {
-              stop(e);
-              forceSync.mutate();
-            }}
-            disabled={forceSync.isPending}
-            title="Forcer la synchronisation"
-            className={`${iconBtn} ml-auto`}
-          >
-            <RefreshIcon className={`h-4 w-4 ${forceSync.isPending ? "animate-spin" : ""}`} />
-          </button>
         </div>
-      )}
-    </div>
+
+        {a.owner !== "joint" && (
+          <SheetRow
+            label={`Compte principal de ${ownerName}`}
+            hint="ses dépenses prévues y sont imputées"
+            trailing={
+              <Switch
+                checked={a.isPrimary}
+                onChange={() => patchAccount.mutate({ isPrimary: !a.isPrimary })}
+              />
+            }
+          />
+        )}
+        <SheetRow
+          label="Compte par défaut"
+          hint="pré-sélectionné pour une nouvelle dépense"
+          trailing={
+            <Switch
+              checked={me.household.defaultAccountId === a.id}
+              onChange={() =>
+                setDefaultAccount.mutate(me.household.defaultAccountId === a.id ? null : a.id)
+              }
+            />
+          }
+        />
+        <SheetRow
+          label="Afficher dans Trésorerie"
+          hint="compté dans le reste à vivre"
+          trailing={
+            <Switch checked={a.forecast} onChange={() => patchAccount.mutate({ forecast: !a.forecast })} />
+          }
+        />
+
+        <SheetRow
+          label={linked ? "Gérer la connexion" : "Connecter à la banque"}
+          hint={
+            linked
+              ? "compte associé à LunchFlow"
+              : me.hasLunchflowKey
+                ? "récupère soldes et opérations automatiquement"
+                : "clé API à configurer dans Réglages"
+          }
+          onClick={onOpenLink}
+          trailing={<IconChevronRight size={20} className="shrink-0 text-slate-400" />}
+        />
+
+        {!linked && (
+          <>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/pdf,.pdf"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = ""; // permet de ré-importer le même fichier
+                if (f) importPdf.mutate(f);
+              }}
+            />
+            <SheetRow
+              label={importPdf.isPending ? "Import en cours…" : "Importer un relevé (PDF)"}
+              hint="Claude en extrait les opérations"
+              onClick={() => fileRef.current?.click()}
+              disabled={importPdf.isPending}
+              trailing={<IconChevronRight size={20} className="shrink-0 text-slate-400" />}
+            />
+          </>
+        )}
+
+        {/* Détachée du reste : irréversible, et sa conséquence est écrite. */}
+        {confirmDelete ? (
+          <div className="px-4 py-3">
+            <div className="text-sm font-medium text-danger">Supprimer « {a.name} » ?</div>
+            <div className="mt-1 text-xs text-slate-400">
+              Ses opérations bancaires et ses charges récurrentes seront supprimées avec lui.
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <button type="button" onClick={() => setConfirmDelete(false)} className="btn-ghost">
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={() => removeAccount.mutate()}
+                disabled={removeAccount.isPending}
+                className="btn-primary bg-danger disabled:opacity-40"
+              >
+                {removeAccount.isPending ? "Suppression…" : "Supprimer"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <SheetRow
+            label="Supprimer ce compte"
+            hint="ses opérations et ses charges seront supprimées"
+            danger
+            onClick={() => setConfirmDelete(true)}
+          />
+        )}
+      </div>
+    </Sheet>
   );
 }
 
-/* ---------------- Modale d'association LunchFlow ---------------- */
+/* ---------------- Feuille de connexion à la banque ---------------- */
 
-function LunchflowLinkModal({ account: initial, onClose }: { account: Account; onClose: () => void }) {
+/**
+ * Uniquement l'association : les réglages du compte vivent dans sa feuille.
+ * L'écran ne fait plus qu'une chose — choisir le compte bancaire d'en face.
+ */
+function LunchflowLinkSheet({ account: a, onClose }: { account: Account; onClose: () => void }) {
   const me = useMe();
   const qc = useQueryClient();
-
-  // Version à jour du compte (reflète solde/synchro après association ou synchro forcée).
-  const { data: accounts } = useQuery({
-    queryKey: ["accounts"],
-    queryFn: () => api.get<Account[]>("/api/accounts"),
-  });
-  const account = accounts?.find((a) => a.id === initial.id) ?? initial;
 
   const list = useQuery({
     queryKey: ["lunchflow-accounts"],
@@ -444,99 +832,53 @@ function LunchflowLinkModal({ account: initial, onClose }: { account: Account; o
     qc.invalidateQueries({ queryKey: ["balance"] });
     qc.invalidateQueries({ queryKey: ["cashflow"] });
   };
-
   const link = useMutation({
     mutationFn: (lunchflowAccountId: string) =>
-      api.put(`/api/lunchflow/link/${account.id}`, { lunchflowAccountId }),
+      api.put(`/api/lunchflow/link/${a.id}`, { lunchflowAccountId }),
     onSuccess: invalidate,
   });
   const unlink = useMutation({
-    mutationFn: () => api.del(`/api/lunchflow/link/${account.id}`),
+    mutationFn: () => api.del(`/api/lunchflow/link/${a.id}`),
     onSuccess: () => {
       invalidate();
       onClose();
     },
-  });
-  const sync = useMutation({
-    mutationFn: () => api.post(`/api/lunchflow/sync/${account.id}`, {}),
-    onSuccess: invalidate,
-  });
-  const removeAccount = useMutation({
-    mutationFn: () => api.del(`/api/accounts/${account.id}`),
-    onSuccess: () => {
-      invalidate();
-      qc.invalidateQueries({ queryKey: ["bank-transactions"] });
-      qc.invalidateQueries({ queryKey: ["recurring"] });
-      onClose();
-    },
-  });
-  // Réglages du compte : type / compte principal / compte par défaut du foyer.
-  const patchAccount = useMutation({
-    mutationFn: (payload: { type?: string; isPrimary?: boolean; forecast?: boolean }) =>
-      api.patch(`/api/accounts/${account.id}`, payload),
-    onSuccess: invalidate,
-  });
-  const setDefaultAccount = useMutation({
-    mutationFn: (accountId: string | null) =>
-      api.patch("/api/household/default-account", { accountId }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
   });
 
-  const linkedHere = list.data?.accounts.find((r) => r.linkedAccountId === account.id);
+  const linkedHere = list.data?.accounts.find((r) => r.linkedAccountId === a.id);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center"
-      onClick={onClose}
+    <Sheet
+      title="Connexion à la banque"
+      subtitle={a.name}
+      thumbnail={<BankBadge name={a.name} />}
+      onClose={onClose}
     >
-      <div
-        className="card max-h-[85vh] w-full max-w-md overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="mb-1 flex items-center justify-between">
-          <h2 className="text-lg font-bold">Connexion LunchFlow</h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
-            ✕
-          </button>
-        </div>
-        <div className="mb-3 flex items-center gap-2 text-sm text-slate-500">
-          <BankBadge name={account.name} size="sm" />
-          <span className="truncate">{account.name}</span>
-        </div>
-
-        {account.lunchflowError && (
-          <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-950/40">
-            ⚠️ Dernière synchro en échec : {account.lunchflowError}
-          </div>
-        )}
-
+      <div className="p-4">
         {!me.hasLunchflowKey ? (
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-ink-2">
             Configure d'abord ta clé API LunchFlow dans{" "}
             <span className="font-medium">Réglages → Paramètres</span>.
           </p>
         ) : list.isLoading ? (
           <p className="text-sm text-slate-400">Chargement des comptes LunchFlow…</p>
         ) : list.isError ? (
-          <p className="text-sm text-red-500">
+          <p className="text-sm text-danger">
             Impossible de contacter LunchFlow. Vérifie ta clé API.
           </p>
+        ) : (list.data?.accounts ?? []).length === 0 ? (
+          <p className="text-sm text-slate-400">Aucun compte accessible via LunchFlow.</p>
         ) : (
-          <div className="space-y-2">
-            {(list.data?.accounts ?? []).length === 0 && (
-              <p className="text-sm text-slate-400">Aucun compte accessible via LunchFlow.</p>
-            )}
+          <div className="flex flex-col gap-2">
             {(list.data?.accounts ?? []).map((r) => {
-              const isHere = r.linkedAccountId === account.id;
+              const isHere = r.linkedAccountId === a.id;
               const isElsewhere = !!r.linkedAccountId && !isHere;
               const inactive = r.status !== "ACTIVE";
               return (
                 <div
                   key={r.id}
                   className={`flex items-center gap-2.5 rounded-xl border p-2.5 ${
-                    isHere
-                      ? "border-brand-500 bg-brand-50 dark:bg-brand-500/10"
-                      : "border-slate-200 dark:border-slate-800"
+                    isHere ? "border-brand-500 bg-brand-50" : "border-line"
                   }`}
                 >
                   {r.institutionLogo ? (
@@ -546,7 +888,7 @@ function LunchflowLinkModal({ account: initial, onClose }: { account: Account; o
                       className="h-8 w-8 shrink-0 rounded-lg object-contain"
                     />
                   ) : (
-                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-200 text-xs dark:bg-slate-700">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-xs">
                       🏦
                     </span>
                   )}
@@ -554,20 +896,21 @@ function LunchflowLinkModal({ account: initial, onClose }: { account: Account; o
                     <div className="truncate text-sm font-medium">{r.institutionName || r.name}</div>
                     <div className="truncate text-xs text-slate-400">{r.name}</div>
                     {inactive && (
-                      <div className="mt-0.5 text-xs font-medium text-red-500">
-                        ⚠️ Reconnexion nécessaire ({r.status})
+                      <div className="mt-0.5 text-xs font-medium text-danger">
+                        Reconnexion nécessaire ({r.status})
                       </div>
                     )}
                     {isElsewhere && (
-                      <div className="mt-0.5 text-xs text-amber-600">Associé à un autre compte</div>
+                      <div className="mt-0.5 text-xs text-warning">Associé à un autre compte</div>
                     )}
                   </div>
                   {isHere ? (
-                    <span className="shrink-0 rounded-full bg-brand-600 px-2 py-0.5 text-xs font-medium text-white">
+                    <span className="shrink-0 rounded-full bg-brand-600 px-2 py-0.5 text-xs font-medium text-on-brand">
                       Associé
                     </span>
                   ) : (
                     <button
+                      type="button"
                       onClick={() => link.mutate(r.id)}
                       disabled={link.isPending}
                       className="btn-primary shrink-0 px-3 py-1 text-xs disabled:opacity-40"
@@ -580,98 +923,21 @@ function LunchflowLinkModal({ account: initial, onClose }: { account: Account; o
             })}
           </div>
         )}
-
-        {linkedHere && (
-          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3 dark:border-slate-800">
-            {account.lunchflowSyncedAt && (
-              <span className="mr-auto text-xs text-slate-400">
-                Dernière synchro : {syncTimeFr(account.lunchflowSyncedAt)}
-              </span>
-            )}
-            <button
-              onClick={() => sync.mutate()}
-              disabled={sync.isPending}
-              className="btn-ghost text-xs disabled:opacity-40"
-            >
-              {sync.isPending ? "Synchro…" : "Forcer la synchro"}
-            </button>
-            <button
-              onClick={() => unlink.mutate()}
-              disabled={unlink.isPending}
-              className="text-xs text-red-500 hover:text-red-600 disabled:opacity-40"
-            >
-              Dissocier
-            </button>
-          </div>
-        )}
-
-        {/* Réglages du compte : type, compte principal, compte par défaut. */}
-        <div className="mt-4 space-y-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-          <div className="text-sm font-semibold">Réglages du compte</div>
-          <label className="block text-xs text-slate-400">
-            Type de compte
-            <div className="mt-1">
-              <Select
-                value={account.type}
-                onChange={(v) => patchAccount.mutate({ type: v })}
-                options={[
-                  { value: "checking", label: "🏦 Courant" },
-                  { value: "savings", label: "🐖 Épargne" },
-                  { value: "investment", label: "📈 Investissement" },
-                ]}
-              />
-            </div>
-          </label>
-          {account.owner !== "joint" && (
-            <Checkbox
-              checked={account.isPrimary}
-              onChange={() => patchAccount.mutate({ isPrimary: !account.isPrimary })}
-              label="Compte principal (dépenses prévues de son propriétaire)"
-            />
-          )}
-          <Checkbox
-            checked={me.household.defaultAccountId === account.id}
-            onChange={() =>
-              setDefaultAccount.mutate(
-                me.household.defaultAccountId === account.id ? null : account.id,
-              )
-            }
-            label="Compte par défaut à la création d'une dépense"
-          />
-          <Checkbox
-            checked={account.forecast}
-            onChange={() => patchAccount.mutate({ forecast: !account.forecast })}
-            label="Afficher dans les prévisions (Trésorerie)"
-          />
-        </div>
-
-        {/* Suppression définitive du compte (compte inutilisé). */}
-        <div className="mt-4 border-t border-slate-100 pt-3 dark:border-slate-800">
-          <button
-            onClick={() => {
-              if (
-                confirm(
-                  `Supprimer le compte « ${account.name} » ?\nToutes ses transactions bancaires et charges associées seront aussi supprimées. Cette action est irréversible.`,
-                )
-              )
-                removeAccount.mutate();
-            }}
-            disabled={removeAccount.isPending}
-            className="text-xs font-medium text-red-500 hover:text-red-600 disabled:opacity-40"
-          >
-            🗑️ {removeAccount.isPending ? "Suppression…" : "Supprimer le compte bancaire"}
-          </button>
-        </div>
       </div>
-    </div>
+      {linkedHere && (
+        <div className="border-t border-hairline">
+          <SheetRow
+            label="Dissocier la banque"
+            hint="le solde repassera en saisie manuelle, les opérations sont conservées"
+            danger
+            disabled={unlink.isPending}
+            onClick={() => unlink.mutate()}
+          />
+        </div>
+      )}
+    </Sheet>
   );
 }
-
-const ACCOUNT_TYPE_OPTIONS = [
-  { value: "checking", label: "🏦 Courant" },
-  { value: "savings", label: "🐖 Épargne" },
-  { value: "investment", label: "📈 Investissement" },
-];
 
 // Avatar d'un propriétaire : membre (photo Google) ou « Commun » (pastille 👫).
 function OwnerAvatar({ owner, className }: { owner: string; className: string }) {
@@ -781,18 +1047,18 @@ function CreateAccountModal({ defaultOwner, onClose }: { defaultOwner: string; o
             <OwnerPicker value={owner} onChange={setOwner} />
           </div>
 
-          <div>
-            <label className="mb-1.5 block text-xs text-slate-400">Nom du compte</label>
+          <label className="flex flex-col gap-1.5 text-xs text-slate-400">
+            Nom du compte
             <Input
               autoFocus
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="ex. BoursoBank, LCL commun, Livret A…"
             />
-          </div>
+          </label>
 
-          <div>
-            <label className="mb-1.5 block text-xs text-slate-400">Type de compte</label>
+          <div className="flex flex-col gap-1.5 text-xs text-slate-400">
+            Type de compte
             <Select value={type} onChange={setType} options={ACCOUNT_TYPE_OPTIONS} />
           </div>
 
@@ -818,7 +1084,7 @@ function CreateAccountModal({ defaultOwner, onClose }: { defaultOwner: string; o
   );
 }
 
-/* ---------------- Transactions bancaires ---------------- */
+/* ---------------- Opérations : helpers ---------------- */
 
 // Libellé bancaire brut (multiligne SEPA) condensé en une ligne lisible.
 function cleanBankLabel(s: string): string {
@@ -834,22 +1100,27 @@ function isVirement(rawLabel: string): boolean {
   return /\bvir(ement)?\b/i.test(rawLabel);
 }
 
-/** Libellés des vues membre/commun, depuis la config du foyer. */
+/**
+ * Titre lisible d'une opération. On préfixe « Virement » quand le nom enrichi
+ * masque la nature du mouvement — mais pas quand il la dit déjà, sinon on
+ * affiche « Virement · Virement Julien Gabriel ».
+ */
+function txTitle(t: BankTransaction): string {
+  const base = t.merchantName || cleanBankLabel(t.rawLabel) || "Opération";
+  const needsPrefix = !!t.merchantName && isVirement(t.rawLabel) && !isVirement(base);
+  return needsPrefix ? `Virement · ${base}` : base;
+}
+
+/** Libellés des périmètres membre/commun, depuis la config du foyer. */
 function useMemberLabels(): Record<string, string> {
   const members = useMe().household.members;
   return { a: members.a.name, b: members.b.name, joint: "Commun" };
 }
-// Vues de l'onglet Transactions = propriétaire des comptes affichés.
-const TX_VIEW_IDS = ["a", "b", "joint"] as const;
-function useTxViews() {
-  const labels = useMemberLabels();
-  return TX_VIEW_IDS.map((v) => ({ value: v as string, label: labels[v] }));
-}
 
-// Icône entonnoir (bouton « Filtres » mobile).
-function FunnelIcon({ className = "h-4 w-4" }: { className?: string }) {
+// Icône entonnoir (bouton « Filtres »).
+function FunnelIcon({ className = "h-5 w-5" }: { className?: string }) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" className={className}>
       <path d="M3 4h18l-7 8v6l-4 2v-8L3 4z" />
     </svg>
   );
@@ -909,10 +1180,11 @@ function PeriodFilter({
       {open && (
         <>
           <div className="fixed inset-0 z-[60]" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 z-[70] mt-1 w-[min(92vw,340px)] rounded-xl border border-slate-200 bg-white p-3 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+          <div className="absolute left-0 z-[70] mt-1 w-[min(92vw,340px)] rounded-xl border border-line bg-surface p-3 shadow-xl">
             <SubNav
               value={tab}
               onChange={(v) => setTab(v as "periode" | "date")}
+              bleed={false}
               items={[
                 { value: "periode", label: "Période" },
                 { value: "date", label: "Date" },
@@ -930,11 +1202,11 @@ function PeriodFilter({
                         setDateTo(o.end);
                         setOpen(false);
                       }}
-                      className="flex items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
+                      className="flex items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm hover:bg-surface-2"
                     >
                       <span
                         className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 ${
-                          sel ? "border-brand-600" : "border-slate-300 dark:border-slate-600"
+                          sel ? "border-brand-600" : "border-line"
                         }`}
                       >
                         {sel && <span className="h-2 w-2 rounded-full bg-brand-600" />}
@@ -979,7 +1251,7 @@ function TxTypeIcon({ type, className = "h-4 w-4" }: { type: string; className?:
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="2"
+      strokeWidth="1.9"
       strokeLinecap="round"
       strokeLinejoin="round"
       className={className}
@@ -1005,10 +1277,8 @@ function TxTypeIcon({ type, className = "h-4 w-4" }: { type: string; className?:
 // Filtre par sens du montant : tous / entrées (crédits) / sorties (débits).
 type SignFilter = "all" | "in" | "out";
 
-// Champs de filtre montant + sens, partagés entre l'affichage inline (ordinateur)
-// et la modale (mobile). `stacked` = empilé pleine largeur (modale).
+// Champs de filtre montant + sens de la feuille de filtres.
 function TxFilterFields({
-  stacked,
   minAmount,
   setMinAmount,
   maxAmount,
@@ -1018,7 +1288,6 @@ function TxFilterFields({
   types,
   setTypes,
 }: {
-  stacked: boolean;
   minAmount: string;
   setMinAmount: (v: string) => void;
   maxAmount: string;
@@ -1028,9 +1297,6 @@ function TxFilterFields({
   types: string[];
   setTypes: (v: string[]) => void;
 }) {
-  const amountW = stacked ? "w-full" : "w-24 shrink-0";
-  const Label = ({ text }: { text: string }) =>
-    stacked ? <label className="mb-1 block text-xs text-slate-400">{text}</label> : null;
   const signOptions: { v: SignFilter; label: string }[] = [
     { v: "all", label: "Tous" },
     { v: "in", label: "Entrées" },
@@ -1038,18 +1304,16 @@ function TxFilterFields({
   ];
   return (
     <>
-      <div className={stacked ? "w-full" : "shrink-0"}>
-        <Label text="Sens" />
-        <div className="flex rounded-xl border border-slate-300 p-0.5 dark:border-slate-700">
+      <div>
+        <label className="mb-1 block text-xs text-slate-400">Sens</label>
+        <div className="flex rounded-xl border border-line p-0.5">
           {signOptions.map((o) => (
             <button
               key={o.v}
               type="button"
               onClick={() => setSign(o.v)}
-              className={`rounded-lg px-2.5 py-1.5 text-sm ${stacked ? "flex-1" : ""} ${
-                sign === o.v
-                  ? "bg-brand-600 text-white"
-                  : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+              className={`flex-1 rounded-lg px-2.5 py-1.5 text-sm ${
+                sign === o.v ? "bg-brand-600 text-on-brand" : "text-ink-2 hover:text-ink"
               }`}
             >
               {o.label}
@@ -1057,8 +1321,8 @@ function TxFilterFields({
           ))}
         </div>
       </div>
-      <div className={stacked ? "w-full" : "w-44 shrink-0"}>
-        <Label text="Type" />
+      <div>
+        <label className="mb-1 block text-xs text-slate-400">Type</label>
         <MultiSelect
           values={types}
           onChange={setTypes}
@@ -1070,51 +1334,276 @@ function TxFilterFields({
           }))}
         />
       </div>
-      <div className={amountW}>
-        <Label text="Montant min (€)" />
-        <input
-          type="number"
-          step="0.01"
-          min="0"
-          value={minAmount}
-          onChange={(e) => setMinAmount(e.target.value)}
-          placeholder="Min €"
-          className="input tabular-nums"
-        />
-      </div>
-      <div className={amountW}>
-        <Label text="Montant max (€)" />
-        <input
-          type="number"
-          step="0.01"
-          min="0"
-          value={maxAmount}
-          onChange={(e) => setMaxAmount(e.target.value)}
-          placeholder="Max €"
-          className="input tabular-nums"
-        />
+      <div className="grid grid-cols-2 gap-2">
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
+          Montant min (€)
+          <Input
+            type="number"
+            step="0.01"
+            min="0"
+            value={minAmount}
+            onChange={(e) => setMinAmount(e.target.value)}
+            placeholder="Min"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-slate-400">
+          Montant max (€)
+          <Input
+            type="number"
+            step="0.01"
+            min="0"
+            value={maxAmount}
+            onChange={(e) => setMaxAmount(e.target.value)}
+            placeholder="Max"
+          />
+        </label>
       </div>
     </>
   );
 }
 
-function Transactions({ view }: { view?: string }) {
-  const me = useMe();
-  const navigate = useNavigate();
-  const cats = useExpenseCategories();
-  const txViews = useTxViews();
-  const memberLabels = useMemberLabels();
-  const member = TX_VIEW_IDS.some((v) => v === view) ? (view as string) : me.member;
-
-  const { data: accounts } = useQuery({
-    queryKey: ["accounts"],
-    queryFn: () => api.get<Account[]>("/api/accounts"),
+/** « Aujourd'hui » · « Hier » · « 31 juillet » · « 31 juillet 2025 ». */
+function dayHeaderFr(iso: string): string {
+  const today = todayIso();
+  if (iso === today) return "Aujourd'hui";
+  const y = new Date(`${today}T00:00:00`);
+  y.setDate(y.getDate() - 1);
+  if (iso === y.toISOString().slice(0, 10)) return "Hier";
+  const d = new Date(`${iso}T00:00:00`);
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString("fr-FR", {
+    day: "numeric",
+    month: "long",
+    ...(sameYear ? {} : { year: "numeric" }),
   });
+}
+
+/** Montant signé : « +590,00 € » / « −582,12 € ». Le « + » n'est pas dans `eur`. */
+const eurSigned = (cents: number) => (cents > 0 ? `+${eur(cents)}` : eur(cents));
+
+/* ---------------- Feuille d'une opération ---------------- */
+
+/**
+ * Ce qu'on veut faire d'une ligne : savoir ce que c'est vraiment (le libellé
+ * bancaire brut), la classer, et la rattacher à une charge. Remplace le
+ * dépliage sous la ligne, qui poussait le reste de la liste vers le bas.
+ */
+function TxSheet({
+  tx: t,
+  matched,
+  onClose,
+  onLinkExpense,
+}: {
+  tx: BankTransaction;
+  matched: Recurring | null;
+  onClose: () => void;
+  onLinkExpense: () => void;
+}) {
+  const qc = useQueryClient();
+  const cats = useExpenseCategories();
+  const setCategory = useMutation({
+    mutationFn: (category: string | null) =>
+      api.patch(`/api/lunchflow/transactions/${t.id}`, { category }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["bank-transactions"] }),
+  });
+
+  return (
+    <Sheet
+      title={txTitle(t)}
+      subtitle={`${dateFr(t.date)} · ${t.accountName}`}
+      thumbnail={
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-2 text-ink-2">
+          <TxTypeIcon type={t.type} className="h-5 w-5" />
+        </span>
+      }
+      onClose={onClose}
+    >
+      <div className="border-b border-hairline px-4 py-3">
+        <div className={`text-2xl font-bold ${t.amount > 0 ? "text-brand-600" : ""}`}>
+          {eurSigned(t.amount)}
+        </div>
+        <div className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-slate-400">
+          {t.rawLabel || "—"}
+        </div>
+        {t.merchantAddress && <div className="mt-1 text-xs text-slate-400">{t.merchantAddress}</div>}
+        {t.merchantWebsite && (
+          <a
+            href={t.merchantWebsite.startsWith("http") ? t.merchantWebsite : `https://${t.merchantWebsite}`}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-1 block truncate text-xs text-brand-600 underline hover:no-underline"
+          >
+            {t.merchantWebsite}
+          </a>
+        )}
+      </div>
+
+      <div className="border-b border-hairline px-4 py-3">
+        <div className="eyebrow">Catégorie</div>
+        <div className="mt-2 flex flex-wrap gap-2">
+          {cats.map((c) => {
+            const active = t.category === c.key;
+            return (
+              <button
+                key={c.key}
+                type="button"
+                onClick={() => setCategory.mutate(active ? null : c.key)}
+                disabled={setCategory.isPending}
+                className={`flex min-h-tap items-center gap-1.5 rounded-full px-3 text-sm ${
+                  active
+                    ? "bg-brand-600 font-semibold text-on-brand"
+                    : "border border-line text-ink-2 hover:bg-surface-2"
+                }`}
+              >
+                <span aria-hidden>{c.icon}</span>
+                {c.name}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <SheetRow
+        label={matched ? "Lier à une autre dépense" : "Lier à une dépense"}
+        hint={matched ? `rattachée à « ${matched.label} »` : "rattache la ligne à une charge récurrente"}
+        onClick={onLinkExpense}
+        trailing={<LinkIcon className="h-5 w-5 shrink-0 text-slate-400" />}
+      />
+    </Sheet>
+  );
+}
+
+/* ---------------- Onglet Comptes ---------------- */
+
+function ComptesTab({
+  accounts,
+  onOpenAccount,
+  onCreate,
+}: {
+  accounts: Account[];
+  onOpenAccount: (a: Account) => void;
+  onCreate: () => void;
+}) {
+  const memberLabels = useMemberLabels();
+  // Périmètre : un **filtre**, pas un sous-menu — l'URL porte déjà l'onglet
+  // (Comptes / Opérations). « Tous » par défaut : on veut d'abord voir le foyer.
+  const [scope, setScope] = useState("tous");
+
+  // « À débiter » = ce qui doit encore sortir d'ici la fin du mois, même source
+  // que Trésorerie (projection des charges), pas un compteur maison.
+  const now = new Date();
+  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  const daysLeft = Math.max(
+    1,
+    Math.round((endOfMonth.getTime() - now.getTime()) / 86_400_000),
+  );
+  const { data: cashflow } = useQuery({
+    queryKey: ["cashflow", "month", daysLeft],
+    queryFn: () => api.get<Cashflow>(`/api/cashflow?days=${daysLeft}`),
+  });
+
+  const shown = accounts.filter((a) => scope === "tous" || a.owner === scope);
+  const total = shown.reduce((s, a) => s + a.currentBalance, 0);
+  const debits = (cashflow?.byAccount ?? [])
+    .filter((b) => shown.some((a) => a.id === b.accountId))
+    .reduce((s, b) => s + b.totalDebits, 0);
+
+  const groups = ACCOUNT_GROUPS.map((g) => ({
+    ...g,
+    items: shown.filter((a) => a.type === g.type),
+  })).filter((g) => g.items.length > 0);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <FilterChips
+        value={scope}
+        onChange={setScope}
+        items={[
+          { value: "tous", label: "Tous" },
+          { value: "a", label: memberLabels.a },
+          { value: "b", label: memberLabels.b },
+          { value: "joint", label: memberLabels.joint },
+        ]}
+      />
+
+      {shown.length === 0 ? (
+        <div className="card">
+          <div className="text-sm text-ink-2">
+            {accounts.length === 0
+              ? "Aucun compte bancaire pour l'instant."
+              : `Aucun compte pour ${memberLabels[scope] ?? "ce périmètre"}.`}
+          </div>
+          <button type="button" onClick={onCreate} className="btn-primary mt-3">
+            Ajouter un compte
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* Le total n'est plus une tuile parmi les comptes : c'est la réponse. */}
+          <div className="card">
+            <div className="text-sm text-ink-2">
+              Total disponible · {shown.length} compte{shown.length > 1 ? "s" : ""}
+            </div>
+            <div className="mt-1 text-3xl font-bold">{eur(total)}</div>
+            <div className="mt-4 flex gap-3 border-t border-hairline pt-3">
+              {/* À l'euro près : le montant exact est déjà au-dessus, et quatre
+                  colonnes de centimes ne tiennent pas sur une largeur de téléphone. */}
+              {groups.map((g) => (
+                <MiniStat
+                  key={g.type}
+                  label={g.short}
+                  value={eur0(g.items.reduce((s, a) => s + a.currentBalance, 0))}
+                />
+              ))}
+              {debits > 0 && <MiniStat label="À débiter" value={`−${eur0(debits)}`} tone="danger" />}
+            </div>
+          </div>
+
+          {groups.map((g) => (
+            <div key={g.type} className="flex flex-col gap-2">
+              <div className="eyebrow">{g.title}</div>
+              <div className="card">
+                {g.items.map((a, i) => (
+                  <div key={a.id} className={i === g.items.length - 1 ? "" : "border-b border-hairline"}>
+                    <button
+                      type="button"
+                      onClick={() => onOpenAccount(a)}
+                      className="flex min-h-[64px] w-full items-center gap-3 py-2 text-left"
+                    >
+                      <BankBadge name={a.name} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-base font-medium">{a.name}</span>
+                        <span className="mt-0.5 block">
+                          <SyncLine account={a} />
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-base font-semibold">
+                        {eur(a.currentBalance)}
+                      </span>
+                      <span className="shrink-0 text-ink-3">
+                        <DotsGlyph />
+                      </span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Onglet Opérations ---------------- */
+
+function OperationsTab({ accounts }: { accounts: Account[] }) {
+  const cats = useExpenseCategories();
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
-    queryKey: ["bank-transactions", member],
+    queryKey: ["bank-transactions", "all"],
     queryFn: ({ pageParam }) =>
       api.get<{ transactions: BankTransaction[]; hasOlder: boolean; page: number }>(
-        `/api/lunchflow/transactions?member=${member}&page=${pageParam}`,
+        `/api/lunchflow/transactions?member=all&page=${pageParam}`,
       ),
     initialPageParam: 0,
     getNextPageParam: (last) => (last.hasOlder ? last.page + 1 : undefined),
@@ -1125,7 +1614,10 @@ function Transactions({ view }: { view?: string }) {
     queryFn: () => api.get<Recurring[]>("/api/recurring"),
   });
 
-  const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
+  // Filtre rapide à une dimension : tout, un compte, ou les lignes à classer.
+  // Deux dimensions dans une même rangée de pastilles se contredisent ; les
+  // filtres croisés vivent dans l'entonnoir.
+  const [quick, setQuick] = useState("tous");
   const [search, setSearch] = useState("");
   const [minAmount, setMinAmount] = useState("");
   const [maxAmount, setMaxAmount] = useState("");
@@ -1135,10 +1627,8 @@ function Transactions({ view }: { view?: string }) {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [linkTarget, setLinkTarget] = useState<Account | null>(null);
+  const [txSheet, setTxSheet] = useState<BankTransaction | null>(null);
   const [linkExpenseTx, setLinkExpenseTx] = useState<BankTransaction | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   // Scroll infini : charge la fenêtre suivante (plus ancienne) quand la sentinelle
   // en bas de liste devient visible.
@@ -1157,7 +1647,6 @@ function Transactions({ view }: { view?: string }) {
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   const resetFilters = () => {
-    setSearch("");
     setMinAmount("");
     setMaxAmount("");
     setSign("all");
@@ -1177,21 +1666,8 @@ function Transactions({ view }: { view?: string }) {
     const start = `${y}-${pad(m + 1)}-01`;
     const end = `${y}-${pad(m + 1)}-${pad(new Date(y, m + 1, 0).getDate())}`;
     const name = d.toLocaleDateString("fr-FR", { month: "long" });
-    return { label: i === 0 ? "Mois en cours" : name.charAt(0).toUpperCase() + name.slice(1), start, end };
+    return { label: i === 0 ? "Mois en cours" : cap(name), start, end };
   });
-
-  // Ordre : compte principal d'abord, puis courant → investissement → épargne, puis le nom.
-  const typeRank = { checking: 0, investment: 1, savings: 2 } as const;
-  const accountRank = (a: Account) =>
-    (a.isPrimary ? 0 : 10) + (typeRank[a.type as keyof typeof typeRank] ?? 3);
-  const myAccounts = (accounts ?? [])
-    .filter((a) => a.owner === member)
-    .sort((x, y) => accountRank(x) - accountRank(y) || x.name.localeCompare(y.name, "fr"));
-  const linkedCount = myAccounts.filter((a) => a.lunchflowAccountId).length;
-  const total = myAccounts.reduce((s, a) => s + a.currentBalance, 0);
-  // Sélection effective : ignorée si le compte n'appartient pas à la vue courante
-  // (évite une sélection fantôme en changeant de vue membre a/membre b/Commun).
-  const activeAccount = myAccounts.some((a) => a.id === selectedAccount) ? selectedAccount : null;
 
   const all = data?.pages.flatMap((p) => p.transactions) ?? [];
   const q = search.trim().toLowerCase();
@@ -1231,8 +1707,10 @@ function Transactions({ view }: { view?: string }) {
     );
     return byAmount || matchedByName(t) !== null;
   };
+
   const txs = all.filter((t) => {
-    if (activeAccount && t.accountId !== activeAccount) return false;
+    if (quick === "sans-categorie" && t.category) return false;
+    if (quick.startsWith("acc:") && t.accountId !== quick.slice(4)) return false;
     const abs = Math.abs(t.amount) / 100;
     if (q) {
       const hay = `${t.merchantName ?? ""} ${t.rawLabel} ${t.accountName}`.toLowerCase();
@@ -1258,78 +1736,150 @@ function Transactions({ view }: { view?: string }) {
     onlyUnusual ||
     dateFrom !== "" ||
     dateTo !== "";
-  const hasFilters = search.trim() !== "" || hasAdvanced;
+  const hasFilters = q !== "" || hasAdvanced || quick !== "tous";
 
-  const toggle = (id: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
+  // Regroupement par jour, avec le solde du jour : une date répétée sur dix
+  // lignes ne dit rien, une date en tête de groupe dit combien la journée a coûté.
+  const days: { date: string; net: number; items: BankTransaction[] }[] = [];
+  for (const t of txs) {
+    const last = days[days.length - 1];
+    if (last && last.date === t.date) {
+      last.items.push(t);
+      last.net += t.amount;
+    } else {
+      days.push({ date: t.date, net: t.amount, items: [t] });
+    }
+  }
+
+  const linkedCount = accounts.filter((a) => a.lunchflowAccountId).length;
+  const uncategorized = all.filter((t) => !t.category).length;
 
   return (
-    <div className="flex flex-col gap-4 pb-24 md:pb-0">
-      {/* Bascule membre a / membre b / Commun — une URL par vue ; bouton de création aligné à droite (ordinateur) */}
-      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-        <span aria-hidden="true" />
-        <PillToggle value={member} onChange={(v) => navigate(`/money/comptes/${v}`)} items={txViews} />
-        <div className="flex justify-end">
-          <button onClick={() => setCreateOpen(true)} className="btn-primary hidden md:inline-flex">
-            + Ajouter un compte
+    <div className="flex flex-col gap-4">
+      <SearchField
+        value={search}
+        onChange={setSearch}
+        placeholder="Libellé, montant…"
+        trailing={
+          <button
+            type="button"
+            onClick={() => setFiltersOpen(true)}
+            aria-label="Filtres"
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+              hasAdvanced ? "bg-brand-600 text-on-brand" : "text-ink-3 hover:text-ink"
+            }`}
+          >
+            <FunnelIcon />
           </button>
-        </div>
-      </div>
+        }
+      />
 
-      {/* Cartes des comptes : solde éditable / synchro / sélection = filtre */}
-      {myAccounts.length > 0 && (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-          {myAccounts.map((a) => (
-            <AccountCard
-              key={a.id}
-              account={a}
-              selected={activeAccount === a.id}
-              onSelect={() => setSelectedAccount((cur) => (cur === a.id ? null : a.id))}
-              onOpenLink={() => setLinkTarget(a)}
-            />
-          ))}
-          <div className="card bg-brand-50 dark:bg-brand-500/10">
-            <div className="text-xs font-medium text-brand-700 dark:text-brand-300">Total</div>
-            <div className="mt-1 text-xl font-bold tabular-nums text-brand-700 dark:text-brand-300">
-              {eur(total)}
+      <FilterChips
+        value={quick}
+        onChange={setQuick}
+        items={[
+          { value: "tous", label: "Tous" },
+          ...accounts.map((a) => ({ value: `acc:${a.id}`, label: a.name })),
+          ...(uncategorized > 0
+            ? [{ value: "sans-categorie", label: `Sans catégorie · ${uncategorized}` }]
+            : []),
+        ]}
+      />
+
+      {accounts.length === 0 ? (
+        <div className="card text-sm text-ink-2">Aucun compte bancaire pour l'instant.</div>
+      ) : linkedCount === 0 && all.length === 0 ? (
+        <div className="card text-sm text-ink-2">
+          Aucun compte connecté. Ouvre un compte dans l'onglet Comptes pour le connecter à ta banque
+          ou importer un relevé.
+        </div>
+      ) : isLoading ? (
+        <div className="card text-sm text-slate-400">Chargement des opérations…</div>
+      ) : days.length === 0 ? (
+        <div className="card text-sm text-ink-2">
+          {hasFilters ? "Aucune opération ne correspond aux filtres." : "Aucune opération."}
+        </div>
+      ) : (
+        days.map((d) => (
+          <div key={d.date} className="flex flex-col gap-2">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="eyebrow">{dayHeaderFr(d.date)}</span>
+              <span className={`text-xs font-semibold ${d.net > 0 ? "text-brand-600" : "text-ink-2"}`}>
+                {eurSigned(d.net)}
+              </span>
+            </div>
+            <div className="card">
+              {d.items.map((t, i) => {
+                const cat = categoryMeta(cats, t.category);
+                const parts = [
+                  cat?.name,
+                  matchedByName(t) ? "récurrent" : null,
+                  t.isPending ? "en attente" : t.future ? "à venir" : null,
+                ].filter(Boolean);
+                return (
+                  <div
+                    key={t.id}
+                    className={i === d.items.length - 1 ? "" : "border-b border-hairline"}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setTxSheet(t)}
+                      className="flex min-h-[64px] w-full items-center gap-3 py-2 text-left"
+                    >
+                      {/* Le type de mouvement, pas l'avatar de banque : la banque
+                          est déjà dite par le filtre, le type ne l'est nulle part. */}
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-2 text-ink-2">
+                        <TxTypeIcon type={t.type} className="h-5 w-5" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-base font-medium">{txTitle(t)}</span>
+                        {cat ? (
+                          <span className="mt-0.5 block truncate text-xs text-slate-400">
+                            {parts.join(" · ")}
+                          </span>
+                        ) : (
+                          <span className="mt-0.5 block text-xs text-warning">
+                            Sans catégorie · toucher pour classer
+                          </span>
+                        )}
+                      </span>
+                      <span
+                        className={`shrink-0 text-base font-semibold ${
+                          t.amount > 0 ? "text-brand-600" : ""
+                        }`}
+                      >
+                        {eurSigned(t.amount)}
+                      </span>
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
-        </div>
+        ))
       )}
 
-      {/* Recherche (toujours) + filtres. Ordinateur : inline. Mobile : bouton
-          « Filtres » qui ouvre une modale. */}
-      {linkedCount > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="min-w-[12rem] flex-1">
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Rechercher (vendeur, libellé, montant…)"
-              className="input"
-            />
-          </div>
+      {/* Sentinelle du scroll infini + indicateur de chargement de la suite */}
+      {all.length > 0 && <div ref={loadMoreRef} className="h-px" />}
+      {isFetchingNextPage && <p className="text-center text-xs text-slate-400">Chargement…</p>}
+      {!hasNextPage && all.length > 0 && (
+        <p className="text-center text-xs text-ink-3">Fin de l'historique</p>
+      )}
 
-          {/* Filtre Période — ordinateur seulement (mobile : dans la modale) */}
-          <div className="hidden w-56 md:block">
-            <PeriodFilter
-              dateFrom={dateFrom}
-              dateTo={dateTo}
-              setDateFrom={setDateFrom}
-              setDateTo={setDateTo}
-              presets={datePresets}
-            />
-          </div>
-
-          {/* Ordinateur : filtres inline */}
-          <div className="hidden flex-wrap items-center gap-2 md:flex">
+      {filtersOpen && (
+        <Sheet title="Filtres" onClose={() => setFiltersOpen(false)}>
+          <div className="flex flex-col gap-3 p-4">
+            <div>
+              <label className="mb-1 block text-xs text-slate-400">Période</label>
+              <PeriodFilter
+                dateFrom={dateFrom}
+                dateTo={dateTo}
+                setDateFrom={setDateFrom}
+                setDateTo={setDateTo}
+                presets={datePresets}
+              />
+            </div>
             <TxFilterFields
-              stacked={false}
               minAmount={minAmount}
               setMinAmount={setMinAmount}
               maxAmount={maxAmount}
@@ -1342,81 +1892,13 @@ function Transactions({ view }: { view?: string }) {
             <button
               type="button"
               onClick={() => setOnlyUnusual((v) => !v)}
-              title="Masquer les charges récurrentes (page Dépenses) pour ne voir que le ponctuel"
-              className={`shrink-0 rounded-xl border px-3 py-2 text-sm ${
-                onlyUnusual
-                  ? "border-brand-500 text-brand-600 ring-1 ring-brand-500"
-                  : "border-slate-300 text-slate-500 dark:border-slate-700"
+              className={`w-full rounded-xl border px-3 py-2 text-sm ${
+                onlyUnusual ? "border-brand-500 text-brand-600 ring-1 ring-brand-500" : "border-line text-ink-2"
               }`}
             >
-              Ponctuel
+              {onlyUnusual ? "✓ " : ""}Ponctuel uniquement (masque les récurrentes)
             </button>
-          </div>
-
-          {/* Mobile : bouton Filtres (entonnoir), anneau si un filtre est actif */}
-          <button
-            onClick={() => setFiltersOpen(true)}
-            className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-3 py-2 text-sm md:hidden ${
-              hasAdvanced
-                ? "border-brand-500 text-brand-600 ring-1 ring-brand-500"
-                : "border-slate-300 text-slate-500 dark:border-slate-700"
-            }`}
-            aria-label="Filtres"
-          >
-            <FunnelIcon />
-            Filtres
-          </button>
-        </div>
-      )}
-
-      {/* Modale filtres (mobile) */}
-      {filtersOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center md:hidden"
-          onClick={() => setFiltersOpen(false)}
-        >
-          <div className="card w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-lg font-bold">Filtres</h2>
-              <button onClick={() => setFiltersOpen(false)} className="text-slate-400 hover:text-slate-600">
-                ✕
-              </button>
-            </div>
-            <div className="flex flex-col gap-3">
-              <div>
-                <label className="mb-1 block text-xs text-slate-400">Période</label>
-                <PeriodFilter
-                  dateFrom={dateFrom}
-                  dateTo={dateTo}
-                  setDateFrom={setDateFrom}
-                  setDateTo={setDateTo}
-                  presets={datePresets}
-                />
-              </div>
-              <TxFilterFields
-                stacked
-                minAmount={minAmount}
-                setMinAmount={setMinAmount}
-                maxAmount={maxAmount}
-                setMaxAmount={setMaxAmount}
-                sign={sign}
-                setSign={setSign}
-                types={typeFilter}
-                setTypes={setTypeFilter}
-              />
-              <button
-                type="button"
-                onClick={() => setOnlyUnusual((v) => !v)}
-                className={`w-full rounded-xl border px-3 py-2 text-sm ${
-                  onlyUnusual
-                    ? "border-brand-500 text-brand-600 ring-1 ring-brand-500"
-                    : "border-slate-300 text-slate-500 dark:border-slate-700"
-                }`}
-              >
-                {onlyUnusual ? "✓ " : ""}Ponctuel uniquement (masque les récurrentes)
-              </button>
-            </div>
-            <div className="mt-4 flex items-center justify-between">
+            <div className="mt-1 flex items-center justify-between">
               <button onClick={resetFilters} className="btn-ghost text-sm">
                 Réinitialiser
               </button>
@@ -1425,177 +1907,108 @@ function Transactions({ view }: { view?: string }) {
               </button>
             </div>
           </div>
-        </div>
+        </Sheet>
       )}
 
-      {/* Liste des transactions */}
-      <div className="card">
-        {myAccounts.length === 0 ? (
-          <p className="text-sm text-slate-400">Aucun compte pour {memberLabels[member] ?? member}.</p>
-        ) : linkedCount === 0 ? (
-          <p className="text-sm text-slate-400">
-            Aucun compte connecté à LunchFlow. Utilise l'icône 🔗 sur une carte ci-dessus pour
-            l'associer.
-          </p>
-        ) : isLoading ? (
-          <p className="text-sm text-slate-400">Chargement des transactions…</p>
-        ) : txs.length === 0 ? (
-          <p className="text-sm text-slate-400">
-            {hasFilters ? "Aucune transaction ne correspond aux filtres." : "Aucune transaction."}
-          </p>
-        ) : (
-          <ul className="flex flex-col divide-y divide-slate-100 dark:divide-slate-800">
-            {txs.map((t) => {
-              const dimmed = t.future || t.isPending;
-              const cat = categoryMeta(cats, t.category);
-              const base = t.merchantName || cleanBankLabel(t.rawLabel) || "Transaction";
-              // Si le nom enrichi masque la nature du mouvement, préfixer « Virement ».
-              const title = t.merchantName && isVirement(t.rawLabel) ? `Virement · ${base}` : base;
-              const isOpen = expanded.has(t.id);
-              return (
-                <li key={t.id} className="py-2.5">
-                  <div
-                    className={`flex cursor-pointer items-center gap-3 ${dimmed ? "text-slate-400 dark:text-slate-500" : ""}`}
-                    onClick={() => toggle(t.id)}
-                  >
-                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-sm dark:bg-slate-800">
-                      {cat?.icon ?? (t.amount >= 0 ? "💰" : "💳")}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5 text-sm font-medium">
-                        <TxTypeIcon type={t.type} className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                        <span className="truncate">{title}</span>
-                      </div>
-                      <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400">
-                        {!activeAccount && myAccounts.length > 1 && (
-                          <span className="flex items-center gap-1">
-                            <BankBadge name={t.accountName} size="sm" />
-                            <span className="truncate">{t.accountName}</span>
-                          </span>
-                        )}
-                        <span>{dateFr(t.date)}</span>
-                        {cat && (
-                          <span className="rounded-full bg-slate-100 px-1.5 py-0.5 dark:bg-slate-800">
-                            {cat.name}
-                          </span>
-                        )}
-                        {t.isPending && (
-                          <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-                            en attente
-                          </span>
-                        )}
-                        {t.future && !t.isPending && (
-                          <span className="rounded-full bg-slate-100 px-1.5 py-0.5 dark:bg-slate-800">
-                            à venir
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <span
-                      className={`shrink-0 text-sm font-semibold tabular-nums ${
-                        dimmed ? "" : t.amount >= 0 ? "text-green-600" : ""
-                      }`}
-                    >
-                      {eur(t.amount)}
-                    </span>
-                  </div>
-
-                  {isOpen && (
-                    <div className="mt-2 space-y-1.5 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-900/60 dark:text-slate-400">
-                      <div className="whitespace-pre-wrap font-mono text-[11px] text-slate-500">
-                        {t.rawLabel || "—"}
-                      </div>
-                      {t.merchantWebsite && (
-                        <div>
-                          🌐{" "}
-                          <a
-                            href={t.merchantWebsite.startsWith("http") ? t.merchantWebsite : `https://${t.merchantWebsite}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-brand-600 underline hover:no-underline"
-                          >
-                            {t.merchantWebsite}
-                          </a>
-                        </div>
-                      )}
-                      {t.merchantAddress && <div>📍 {t.merchantAddress}</div>}
-                      {/* Rattachement à une charge récurrente (matching par nom) */}
-                      {(() => {
-                        const matched = matchedByName(t);
-                        return (
-                          <div className="flex items-center gap-2 pt-1">
-                            {matched && (
-                              <span className="rounded-full bg-brand-50 px-2 py-0.5 text-brand-700 dark:bg-brand-500/10 dark:text-brand-300">
-                                Rattaché à « {matched.label} »
-                              </span>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => setLinkExpenseTx(t)}
-                              className="inline-flex items-center gap-1 font-medium text-brand-600 hover:text-brand-700"
-                            >
-                              <LinkIcon className="h-3.5 w-3.5" />
-                              {matched ? "Lier à une autre dépense" : "Lier à une dépense"}
-                            </button>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-
-        {/* Sentinelle du scroll infini + indicateur de chargement de la suite */}
-        {all.length > 0 && <div ref={loadMoreRef} className="h-px" />}
-        {isFetchingNextPage && (
-          <p className="pt-3 text-center text-xs text-slate-400">Chargement…</p>
-        )}
-        {!hasNextPage && all.length > 0 && (
-          <p className="pt-3 text-center text-xs text-slate-300 dark:text-slate-600">
-            Fin de l'historique
-          </p>
-        )}
-      </div>
-
-      {/* Bouton flottant de création (mobile uniquement). */}
-      <button
-        type="button"
-        onClick={() => setCreateOpen(true)}
-        aria-label="Ajouter un compte"
-        className="btn-primary fixed bottom-6 right-6 z-30 flex h-14 w-14 items-center justify-center rounded-full p-0 shadow-lg md:hidden"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          className="h-6 w-6"
-          aria-hidden="true"
-        >
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </button>
-
-      {createOpen && (
-        <CreateAccountModal defaultOwner={member} onClose={() => setCreateOpen(false)} />
-      )}
-
-      {linkTarget && (
-        <LunchflowLinkModal account={linkTarget} onClose={() => setLinkTarget(null)} />
+      {txSheet && (
+        <TxSheet
+          tx={txSheet}
+          matched={matchedByName(txSheet)}
+          onClose={() => setTxSheet(null)}
+          onLinkExpense={() => {
+            setLinkExpenseTx(txSheet);
+            setTxSheet(null);
+          }}
+        />
       )}
 
       {linkExpenseTx && (
         <LinkExpenseModal
           tx={linkExpenseTx}
           recurring={recurring ?? []}
-          accounts={accounts ?? []}
+          accounts={accounts}
           onClose={() => setLinkExpenseTx(null)}
         />
       )}
+    </div>
+  );
+}
+
+/* ---------------- Onglet Comptes bancaires ---------------- */
+
+function Transactions({ view }: { view?: string }) {
+  const navigate = useNavigate();
+  const { data: accounts } = useQuery({
+    queryKey: ["accounts"],
+    queryFn: () => api.get<Account[]>("/api/accounts"),
+  });
+
+  const sub = useLastView("money:comptes", COMPTES_VIEWS, "comptes", view, "/money/comptes");
+  const items = [
+    { value: "comptes", label: "Comptes" },
+    { value: "operations", label: "Opérations" },
+  ];
+  const go = (v: string) => navigate(`/money/comptes/${v}`);
+  usePageTabs(sub, items, go);
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [sheetAccount, setSheetAccount] = useState<Account | null>(null);
+  const [linkTarget, setLinkTarget] = useState<Account | null>(null);
+
+  // Ordre : compte principal d'abord, puis courant → investissement → épargne, puis le nom.
+  const typeRank = { checking: 0, investment: 1, savings: 2 } as const;
+  const accountRank = (a: Account) =>
+    (a.isPrimary ? 0 : 10) + (typeRank[a.type as keyof typeof typeRank] ?? 3);
+  const sorted = (accounts ?? [])
+    .slice()
+    .sort((x, y) => accountRank(x) - accountRank(y) || x.name.localeCompare(y.name, "fr"));
+  // Version fraîche du compte ouvert : la feuille reflète ce qu'on vient d'y changer.
+  const openAccount = sorted.find((a) => a.id === sheetAccount?.id) ?? null;
+  const linkAccount = sorted.find((a) => a.id === linkTarget?.id) ?? null;
+
+  if (!accounts) return <PageLoader variant="argent" />;
+
+  return (
+    <div className="flex flex-col gap-4 pb-28 md:pb-0">
+      <div className="flex items-center justify-between gap-3">
+        <SubNav value={sub} onChange={go} items={items} className="hidden md:block" />
+        <button
+          type="button"
+          onClick={() => setCreateOpen(true)}
+          className="btn-primary ml-auto hidden md:inline-flex"
+        >
+          Ajouter un compte
+        </button>
+      </div>
+
+      {sub === "comptes" ? (
+        <ComptesTab
+          accounts={sorted}
+          onOpenAccount={setSheetAccount}
+          onCreate={() => setCreateOpen(true)}
+        />
+      ) : (
+        <OperationsTab accounts={sorted} />
+      )}
+
+      {sub === "comptes" && (
+        <MobileActionBar label="Ajouter un compte" onClick={() => setCreateOpen(true)} />
+      )}
+
+      {createOpen && <CreateAccountModal defaultOwner="joint" onClose={() => setCreateOpen(false)} />}
+
+      {openAccount && (
+        <AccountSheet
+          account={openAccount}
+          onClose={() => setSheetAccount(null)}
+          onOpenLink={() => {
+            setLinkTarget(openAccount);
+            setSheetAccount(null);
+          }}
+        />
+      )}
+
+      {linkAccount && <LunchflowLinkSheet account={linkAccount} onClose={() => setLinkTarget(null)} />}
     </div>
   );
 }
@@ -1782,89 +2195,84 @@ function ExpenseRow({
   );
 }
 
-// Vue mobile d'une charge : nom sur sa propre ligne, détails (compte, jour, parts, actions) en dessous.
-function ExpenseCardMobile({
+/**
+ * Ligne d'une charge sur mobile : la banque, le libellé, sa ligne de détail
+ * (jour · compte · parts), le montant, et le « ⋯ ». Une seule colonne de
+ * chiffres à droite — c'est elle qu'on balaie du regard.
+ *
+ * Les sous-débits se déplient en touchant la ligne ; toucher une charge sans
+ * sous-débit ne fait rien (modifier vit dans le « ⋯ », pas dans un double-clic
+ * qui n'existe pas au tactile).
+ */
+function ChargeRow({
   r,
   acctName,
+  last,
   onEdit,
   onMoveUp,
   onMoveDown,
-  canUp,
-  canDown,
+  onDelete,
 }: {
   r: Recurring;
   acctName: (id: string) => string;
+  last: boolean;
   onEdit: () => void;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
-  canUp: boolean;
-  canDown: boolean;
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
+  onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const hasDebits = r.debits.length > 0;
-  const stop = (e: React.MouseEvent) => e.stopPropagation();
+  const split =
+    r.shareA !== 0 && r.shareB !== 0
+      ? `${Math.round(Math.abs(r.shareA) / 100)} / ${Math.round(Math.abs(r.shareB) / 100)}`
+      : null;
+  const meta = [
+    r.dayOfMonth ? `le ${r.dayOfMonth}` : hasDebits ? `${r.debits.length} débits` : null,
+    shortAccountName(acctName(r.accountId)),
+    split,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const actions: OverflowItem[] = [
+    { label: "Modifier", onClick: onEdit },
+    ...(onMoveUp ? [{ label: "Déplacer vers le haut", onClick: onMoveUp }] : []),
+    ...(onMoveDown ? [{ label: "Déplacer vers le bas", onClick: onMoveDown }] : []),
+    { label: "Supprimer", danger: true, onClick: onDelete },
+  ];
+
   return (
-    <li className="py-2.5 select-none" onDoubleClick={onEdit} title="Double-cliquer pour modifier">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-1 items-center gap-1">
-          {hasDebits && (
-            <button
-              onClick={() => setOpen((o) => !o)}
-              onDoubleClick={stop}
-              className="shrink-0 text-slate-400"
-            >
-              {open ? "▾" : "▸"}
-            </button>
-          )}
-          <span className="font-medium">{r.label}</span>
-        </div>
-        <span
-          className={`shrink-0 font-semibold tabular-nums ${r.amount >= 0 ? "text-green-600" : ""}`}
+    <div className={last && !open ? "" : "border-b border-hairline"}>
+      <div className="flex min-h-[60px] items-center gap-3">
+        <button
+          type="button"
+          onClick={() => hasDebits && setOpen((o) => !o)}
+          aria-expanded={hasDebits ? open : undefined}
+          className="flex min-w-0 flex-1 items-center gap-3 py-2 text-left"
         >
-          {eur(Math.abs(r.amount))}
+          <BankBadge name={acctName(r.accountId)} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-base font-semibold">{r.label}</span>
+            <span className="block truncate text-xs text-slate-400">{meta}</span>
+          </span>
+        </button>
+        <span
+          className={`shrink-0 text-base font-semibold tabular-nums ${
+            r.amount >= 0 ? "text-brand-600" : ""
+          }`}
+        >
+          {r.amount < 0 ? "−" : "+"}
+          {eur0(Math.abs(r.amount))}
         </span>
-      </div>
-      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
-        <span className="flex items-center gap-1.5">
-          <BankBadge name={acctName(r.accountId)} size="sm" />
-          {acctName(r.accountId)}
-        </span>
-        <span>{r.dayOfMonth ? `le ${r.dayOfMonth}` : hasDebits ? `${r.debits.length} débits` : "—"}</span>
-        <span className="flex items-center gap-1">
-          <MemberAvatar id="a" className="h-4 w-4 text-[10px]" />
-          <span className="tabular-nums">{eur(Math.abs(r.shareA))}</span>
-        </span>
-        <span className="flex items-center gap-1">
-          <MemberAvatar id="b" className="h-4 w-4 text-[10px]" />
-          <span className="tabular-nums">{eur(Math.abs(r.shareB))}</span>
-        </span>
-        <span className="ml-auto flex items-center gap-0.5 text-slate-400">
-          <button
-            onClick={onMoveUp}
-            onDoubleClick={stop}
-            disabled={!canUp}
-            className="px-0.5 disabled:opacity-30"
-            aria-label="Monter"
-          >
-            ↑
-          </button>
-          <button
-            onClick={onMoveDown}
-            onDoubleClick={stop}
-            disabled={!canDown}
-            className="px-0.5 disabled:opacity-30"
-            aria-label="Descendre"
-          >
-            ↓
-          </button>
-        </span>
+        <OverflowMenu items={actions} label={`Actions sur « ${r.label} »`} />
       </div>
       {open && hasDebits && (
-        <ul className="mt-1.5 space-y-1 border-l border-slate-100 pl-3 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+        <ul className="mb-2 space-y-1 border-l border-line pl-3 text-xs text-slate-400">
           {r.debits.map((d) => (
             <li key={d.id} className="flex justify-between gap-2">
               <span className="truncate">
-                ↳ {d.label || "Débit"}
+                {d.label || "Débit"}
                 {d.dayOfMonth ? ` · le ${d.dayOfMonth}` : ""}
               </span>
               <span className="shrink-0 tabular-nums">{eur(Math.abs(d.amount))}</span>
@@ -1872,7 +2280,7 @@ function ExpenseCardMobile({
           ))}
         </ul>
       )}
-    </li>
+    </div>
   );
 }
 
@@ -1880,33 +2288,78 @@ function ExpenseCardMobile({
 function Depenses({ view }: { view?: string }) {
   const navigate = useNavigate();
   const sub = view === "annuel" ? "annuel" : "mensuel";
+  // Les filtres vivent ici pour tenir sur la **même rangée** que la bascule
+  // Mensuel / Annuel : un entonnoir muet à droite, le panneau juste en dessous.
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [fPerson, setFPerson] = useState<"" | "a" | "b">("");
+  const [fAccount, setFAccount] = useState("");
+  const hasFilters = fPerson !== "" || fAccount !== "";
+
   return (
     <div className="flex flex-col gap-4">
-      <PillToggle
-        value={sub}
-        onChange={(v) => navigate(`/money/depenses/${v}`)}
-        items={[
-          { value: "mensuel", label: "Mensuel", icon: "🗓️" },
-          { value: "annuel", label: "Annuel", icon: "📅" },
-        ]}
-      />
-      {sub === "mensuel" ? <DepensesMensuel /> : <DepensesAnnuel />}
+      <div className="flex items-center gap-2">
+        <PillToggle
+          value={sub}
+          onChange={(v) => navigate(`/money/depenses/${v}`)}
+          align="start"
+          items={[
+            { value: "mensuel", label: "Mensuel" },
+            { value: "annuel", label: "Annuel" },
+          ]}
+        />
+        {sub === "mensuel" && (
+          <button
+            type="button"
+            onClick={() => setFiltersOpen((o) => !o)}
+            aria-label="Filtres"
+            aria-pressed={hasFilters || filtersOpen}
+            // Sur ordinateur les deux listes déroulantes sont déjà à l'écran :
+            // l'entonnoir n'aurait rien à ouvrir.
+            className={`ml-auto flex h-tap w-tap shrink-0 items-center justify-center rounded-full border transition md:hidden ${
+              hasFilters
+                ? "border-brand-600 text-brand-600"
+                : "border-line text-ink-2 hover:text-ink"
+            }`}
+          >
+            <IconFilter size={20} />
+          </button>
+        )}
+      </div>
+      {sub === "mensuel" ? (
+        <DepensesMensuel
+          filters={{ open: filtersOpen, person: fPerson, account: fAccount }}
+          setPerson={setFPerson}
+          setAccount={setFAccount}
+        />
+      ) : (
+        <DepensesAnnuel />
+      )}
     </div>
   );
 }
 
-function DepensesMensuel() {
+function DepensesMensuel({
+  filters,
+  setPerson,
+  setAccount,
+}: {
+  filters: { open: boolean; person: "" | "a" | "b"; account: string };
+  setPerson: (v: "" | "a" | "b") => void;
+  setAccount: (v: string) => void;
+}) {
   const me = useMe();
   const members = me.household.members;
   const qc = useQueryClient();
   const isMobile = useIsMobile();
   const [editing, setEditing] = useState<Recurring | null>(null);
   const [creating, setCreating] = useState(false);
+  const { open: filtersOpen, person: fPerson, account: fAccount } = filters;
+  const setFPerson = setPerson;
+  const setFAccount = setAccount;
 
-  // Filtres : contributeur (part ≠ 0) + compte bancaire. Repliés sur mobile.
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [fPerson, setFPerson] = useState<"" | "a" | "b">("");
-  const [fAccount, setFAccount] = useState("");
+  // Le sommaire alimente la carte « reste à vivre » en tête (mobile) ; il est
+  // déjà en cache quand on arrive depuis le sommaire de la section.
+  const { data: summary } = useMoneySummary();
 
   const { data: recurring } = useQuery({
     queryKey: ["recurring"],
@@ -1994,24 +2447,10 @@ function DepensesMensuel() {
     .sort((a, b) => (a.kind === "income" ? 0 : 1) - (b.kind === "income" ? 0 : 1));
 
   return (
-    <div className="flex flex-col gap-4 pb-24 md:pb-0">
-      {/* En-tête + filtres sur une même ligne (ordinateur). Mobile : bouton Filtres
-          repliable ; création via le FAB en bas. */}
+    <div className="flex flex-col gap-4 pb-28 md:pb-0">
+      {/* L'entonnoir qui ouvre ce panneau vit chez le parent, sur la rangée de
+          la bascule Mensuel / Annuel. Sur ordinateur, les filtres sont inline. */}
       <div className="flex flex-col gap-2 md:flex-row md:items-center">
-        <button
-          onClick={() => setFiltersOpen((o) => !o)}
-          className={`flex w-max items-center gap-1.5 rounded-xl border px-3 py-2 text-sm md:hidden ${
-            hasFilters
-              ? "border-brand-500 text-brand-600 ring-1 ring-brand-500"
-              : "border-slate-300 text-slate-500 dark:border-slate-700"
-          }`}
-          aria-label="Filtres"
-        >
-          <FunnelIcon />
-          Filtres
-        </button>
-
-        {/* Contrôles de filtre : repliés sur mobile, inline sur ordinateur. */}
         <div
           className={`${filtersOpen ? "grid" : "hidden"} grid-cols-1 gap-2 sm:grid-cols-2 md:flex md:flex-row md:items-center`}
         >
@@ -2021,8 +2460,8 @@ function DepensesMensuel() {
             className="md:w-48"
             options={[
               { value: "", label: "Tout le monde" },
-              { value: "a", label: `${members.a.name} contribue`, icon: <MemberAvatar id="a" className="h-5 w-5 text-[10px]" /> },
-              { value: "b", label: `${members.b.name} contribue`, icon: <MemberAvatar id="b" className="h-5 w-5 text-[10px]" /> },
+              { value: "a", label: `${members.a.name} contribue`, icon: <MemberAvatar id="a" className="h-5 w-5 text-2xs" /> },
+              { value: "b", label: `${members.b.name} contribue`, icon: <MemberAvatar id="b" className="h-5 w-5 text-2xs" /> },
             ]}
           />
           <Select
@@ -2053,11 +2492,35 @@ function DepensesMensuel() {
         </button>
       </div>
 
+      {/* Mobile : le même chiffre-héros qu'au sommaire de la section — on garde
+          le repère en changeant d'écran. Sur ordinateur, les quatre
+          indicateurs tiennent déjà sur une rangée. */}
+      {summary && (
+        <div className="md:hidden">
+          <LivingCard split={summary.split} />
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Indicator label="Revenus" value={eur(incomeJ + incomeN)} tone="green" />
-        <Indicator label="Dépenses" value={eur(totalExp)} tone="red" />
-        <Indicator label={`Reste à vivre ${members.a.name}`} value={eur(resteJ)} tone={resteJ < 0 ? "red" : "default"} />
-        <Indicator label={`Reste à vivre ${members.b.name}`} value={eur(resteN)} tone={resteN < 0 ? "red" : "default"} />
+        {/* Euros pleins : sur une colonne de chiffres, les centimes ne servent
+            qu'à allonger la ligne. Le détail au centime reste dans les lignes. */}
+        <Indicator label="Revenus" value={incomeJ + incomeN} money tone="green" />
+        <Indicator label="Dépenses" value={totalExp} money tone="red" />
+        <Indicator label={`Reste à vivre ${members.a.name}`} value={resteJ} money tone={resteJ < 0 ? "red" : "default"} />
+        <Indicator label={`Reste à vivre ${members.b.name}`} value={resteN} money tone={resteN < 0 ? "red" : "default"} />
+      </div>
+
+      {/* La clé de répartition concerne toute la page, pas la seule catégorie
+          « revenus » où elle était rangée : elle remonte sous les indicateurs. */}
+      <div className="rounded-xl border-l-4 border-info bg-surface-2 px-3 py-2.5 text-sm text-ink-2">
+        Répartition par défaut{" "}
+        <b className="text-ink">
+          {pctJ} % {members.a.name} / {pctN} % {members.b.name}
+        </b>
+        , calculée sur les salaires.{" "}
+        <Link to="/settings" className="font-medium text-info underline">
+          Modifier
+        </Link>
       </div>
 
       {hasFilters && groups.length === 0 && (
@@ -2066,49 +2529,50 @@ function DepensesMensuel() {
 
       {groups.map((g) => {
         const total = g.items.reduce((s, r) => s + r.amount, 0);
+        const moveInGroup = (idx: number, dir: number) => {
+          const groupIds = g.items.map((i) => i.id);
+          const to = idx + dir;
+          if (to < 0 || to >= groupIds.length) return;
+          const moved = arrayMove(groupIds, idx, to);
+          let k = 0;
+          const newGlobal = recurring.map((rr) => (groupIds.includes(rr.id) ? moved[k++] : rr.id));
+          reorder.mutate(newGlobal);
+        };
         return (
-          <div key={g.id ?? "none"} className="card">
+          <Fragment key={g.id ?? "none"}>
+            {/* Mobile : l'étiquette et le total de la section vivent au-dessus
+                de la carte — l'œil balaie la colonne des étiquettes. */}
+            <div className="flex flex-col gap-2 md:hidden">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="eyebrow">{g.name}</span>
+                <span className="text-xs tabular-nums text-slate-400">
+                  {total < 0 ? "−" : ""}
+                  {eur0(Math.abs(total))}
+                </span>
+              </div>
+              <div className="card">
+                {g.items.map((r, idx) => (
+                  <ChargeRow
+                    key={r.id}
+                    r={r}
+                    acctName={acctName}
+                    last={idx === g.items.length - 1}
+                    onEdit={() => setEditing(r)}
+                    onMoveUp={idx > 0 ? () => moveInGroup(idx, -1) : undefined}
+                    onMoveDown={idx < g.items.length - 1 ? () => moveInGroup(idx, 1) : undefined}
+                    onDelete={() => {
+                      if (confirm(`Supprimer « ${r.label} » ?`)) remove.mutate(r.id);
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className="card hidden md:block">
             <div className="mb-2 flex items-center justify-between">
               <div className="text-sm font-semibold">{g.name}</div>
               <div className="text-sm font-medium text-slate-500">{eur(Math.abs(total))}</div>
             </div>
-            {g.kind === "income" && (
-              <div className="mb-3 rounded-xl bg-blue-50 px-3 py-2 text-sm text-blue-700 dark:bg-blue-950 dark:text-blue-300">
-                ℹ️ Clé de répartition calculée sur les salaires : <b>{pctJ}% {members.a.name} / {pctN}% {members.b.name}</b>.
-                C'est la clé appliquée par défaut aux charges du foyer.{" "}
-                <Link to="/settings" className="font-medium underline hover:text-blue-900">
-                  Modifier la répartition
-                </Link>
-              </div>
-            )}
-            {/* Mobile : chaque charge en carte, nom sur sa propre ligne. */}
-            <ul className="flex flex-col divide-y divide-slate-100 dark:divide-slate-800 md:hidden">
-              {g.items.map((r, idx) => {
-                const moveInGroup = (dir: number) => {
-                  const groupIds = g.items.map((i) => i.id);
-                  const to = idx + dir;
-                  if (to < 0 || to >= groupIds.length) return;
-                  const moved = arrayMove(groupIds, idx, to);
-                  let k = 0;
-                  const newGlobal = recurring.map((rr) =>
-                    groupIds.includes(rr.id) ? moved[k++] : rr.id,
-                  );
-                  reorder.mutate(newGlobal);
-                };
-                return (
-                  <ExpenseCardMobile
-                    key={r.id}
-                    r={r}
-                    acctName={acctName}
-                    onEdit={() => setEditing(r)}
-                    onMoveUp={() => moveInGroup(-1)}
-                    onMoveDown={() => moveInGroup(1)}
-                    canUp={idx > 0}
-                    canDown={idx < g.items.length - 1}
-                  />
-                );
-              })}
-            </ul>
 
             {/* Desktop : tableau avec drag & drop. */}
             <DndContext
@@ -2172,7 +2636,8 @@ function DepensesMensuel() {
                 </tbody>
               </table>
             </DndContext>
-          </div>
+            </div>
+          </Fragment>
         );
       })}
 
@@ -2292,25 +2757,7 @@ function DepensesMensuel() {
         />
       )}
 
-      {/* Bouton flottant de création (mobile uniquement). */}
-      <button
-        type="button"
-        onClick={() => setCreating(true)}
-        aria-label="Ajouter une charge"
-        className="btn-primary fixed bottom-6 right-6 z-30 flex h-14 w-14 items-center justify-center rounded-full p-0 shadow-lg md:hidden"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          className="h-6 w-6"
-          aria-hidden="true"
-        >
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </button>
+      <MobileActionBar label="Nouvelle charge" onClick={() => setCreating(true)} />
     </div>
   );
 }
@@ -2440,23 +2887,29 @@ function DepensesAnnuel() {
               <div className="text-sm text-slate-400">Aucune dépense annuelle.</div>
             ) : (
               <>
-                {/* Mobile : chaque charge en carte, nom sur sa propre ligne. */}
-                <ul className="flex flex-col divide-y divide-slate-100 dark:divide-slate-800 md:hidden">
+                {/* Mobile : une rangée par charge, même ligne que le mensuel. */}
+                <div className="md:hidden">
                   {items.map((r, idx) => (
-                    <ExpenseCardMobile
+                    <ChargeRow
                       key={r.id}
                       r={r}
                       acctName={acctName}
+                      last={idx === items.length - 1}
                       onEdit={() => setEditing(r)}
-                      onMoveUp={() => idx > 0 && applyOrder(arrayMove(monthIds, idx, idx - 1))}
-                      onMoveDown={() =>
-                        idx < monthIds.length - 1 && applyOrder(arrayMove(monthIds, idx, idx + 1))
+                      onMoveUp={
+                        idx > 0 ? () => applyOrder(arrayMove(monthIds, idx, idx - 1)) : undefined
                       }
-                      canUp={idx > 0}
-                      canDown={idx < items.length - 1}
+                      onMoveDown={
+                        idx < items.length - 1
+                          ? () => applyOrder(arrayMove(monthIds, idx, idx + 1))
+                          : undefined
+                      }
+                      onDelete={() => {
+                        if (confirm(`Supprimer « ${r.label} » ?`)) remove.mutate(r.id);
+                      }}
                     />
                   ))}
-                </ul>
+                </div>
 
                 {/* Desktop : tableau avec drag & drop. */}
                 <DndContext
@@ -3220,7 +3673,69 @@ function RecurringModal({
 const cashflowEntryKey = (e: Cashflow["upcoming"][number]) =>
   `${e.accountId}|${e.date}|${e.label}|${e.amount}`;
 
-function Tresorerie() {
+/**
+ * Trésorerie — deux questions différentes, donc deux vues :
+ * « qu'est-ce que je dois virer ? » en début de mois, et « combien me
+ * reste-t-il, compte par compte ? » le reste du temps.
+ */
+const TRESO_VIEWS = ["virements", "reste"] as const;
+
+function Tresorerie({ view }: { view?: string }) {
+  const navigate = useNavigate();
+  const sub = useLastView(
+    "money:tresorerie",
+    TRESO_VIEWS,
+    "virements",
+    view,
+    "/money/tresorerie",
+  );
+  const items = [
+    { value: "virements", label: "Virements" },
+    { value: "reste", label: "Reste à vivre" },
+  ];
+  const go = (v: string) => navigate(`/money/tresorerie/${v}`);
+  usePageTabs(sub, items, go);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <SubNav value={sub} onChange={go} items={items} className="hidden md:block" />
+      {sub === "virements" ? <VirementsTab /> : <ResteAVivre />}
+    </div>
+  );
+}
+
+/** Sélecteur de mois : ‹ libellé › — même barre sur les deux vues. */
+function MonthStepper({
+  label,
+  onPrev,
+  onNext,
+  canPrev = true,
+  canNext = true,
+}: {
+  label: string;
+  onPrev: () => void;
+  onNext: () => void;
+  canPrev?: boolean;
+  canNext?: boolean;
+}) {
+  const btn =
+    "flex h-tap w-tap shrink-0 items-center justify-center rounded-xl bg-surface-2 text-ink transition disabled:opacity-30";
+  return (
+    <div className="flex items-center gap-2">
+      <button type="button" onClick={onPrev} disabled={!canPrev} aria-label="Mois précédent" className={btn}>
+        <IconChevronLeft size={20} />
+      </button>
+      <span className="flex-1 text-center text-base font-semibold first-letter:uppercase">
+        {label}
+      </span>
+      <button type="button" onClick={onNext} disabled={!canNext} aria-label="Mois suivant" className={btn}>
+        <IconChevronRight size={20} />
+      </button>
+    </div>
+  );
+}
+
+function ResteAVivre() {
   const [openAcct, setOpenAcct] = useState<string | null>(null);
   // 0 = mois courant, 1 = mois suivant, etc. (prévision jusqu'à la fin de ce mois-là)
   const [monthOffset, setMonthOffset] = useState(0);
@@ -3250,42 +3765,77 @@ function Tresorerie() {
 
   // couleurs : solde fin de mois (vert ≥10€, orange 0–10€, rouge <0) ; reste à débiter (noir si 0, orange si >0)
   const endColor = (c: number) => (c >= 1000 ? "text-green-600" : c < 0 ? "text-red-600" : "text-amber-600");
-  const debitColor = (c: number) => (c > 0 ? "text-amber-600" : "");
+
+  // Consolidé, sur les comptes suivis : ce qu'il y a, ce qui va sortir, ce qui
+  // reste. Les trois chiffres du haut sont la somme des cartes du dessous.
+  const onAccounts = rows.reduce((s, a) => s + a.currentBalance, 0);
+  const toDebit = rows.reduce((s, a) => s + debitsOf(a), 0);
+  const living = rows.reduce((s, a) => s + projectedOf(a), 0);
+  const lastDay = target.getDate();
+
+  // Comptes qui passeront en négatif : ce que la page doit dire en premier.
+  const shortfalls = rows
+    .map((a) => ({ row: a, projected: projectedOf(a) }))
+    .filter((x) => x.projected < 0);
 
   return (
-    <div className="space-y-4">
-      <Virements />
+    <div className="flex flex-col gap-4 pb-4">
+      <MonthStepper
+        label={`D'ici fin ${monthLabel}`}
+        onPrev={() => setMonthOffset((o) => Math.max(0, o - 1))}
+        onNext={() => setMonthOffset((o) => Math.min(12, o + 1))}
+        canPrev={monthOffset > 0}
+        canNext={monthOffset < 12}
+      />
 
-      <div className="flex items-center justify-between gap-2 border-t-2 border-slate-200 pt-6">
-        <h2 className="text-lg font-bold capitalize">Prévisions — fin {monthLabel}</h2>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setMonthOffset((o) => Math.max(0, o - 1))}
-            disabled={monthOffset === 0}
-            aria-label="Mois précédent"
-            className="rounded-lg p-1 text-slate-400 transition hover:text-brand-600 disabled:opacity-30"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-              <path d="m15 18-6-6 6-6" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={() => setMonthOffset((o) => Math.min(12, o + 1))}
-            disabled={monthOffset >= 12}
-            aria-label="Mois suivant"
-            className="rounded-lg p-1 text-slate-400 transition hover:text-brand-600 disabled:opacity-30"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-              <path d="m9 18 6-6-6-6" />
-            </svg>
-          </button>
+      <div className="card">
+        <div className="text-sm text-ink-2">Reste à vivre, tous comptes</div>
+        <div className={`mt-1 text-3xl font-bold ${living < 0 ? "text-danger" : ""}`}>
+          {eur(living)}
+        </div>
+        <div className="mt-4 grid grid-cols-2 gap-4 border-t border-hairline pt-3">
+          <div>
+            <div className="text-xs text-slate-400">Sur les comptes</div>
+            <div className="mt-0.5 font-semibold tabular-nums">{eur(onAccounts)}</div>
+          </div>
+          <div className="border-l border-hairline pl-4">
+            <div className="text-xs text-slate-400">Reste à débiter</div>
+            <div className="mt-0.5 font-semibold tabular-nums text-danger">−{eur(toDebit)}</div>
+          </div>
         </div>
       </div>
 
-      {/* détail par compte : compte joint seul, puis comptes du membre a, puis ceux du membre b */}
-      <div className="space-y-3">
+      {shortfalls.map(({ row, projected }) => {
+        // Le compte le mieux garni qui pourrait combler le trou sans y passer.
+        const gap = -projected;
+        const rescue = rows
+          .filter((r) => r.accountId !== row.accountId && projectedOf(r) > gap)
+          .sort((x, y) => projectedOf(y) - projectedOf(x))[0];
+        return (
+          <div
+            key={row.accountId}
+            className="rounded-2xl border border-warning bg-warning-soft p-3 text-sm"
+          >
+            <div className="flex items-start gap-2">
+              <span aria-hidden="true" className="mt-0.5 shrink-0 text-warning">
+                <IconAlert size={20} />
+              </span>
+              <div className="min-w-0">
+                <div className="font-semibold text-warning">
+                  {row.accountName} passera à {eur(projected)}
+                </div>
+                <p className="mt-0.5 text-ink-2">
+                  Il manque {eur(gap)} avant le {lastDay} {monthLabel.split(" ")[0]}.
+                  {rescue ? ` Un virement depuis ${rescue.accountName} suffit.` : ""}
+                </p>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Une carte par compte : joint d'abord, puis les comptes de chacun. */}
+      <div className="flex flex-col gap-3">
         {ownerRows("joint").map(renderCard)}
         {ownerRows("a").length > 0 && (
           <div className="grid gap-3 md:grid-cols-2">{ownerRows("a").map(renderCard)}</div>
@@ -3297,6 +3847,22 @@ function Tresorerie() {
     </div>
   );
 
+  /** Débits restants d'un compte, dépenses décochées déduites. */
+  function debitsOf(a: Cashflow["byAccount"][number]) {
+    const skipped = data!.upcoming
+      .filter(
+        (e) => e.accountId === a.accountId && e.amount < 0 && excluded[cashflowEntryKey(e)],
+      )
+      .reduce((s, e) => s - e.amount, 0);
+    return a.totalDebits - skipped;
+  }
+
+  /** Solde de fin de mois. Au-delà du mois courant, on ignore les rentrées. */
+  function projectedOf(a: Cashflow["byAccount"][number]) {
+    const skipped = a.totalDebits - debitsOf(a);
+    return (monthOffset > 0 ? a.currentBalance - a.totalDebits : a.projectedBalance) + skipped;
+  }
+
   function ownerRows(owner: string) {
     const ids = new Set(accounts!.filter((a) => a.owner === owner).map((a) => a.id));
     return rows.filter((r) => ids.has(r.accountId));
@@ -3307,46 +3873,42 @@ function Tresorerie() {
       .filter((e) => e.accountId === a.accountId && e.amount < 0)
       .sort((x, y) => x.date.localeCompare(y.date));
     const open = openAcct === a.accountId;
-    // Dépenses décochées : réintégrées au solde prévisionnel (montants négatifs → total positif).
-    const skipped = debits
-      .filter((e) => excluded[cashflowEntryKey(e)])
-      .reduce((s, e) => s - e.amount, 0);
-    const totalDebits = a.totalDebits - skipped;
-    // Mois suivant : on ignore les rentrées d'argent (salaire, virements) → solde - dépenses.
-    const projected =
-      (monthOffset > 0 ? a.currentBalance - a.totalDebits : a.projectedBalance) + skipped;
+    const totalDebits = debitsOf(a);
+    const projected = projectedOf(a);
     return (
       <div key={a.accountId} className="card">
         <button
           onClick={() => setOpenAcct(open ? null : a.accountId)}
-          className="flex w-full items-center justify-between gap-2 text-left"
+          aria-expanded={open}
+          className="flex w-full items-center gap-3 text-left"
         >
-          <span className="flex min-w-0 items-center gap-2">
-            <BankBadge name={a.accountName} size="sm" />
-            <span className="truncate font-semibold">{a.accountName}</span>
-          </span>
-          <span className="text-slate-400">{open ? "▾" : "▸"}</span>
+          <BankBadge name={a.accountName} />
+          <span className="min-w-0 flex-1 truncate text-base font-semibold">{a.accountName}</span>
+          <IconChevronDown
+            size={20}
+            className={`shrink-0 text-slate-400 transition-transform ${open ? "" : "-rotate-90"}`}
+          />
         </button>
-        <div className="mt-2 grid grid-cols-3 gap-2 text-sm">
+        <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
           <div>
-            <div className="text-xs text-slate-400">Solde actuel</div>
-            <div className="font-medium tabular-nums">{eur(a.currentBalance)}</div>
+            <div className="text-xs text-slate-400">Solde</div>
+            <div className="mt-0.5 font-semibold tabular-nums">{eur(a.currentBalance)}</div>
           </div>
           <div>
-            <div className="text-xs text-slate-400">Reste à débiter</div>
-            <div className={`font-medium tabular-nums ${debitColor(totalDebits)}`}>-{eur(totalDebits)}</div>
+            <div className="text-xs text-slate-400">À débiter</div>
+            <div className="mt-0.5 font-semibold tabular-nums text-danger">−{eur(totalDebits)}</div>
           </div>
           <div>
-            <div className="text-xs text-slate-400">Reste à vivre restant</div>
-            <div className={`font-semibold tabular-nums ${endColor(projected)}`}>
+            <div className="text-xs text-slate-400">Restant</div>
+            <div className={`mt-0.5 font-semibold tabular-nums ${endColor(projected)}`}>
               {eur(projected)}
             </div>
           </div>
         </div>
 
         {open && (
-          <div className="mt-3 border-t border-slate-100 pt-2 dark:border-slate-800">
-            <div className="mb-1 text-xs text-slate-400">Dépenses à venir d'ici fin {monthLabel}</div>
+          <div className="mt-3 border-t border-hairline pt-3">
+            <div className="eyebrow mb-1">À venir d'ici le {target.getDate()}</div>
             {debits.length === 0 ? (
               <div className="text-sm text-slate-400">Aucune dépense à débiter.</div>
             ) : (
@@ -3360,21 +3922,16 @@ function Tresorerie() {
                     onClick={() => toggleExcluded(key)}
                     aria-pressed={off}
                     title={off ? "Reprendre en compte" : "Ignorer dans le calcul"}
-                    className={`w-full border-b border-slate-50 py-1 text-left text-sm transition dark:border-slate-800 md:flex md:items-center md:gap-2 ${
-                      off ? "text-slate-400 line-through dark:text-slate-500" : ""
+                    className={`flex w-full min-h-[48px] items-center gap-3 border-b border-hairline text-left last:border-0 ${
+                      off ? "text-slate-400 line-through" : ""
                     }`}
                   >
-                    {/* Mobile : description sur la 1re ligne, date + montant sur la 2e. */}
-                    <span className="block truncate md:order-2 md:flex-1">{e.label}</span>
-                    <span className="mt-0.5 flex items-center justify-between gap-2 md:mt-0 md:contents">
-                      <span className={`md:order-1 md:w-14 md:shrink-0 ${off ? "" : "text-slate-500"}`}>
-                        {dateFrShort(e.date)}
-                      </span>
-                      <span
-                        className={`shrink-0 tabular-nums md:order-3 ${off ? "" : "text-red-600"}`}
-                      >
-                        {eur(e.amount)}
-                      </span>
+                    <span className="min-w-0 flex-1 py-1.5">
+                      <span className="block truncate text-sm">{e.label}</span>
+                      <span className="block text-xs text-slate-400">{dateFrShort(e.date)}</span>
+                    </span>
+                    <span className={`shrink-0 tabular-nums ${off ? "" : "text-danger"}`}>
+                      {eur(e.amount)}
                     </span>
                   </button>
                 );
@@ -3389,9 +3946,27 @@ function Tresorerie() {
 
 /* ---------------- Virements de début de mois ---------------- */
 
-function Virements() {
+/** Un virement à faire : d'où, vers où, pourquoi, combien. */
+type Transfer = { key: string; to: string; why: string; amount: number };
+
+/** « 1er sept. » — jour sans zéro initial, contrairement à `dateFrShort`. */
+function dayFr(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const day = d.getDate() === 1 ? "1er" : String(d.getDate());
+  return `${day} ${d.toLocaleDateString("fr-FR", { month: "short" })}`;
+}
+
+function VirementsTab() {
   const me = useMe();
   const members = me.household.members;
+  // Mois des virements : la fenêtre bascule le 10 (au-delà, on prépare le mois
+  // suivant). Les flèches décalent à partir de là.
+  const [monthOffset, setMonthOffset] = useState(0);
+  // Replié par défaut sur les deux tailles d'écran : ce qu'on vient faire ici,
+  // c'est cocher des virements, pas relire le calcul. (Pas d'état initial déduit
+  // du viewport : la première mesure peut tomber avant la mise en page.)
+  const [detailOpen, setDetailOpen] = useState(false);
   const { data: recurring } = useQuery({
     queryKey: ["recurring"],
     queryFn: () => api.get<Recurring[]>("/api/recurring"),
@@ -3433,17 +4008,32 @@ function Virements() {
     qc.invalidateQueries({ queryKey: [key] });
   };
 
+  // Mois concerné : fenêtre [10 du mois, 10 du mois suivant) → mois suivant.
+  // Calculé avant tout retour anticipé : la requête des cases cochées en dépend.
+  const now = new Date();
+  const target = new Date(
+    now.getFullYear(),
+    now.getMonth() + (now.getDate() >= 10 ? 1 : 0) + monthOffset,
+    1,
+  );
+  const targetMonth = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}`;
+  const targetLabel = target.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+
+  // Virements déjà faits ce mois-là. Le serveur ne stocke que des clés cochées :
+  // la liste elle-même est recalculée ici à chaque fois.
+  const { data: checks } = useQuery({
+    queryKey: ["transfers", targetMonth],
+    queryFn: () => api.get<{ done: TransferCheck[] }>(`/api/transfers?month=${targetMonth}`),
+  });
+  const setChecks = useMutation({
+    mutationFn: (v: { keys: string[]; done: boolean }) =>
+      api.put("/api/transfers", { month: targetMonth, ...v }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["transfers"] }),
+  });
+
   if (!recurring || !accounts || !savings || !balance || !planned)
     return <PageLoader variant="argent" />;
 
-  // Mois de mariage concerné : fenêtre [10 du mois, 10 du mois suivant) → mois suivant
-  const now = new Date();
-  const target =
-    now.getDate() >= 10
-      ? new Date(now.getFullYear(), now.getMonth() + 1, 1)
-      : new Date(now.getFullYear(), now.getMonth(), 1);
-  const targetMonth = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}`;
-  const targetLabel = target.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
   const contrib = savings.find((s) => s.month === targetMonth);
 
   const ownerOf = (id: string) => accounts.find((a) => a.id === id)?.owner;
@@ -3736,55 +4326,77 @@ function Virements() {
     { kind: "total", label: "Reste à vivre", amount: nReste, strong: true },
   ];
 
-  // Virements à faire par compte destinataire (pour le tooltip)
-  const transfersA = [
-    { label: lclName, amount: jLcl + ajLcl },
-    { label: boursoJ?.name ?? `Compte secondaire ${members.a.name}`, amount: jVirBourso + ajVirBourso },
-    { label: epargneJ?.name ?? "Épargne", amount: jMariageOut },
+  // Virements à faire, par membre et par compte destinataire. La `key` sert de
+  // case à cocher côté serveur : elle doit rester stable d'un mois à l'autre,
+  // d'où l'id du compte (et un repli lisible quand le compte n'existe pas).
+  const jointAcc = accounts.find((a) => a.owner === "joint");
+  const tKey = (m: string, id: string | undefined, slug: string) => `${m}:${id ?? slug}`;
+
+  const transfersA: Transfer[] = [
+    { key: tKey("a", jointAcc?.id, "joint"), to: lclName, why: "dépenses du mois", amount: jLcl + ajLcl },
+    {
+      key: tKey("a", boursoJ?.id, "secondaire"),
+      to: boursoJ?.name ?? `Compte secondaire ${members.a.name}`,
+      why: "dépenses perso",
+      amount: jVirBourso + ajVirBourso,
+    },
+    {
+      key: tKey("a", epargneJ?.id, "epargne"),
+      to: epargneJ?.name ?? "Épargne",
+      why: "mariage",
+      amount: jMariageOut,
+    },
   ].filter((t) => t.amount > 0);
 
-  const transfersB = [
-    { label: lclName, amount: nLcl + anLcl },
+  const transfersB: Transfer[] = [
+    { key: tKey("b", jointAcc?.id, "joint"), to: lclName, why: "dépenses du mois", amount: nLcl + anLcl },
     {
-      label: tradeJ?.name ?? `Compte principal ${members.a.name}`,
+      key: tKey("b", tradeJ?.id, "principal-a"),
+      to: tradeJ?.name ?? `Compte principal ${members.a.name}`,
+      why: "parts, mariage et équilibrage",
       amount: nTradeA + anTradeA + pnTradeA + wedN + equilBToA,
     },
-    { label: boursoN?.name ?? `Compte secondaire ${members.b.name}`, amount: nVirBourso + anVirBourso },
+    {
+      key: tKey("b", boursoN?.id, "secondaire"),
+      to: boursoN?.name ?? `Compte secondaire ${members.b.name}`,
+      why: "dépenses perso",
+      amount: nVirBourso + anVirBourso,
+    },
   ].filter((t) => t.amount > 0);
 
-  const Ledger = ({
-    member,
-    rows,
-    transfers,
-  }: {
-    member: "a" | "b";
-    rows: Row[];
-    transfers: { label: string; amount: number }[];
-  }) => (
+  const doneBy = new Map((checks?.done ?? []).map((d) => [d.key, d]));
+
+  /** Tout ce qu'il faut pour afficher — et vérifier — le mois d'un membre. */
+  const planOf = (m: "a" | "b") => {
+    const list = m === "a" ? transfersA : transfersB;
+    const remaining = list.filter((t) => !doneBy.has(t.key));
+    return {
+      member: m,
+      list,
+      remaining,
+      toVire: remaining.reduce((s, t) => s + t.amount, 0),
+      from:
+        (m === "a" ? tradeJ : tradeN)?.name ?? `Compte principal ${members[m].name}`,
+      after: m === "a" ? jMontantTrade : nMontantTrade,
+      engaged: m === "a" ? jDepensesTotal : nDepensesTotal,
+      living: m === "a" ? jReste : nReste,
+    };
+  };
+  // La to-do d'abord (celle du membre connecté), puis celle de l'autre : les
+  // deux colonnes de chiffres côte à côte, c'est ce qui permet de vérifier que
+  // ce que l'un envoie correspond à ce que l'autre attend.
+  const otherMember: "a" | "b" = me.member === "a" ? "b" : "a";
+  const myPlan = planOf(me.member as "a" | "b");
+  const theirPlan = planOf(otherMember);
+  const remaining = myPlan.remaining;
+
+  // Le détail du calcul. Les virements qui en découlent sont la to-do du haut :
+  // cette table n'a plus à les répéter dans une info-bulle.
+  const Ledger = ({ member, rows }: { member: "a" | "b"; rows: Row[] }) => (
     <div className="card">
-      <div className="mb-2 flex items-center justify-between gap-2">
+      <div className="mb-2 flex items-center gap-2">
         <MemberAvatar id={member} className="h-7 w-7 text-sm" />
-        <span className="group relative">
-          <span className="cursor-help text-xs font-medium text-green-700 underline">
-            virements à faire
-          </span>
-          <div className="invisible absolute right-0 top-full z-30 mt-1 w-60 max-w-[calc(100vw-3rem)] rounded-lg border border-slate-200 bg-white p-2 text-xs text-slate-700 shadow-lg group-hover:visible dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100">
-            <div className="mb-1 font-semibold text-slate-500 dark:text-slate-300">Virements par compte</div>
-            {transfers.length === 0 ? (
-              <div className="text-slate-400 dark:text-slate-500">Aucun virement.</div>
-            ) : (
-              transfers.map((t, i) => (
-                <div key={i} className="flex items-center justify-between gap-3 py-0.5">
-                  <span className="flex min-w-0 items-center gap-1.5 italic text-slate-500 dark:text-slate-300">
-                    <BankBadge name={t.label} size="sm" />
-                    <span className="truncate">{t.label}</span>
-                  </span>
-                  <span className="font-medium tabular-nums text-slate-800 dark:text-slate-100">{eur(t.amount)}</span>
-                </div>
-              ))
-            )}
-          </div>
-        </span>
+        <span className="font-semibold">{members[member].name}</span>
       </div>
       <table className="w-full text-sm">
         <tbody>
@@ -3839,7 +4451,7 @@ function Virements() {
                       >
                         {r.struck ? "✅" : "💰"}
                       </button>
-                      <span className="pointer-events-none invisible absolute left-1/2 top-full z-30 mt-1 w-52 max-w-[70vw] -translate-x-1/2 rounded-lg border border-slate-200 bg-white p-2 text-[11px] font-normal normal-case text-slate-700 shadow-lg group-hover/sal:visible dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100">
+                      <span className="pointer-events-none invisible absolute left-1/2 top-full z-30 mt-1 w-52 max-w-[70vw] -translate-x-1/2 rounded-lg border border-slate-200 bg-white p-2 text-2xs font-normal normal-case text-slate-700 shadow-lg group-hover/sal:visible dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100">
                         {r.struck
                           ? "Salaire déjà reçu : il n'est pas compté dans le total (il est déjà inclus dans le solde actuel). Clique pour le recompter."
                           : "Clique si le salaire est déjà tombé : la ligne sera barrée et non comptée, pour éviter de le compter deux fois avec le solde actuel."}
@@ -3939,10 +4551,175 @@ function Virements() {
     </label>
   );
 
-  return (
-    <div className="space-y-3">
-      <h2 className="text-lg font-bold capitalize">Versements — début {targetLabel}</h2>
+  const detailLines = rowsA.length + rowsB.length;
+  type Plan = ReturnType<typeof planOf>;
 
+  /** Les virements d'un membre, cochables. Les deux blocs partagent ce rendu. */
+  const TransferList = ({ plan }: { plan: Plan }) =>
+    plan.list.length === 0 ? (
+      <p className="text-sm text-slate-400">Aucun virement à faire ce mois-ci.</p>
+    ) : (
+      <div className="pt-1">
+        {plan.list.map((t, i) => {
+          const done = doneBy.get(t.key);
+          return (
+            <div
+              key={t.key}
+              className={`flex min-h-[60px] items-center gap-3 ${
+                i === plan.list.length - 1 ? "" : "border-b border-hairline"
+              }`}
+            >
+              <Checkbox
+                size="lg"
+                checked={!!done}
+                onChange={() => setChecks.mutate({ keys: [t.key], done: !done })}
+              />
+              <span className="min-w-0 flex-1 py-2">
+                <span
+                  className={`block truncate text-base font-semibold ${
+                    done ? "text-slate-400 line-through" : ""
+                  }`}
+                >
+                  Vers {t.to}
+                </span>
+                {/* Pas de `truncate` : « depuis X · pourquoi » doit se lire
+                    en entier, quitte à passer sur deux lignes. */}
+                <span className="block text-xs text-slate-400">
+                  {done ? `fait le ${dayFr(done.doneAt)}` : `depuis ${plan.from} · ${t.why}`}
+                </span>
+              </span>
+              <span
+                className={`shrink-0 text-base font-semibold tabular-nums ${
+                  done ? "text-slate-400" : ""
+                }`}
+              >
+                {eur(t.amount)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    );
+
+  /** Ce que les virements laissent : solde, engagé, reste à vivre. */
+  const Summary = ({ plan }: { plan: Plan }) => (
+    <>
+      <div className="flex items-center justify-between gap-3 py-1.5 text-sm">
+        <span className="min-w-0">Solde {plan.from} après virements</span>
+        <span className="shrink-0 font-semibold tabular-nums">{eur(plan.after)}</span>
+      </div>
+      <div className="flex items-center justify-between gap-3 py-1.5 text-sm">
+        <span>Dépenses engagées</span>
+        <span
+          className={`shrink-0 font-semibold tabular-nums ${plan.engaged > 0 ? "text-danger" : ""}`}
+        >
+          {plan.engaged > 0 ? "−" : ""}
+          {eur(plan.engaged)}
+        </span>
+      </div>
+      <div className="mt-1 flex items-center justify-between gap-3 border-t border-hairline pt-3">
+        <span className="text-base font-semibold">Reste à vivre</span>
+        <span
+          className={`shrink-0 text-xl font-bold tabular-nums ${
+            plan.living < 0 ? "text-danger" : "text-brand-600"
+          }`}
+        >
+          {eur(plan.living)}
+        </span>
+      </div>
+    </>
+  );
+
+  const Progress = ({ plan }: { plan: Plan }) =>
+    plan.list.length === 0 ? null : (
+      <div className="shrink-0 text-right">
+        <div className="text-xs text-slate-400">
+          {plan.list.length - plan.remaining.length} sur {plan.list.length} fait
+        </div>
+        <span className="mt-1.5 block h-1.5 w-20 overflow-hidden rounded-full bg-surface-2">
+          <span
+            className="block h-full rounded-full bg-brand-600"
+            style={{
+              width: `${Math.round(((plan.list.length - plan.remaining.length) / plan.list.length) * 100)}%`,
+            }}
+          />
+        </span>
+      </div>
+    );
+
+  return (
+    <div className="flex flex-col gap-4 pb-28 md:pb-0">
+      <MonthStepper
+        label={`Début ${targetLabel}`}
+        onPrev={() => setMonthOffset((o) => o - 1)}
+        onNext={() => setMonthOffset((o) => o + 1)}
+      />
+
+      {/* La to-do : ce qu'il reste à virer, une ligne par virement. */}
+      <div className="card">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm text-ink-2">Reste à virer</div>
+            <div className="mt-1 text-3xl font-bold tabular-nums">{eur(myPlan.toVire)}</div>
+          </div>
+          <Progress plan={myPlan} />
+        </div>
+        <div className="mt-3 border-t border-hairline pt-1">
+          <TransferList plan={myPlan} />
+        </div>
+      </div>
+
+      {/* Ce que les virements laissent : le solde, ce qui est déjà engagé, le reste. */}
+      <div className="card">
+        <Summary plan={myPlan} />
+      </div>
+
+      {/* Le mois de l'autre membre, à la même échelle : c'est en lisant les deux
+          côte à côte qu'on vérifie que les parts tombent juste. */}
+      <div className="eyebrow mt-1">Virements de {members[otherMember].name}</div>
+      <div className="card">
+        <div className="flex items-center gap-3">
+          <MemberAvatar id={otherMember} className="h-9 w-9 text-sm" />
+          <div className="min-w-0 flex-1">
+            <div className="text-xs text-slate-400">Reste à virer</div>
+            <div className="text-xl font-bold tabular-nums">{eur(theirPlan.toVire)}</div>
+          </div>
+          <Progress plan={theirPlan} />
+        </div>
+        <div className="mt-3 border-t border-hairline pt-1">
+          <TransferList plan={theirPlan} />
+        </div>
+        <div className="mt-3 border-t border-hairline pt-2">
+          <Summary plan={theirPlan} />
+        </div>
+      </div>
+
+      {/* Le calcul complet, replié : on ne le consulte que pour vérifier. */}
+      <div className="card">
+        <button
+          type="button"
+          onClick={() => setDetailOpen((o) => !o)}
+          aria-expanded={detailOpen}
+          className="flex w-full items-center gap-3 text-left"
+        >
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-ink-2">
+            <IconTrend size={20} />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-base font-semibold">Détail du calcul</span>
+            <span className="block text-xs text-slate-400">
+              salaires, dépenses, équilibrage · {detailLines} lignes
+            </span>
+          </span>
+          <IconChevronDown
+            size={20}
+            className={`shrink-0 text-slate-400 transition-transform ${detailOpen ? "" : "-rotate-90"}`}
+          />
+        </button>
+      </div>
+
+      {detailOpen && (
+      <div className="flex flex-col gap-3">
       <div className="card">
         <div className="mb-2 text-xs text-slate-400">
           Ajustements de ce mois (n'affectent que les tableaux ci-dessous)
@@ -3951,7 +4728,7 @@ function Virements() {
           {AdjInput({
             label: (
               <>
-                <MemberAvatar id="a" className="h-4 w-4 text-[9px]" /> Salaire {members.a.name}
+                <MemberAvatar id="a" className="h-4 w-4 text-2xs" /> Salaire {members.a.name}
               </>
             ),
             cents: jSalaire,
@@ -3962,7 +4739,7 @@ function Virements() {
           {AdjInput({
             label: (
               <>
-                <MemberAvatar id="b" className="h-4 w-4 text-[9px]" /> Salaire {members.b.name}
+                <MemberAvatar id="b" className="h-4 w-4 text-2xs" /> Salaire {members.b.name}
               </>
             ),
             cents: nSalaire,
@@ -3973,8 +4750,8 @@ function Virements() {
           {AdjInput({
             label: (
               <>
-                Équilibrage (<MemberAvatar id="b" className="h-4 w-4 text-[9px]" /> →{" "}
-                <MemberAvatar id="a" className="h-4 w-4 text-[9px]" />)
+                Équilibrage (<MemberAvatar id="b" className="h-4 w-4 text-2xs" /> →{" "}
+                <MemberAvatar id="a" className="h-4 w-4 text-2xs" />)
               </>
             ),
             cents: equilAmount,
@@ -3986,244 +4763,254 @@ function Virements() {
       </div>
 
       <div className="grid gap-3 md:grid-cols-2">
-        {Ledger({ member: "a", rows: rowsA, transfers: transfersA })}
-        {Ledger({ member: "b", rows: rowsB, transfers: transfersB })}
+        {Ledger({ member: "a", rows: rowsA })}
+        {Ledger({ member: "b", rows: rowsB })}
       </div>
+      </div>
+      )}
+
+      {remaining.length > 0 && (
+        <MobileActionBar
+          label="Tout marquer comme viré"
+          icon={<IconCheck size={20} />}
+          onClick={() => setChecks.mutate({ keys: remaining.map((t) => t.key), done: true })}
+        />
+      )}
     </div>
   );
 }
 
 /* ---------------- Dépenses prévues ---------------- */
 
+/**
+ * Dépenses prévues : ce qu'on anticipe d'acheter. Deux vues — « À venir » (le
+ * total qu'il faudra sortir) et « Achetées » (ce qui est passé).
+ */
 function Prevue({ view }: { view?: string }) {
   const navigate = useNavigate();
   const sub: "prevue" | "achete" = view === "achete" ? "achete" : "prevue";
   const qc = useQueryClient();
   const [modal, setModal] = useState<{ item: PlannedExpense | null } | null>(null);
+  const me = useMe();
+  const members = me.household.members;
 
   const { data } = useQuery({
     queryKey: ["planned"],
     queryFn: () => api.get<PlannedExpense[]>("/api/planned"),
   });
+  // Épargne disponible : les comptes de type « épargne » du foyer. C'est là
+  // qu'on va chercher de quoi payer ce qui est anticipé.
+  const { data: accounts } = useQuery({
+    queryKey: ["accounts"],
+    queryFn: () => api.get<Account[]>("/api/accounts"),
+  });
+
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["planned"] });
     qc.invalidateQueries({ queryKey: ["cashflow"] });
+    qc.invalidateQueries({ queryKey: ["money-summary"] });
   };
   const remove = useMutation({
     mutationFn: (id: string) => api.del(`/api/planned/${id}`),
     onSuccess: invalidate,
   });
-  // Bascule prévue ↔ achetée : acheter = daté d'aujourd'hui (modifiable via ✎).
+  // Bascule prévue ↔ achetée : acheter = daté d'aujourd'hui (modifiable ensuite).
   const setPurchased = useMutation({
     mutationFn: (p: { id: string; purchasedAt: string | null }) =>
       api.patch(`/api/planned/${p.id}`, { purchasedAt: p.purchasedAt }),
     onSuccess: invalidate,
   });
 
+  usePageTabs(sub, [
+    { value: "prevue", label: "À venir" },
+    { value: "achete", label: "Achetées" },
+  ], (v) => navigate(v === "achete" ? "/money/prevue/achete" : "/money/prevue"));
+
   if (!data) return <PageLoader variant="argent" />;
 
-  const rows =
-    sub === "achete"
-      ? data
-          .filter((p) => p.purchasedAt)
-          .slice()
-          .sort((a, b) => (b.purchasedAt ?? "").localeCompare(a.purchasedAt ?? ""))
-      : data
-          .filter((p) => !p.purchasedAt)
-          .slice()
-          .sort((a, b) => (a.date ?? "9999").localeCompare(b.date ?? "9999"));
-  const total = rows.reduce((s, p) => s + p.amount, 0);
+  const pending = data
+    .filter((p) => !p.purchasedAt)
+    .sort((a, b) => (a.date ?? "9999").localeCompare(b.date ?? "9999"));
+  const bought = data
+    .filter((p) => p.purchasedAt)
+    .sort((a, b) => (b.purchasedAt ?? "").localeCompare(a.purchasedAt ?? ""));
 
-  return (
-    <div className="flex flex-col gap-4 pb-24 md:pb-0">
-      {/* Bascule Prévue / Acheté, avec le bouton d'ajout aligné à droite. */}
-      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-        <span aria-hidden="true" />
-        <PillToggle
-          value={sub}
-          onChange={(v) => navigate(v === "achete" ? "/money/prevue/achete" : "/money/prevue")}
+  const month = new Date().toISOString().slice(0, 7);
+  const datedThisMonth = pending.filter((p) => p.date?.startsWith(month));
+  const dated = pending.filter((p) => p.date);
+  const undated = pending.filter((p) => !p.date);
+  const sum = (rows: PlannedExpense[]) => rows.reduce((s, p) => s + p.amount, 0);
+  const savings = (accounts ?? [])
+    .filter((a) => a.type === "savings")
+    .reduce((s, a) => s + a.currentBalance, 0);
+  // Achats faits sur le trimestre en cours : le lien vers l'onglet « Achetées ».
+  const quarterStart = new Date();
+  quarterStart.setMonth(Math.floor(quarterStart.getMonth() / 3) * 3, 1);
+  const boughtThisQuarter = bought.filter(
+    (p) => p.purchasedAt && p.purchasedAt >= quarterStart.toISOString().slice(0, 10),
+  );
+
+  const ownerLabel = (owner: string) =>
+    owner === "joint" ? "Commun" : (members[owner as "a" | "b"]?.name ?? owner);
+
+  const row = (p: PlannedExpense, last: boolean, purchased: boolean) => (
+    <div key={p.id} className={last ? "" : "border-b border-hairline"}>
+      <div className="flex min-h-[56px] items-center gap-3">
+        <Checkbox
+          size="lg"
+          checked={purchased}
+          onChange={() =>
+            setPurchased.mutate({ id: p.id, purchasedAt: purchased ? null : todayIso() })
+          }
+        />
+        <button
+          type="button"
+          onClick={() => setModal({ item: p })}
+          className="min-w-0 flex-1 py-2 text-left"
+        >
+          <span
+            className={`block text-base font-semibold leading-snug ${
+              purchased ? "text-slate-400 line-through" : ""
+            }`}
+          >
+            {p.name}
+          </span>
+          <span className="block text-xs text-slate-400">
+            {[
+              purchased ? `acheté le ${dateFrShort(p.purchasedAt!)}` : p.date ? dateFrShort(p.date) : null,
+              ownerLabel(p.owner),
+              p.description || null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+        </button>
+        <span
+          className={`shrink-0 text-base font-semibold tabular-nums ${
+            purchased ? "text-slate-400" : ""
+          }`}
+        >
+          {eur0(p.amount)}
+        </span>
+        <OverflowMenu
+          label={`Actions sur ${p.name}`}
           items={[
-            { value: "prevue", label: "Prévue", icon: "🗓️" },
-            { value: "achete", label: "Acheté", icon: "✅" },
+            { label: "Modifier", onClick: () => setModal({ item: p }) },
+            {
+              label: "Supprimer",
+              danger: true,
+              onClick: () => {
+                if (confirm(`Supprimer « ${p.name} » ?`)) remove.mutate(p.id);
+              },
+            },
           ]}
         />
-        <div className="flex justify-end">
-          {sub === "prevue" && (
-            <button onClick={() => setModal({ item: null })} className="btn-primary hidden md:inline-flex">
-              + Ajouter
-            </button>
-          )}
+      </div>
+    </div>
+  );
+
+  const section = (title: string, hint: string | null, rows: PlannedExpense[], purchased: boolean) =>
+    rows.length === 0 ? null : (
+      <div className="flex flex-col gap-2">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="eyebrow">
+            {title} · {rows.length}
+          </span>
+          {hint && <span className="text-xs text-slate-400">{hint}</span>}
         </div>
+        <div className="card">{rows.map((p, i) => row(p, i === rows.length - 1, purchased))}</div>
       </div>
+    );
 
-      <div className="text-sm text-slate-500">
-        {sub === "achete"
-          ? "Dépenses prévues déjà achetées (hors trésorerie)."
-          : "Dépenses que vous anticipez."}
-      </div>
+  return (
+    <div className="flex flex-col gap-3 pb-28 md:pb-0">
+      <SubNav
+        value={sub}
+        onChange={(v) => navigate(v === "achete" ? "/money/prevue/achete" : "/money/prevue")}
+        items={[
+          { value: "prevue", label: "À venir" },
+          { value: "achete", label: "Achetées" },
+        ]}
+        className="hidden md:block"
+      />
 
-      <div className="card overflow-x-auto">
-        {rows.length === 0 ? (
-          <div className="text-sm text-slate-400">
-            {sub === "achete" ? "Aucune dépense achetée." : "Aucune dépense prévue."}
-          </div>
-        ) : (
-          <>
-            {/* Ordinateur : tableau. */}
-            <table className="hidden w-full text-sm md:table">
-              <thead className="text-left text-xs text-slate-400">
-                <tr>
-                  <th className="py-1">{sub === "achete" ? "Acheté le" : "Date"}</th>
-                  <th>Nom</th>
-                  <th className="text-center">Pour qui</th>
-                  <th className="text-right">Montant</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((p) => (
-                  <tr key={p.id} className="group border-t border-slate-100 dark:border-slate-800">
-                    <td className="w-24 py-1.5 text-slate-500">
-                      {sub === "achete"
-                        ? p.purchasedAt
-                          ? dateFr(p.purchasedAt)
-                          : "—"
-                        : p.date
-                          ? dateFr(p.date)
-                          : "—"}
-                    </td>
-                    <td>
-                      <span className="inline-flex items-center gap-1">
-                        {p.name}
-                        <button
-                          onClick={() => setModal({ item: p })}
-                          title="Modifier"
-                          className="text-slate-400 opacity-0 transition hover:text-brand-600 group-hover:opacity-100"
-                        >
-                          ✎
-                        </button>
-                      </span>
-                      {p.description && (
-                        <span className="block text-xs text-slate-400">{p.description}</span>
-                      )}
-                    </td>
-                    <td>
-                      <div className="flex justify-center" title={p.owner === "joint" ? "Commun" : p.owner}>
-                        <OwnerAvatar owner={p.owner} className="h-7 w-7 text-sm" />
-                      </div>
-                    </td>
-                    <td className="text-right font-medium tabular-nums">{eur(p.amount)}</td>
-                    <td className="text-right">
-                      <div className="inline-flex items-center gap-3">
-                        {sub === "prevue" ? (
-                          <button
-                            onClick={() => setPurchased.mutate({ id: p.id, purchasedAt: todayIso() })}
-                            disabled={setPurchased.isPending}
-                            className="whitespace-nowrap rounded-lg bg-brand-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-brand-700"
-                            title="Marquer comme achetée (aujourd'hui)"
-                          >
-                            Acheté
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => setPurchased.mutate({ id: p.id, purchasedAt: null })}
-                            disabled={setPurchased.isPending}
-                            className="btn-ghost whitespace-nowrap px-2 py-0.5 text-xs"
-                            title="Remettre en prévue"
-                          >
-                            ↩ Prévue
-                          </button>
-                        )}
-                        <button
-                          onClick={() => {
-                            if (confirm(`Supprimer « ${p.name} » ?`)) remove.mutate(p.id);
-                          }}
-                          className="text-slate-300 hover:text-red-500"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                <tr className="border-t-2 border-slate-300 font-semibold dark:border-slate-700">
-                  <td className="py-1.5"></td>
-                  <td>Total</td>
-                  <td></td>
-                  <td className="text-right tabular-nums">{eur(total)}</td>
-                  <td></td>
-                </tr>
-              </tbody>
-            </table>
-
-            {/* Mobile : une carte par dépense, sur plusieurs lignes. */}
-            <div className="md:hidden">
-              {rows.map((p) => (
-                <div
-                  key={p.id}
-                  className="border-t border-slate-100 py-3 first:border-t-0 first:pt-0 dark:border-slate-800"
-                >
-                  <button
-                    onClick={() => setModal({ item: p })}
-                    className="block w-full text-left"
-                    title="Modifier"
-                  >
-                    <div className="flex items-start gap-3">
-                      <OwnerAvatar owner={p.owner} className="h-8 w-8 shrink-0 text-sm" />
-                      <div className="min-w-0 flex-1 self-center text-sm font-medium leading-snug">
-                        {p.name}
-                      </div>
-                      <div className="shrink-0 text-right font-medium tabular-nums">
-                        {eur(p.amount)}
-                      </div>
-                    </div>
-                    {/* Description en pleine largeur. */}
-                    {p.description && (
-                      <div className="mt-1 text-xs text-slate-400">{p.description}</div>
-                    )}
-                  </button>
-                  <div className="mt-2 flex items-center justify-end gap-4">
-                    {(sub === "achete" ? p.purchasedAt : p.date) && (
-                      <span className="mr-auto text-xs">
-                        {sub === "achete" ? dateFr(p.purchasedAt!) : dateFr(p.date!)}
-                      </span>
-                    )}
-                    {sub === "prevue" ? (
-                      <button
-                        onClick={() => setPurchased.mutate({ id: p.id, purchasedAt: todayIso() })}
-                        disabled={setPurchased.isPending}
-                        className="rounded-lg bg-brand-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-brand-700"
-                      >
-                        Acheté
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setPurchased.mutate({ id: p.id, purchasedAt: null })}
-                        disabled={setPurchased.isPending}
-                        className="btn-ghost px-2 py-0.5 text-xs"
-                      >
-                        ↩ Prévue
-                      </button>
-                    )}
-                    <button
-                      onClick={() => {
-                        if (confirm(`Supprimer « ${p.name} » ?`)) remove.mutate(p.id);
-                      }}
-                      className="text-slate-300 hover:text-red-500"
-                    >
-                      ✕
-                    </button>
-                  </div>
+      {sub === "prevue" ? (
+        <>
+          {/* Ce que ça va coûter, et avec quoi on compte le payer. */}
+          <div className="card">
+            <div className="text-sm text-ink-2">
+              Total anticipé · {pending.length} achat{pending.length > 1 ? "s" : ""}
+            </div>
+            <div className="mt-1 text-3xl font-bold tabular-nums">{eur(sum(pending))}</div>
+            <div className="mt-4 grid grid-cols-3 gap-2 border-t border-hairline pt-3">
+              <div>
+                <div className="text-xs text-slate-400">Daté ce mois</div>
+                <div className="mt-0.5 font-semibold tabular-nums">
+                  {eur0(sum(datedThisMonth))}
                 </div>
-              ))}
-              <div className="flex items-center justify-between border-t-2 border-slate-300 pt-2 font-semibold dark:border-slate-700">
-                <span>Total</span>
-                <span className="tabular-nums">{eur(total)}</span>
+              </div>
+              <div>
+                <div className="text-xs text-slate-400">Sans date</div>
+                <div className="mt-0.5 font-semibold tabular-nums">{eur0(sum(undated))}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-400">Épargne dispo</div>
+                <div
+                  className={`mt-0.5 font-semibold tabular-nums ${
+                    savings >= sum(pending) ? "text-brand-600" : "text-warning"
+                  }`}
+                >
+                  {eur0(savings)}
+                </div>
               </div>
             </div>
-          </>
-        )}
-      </div>
+          </div>
+
+          {pending.length === 0 ? (
+            <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+              <p>Rien d'anticipé pour l'instant.</p>
+              <button type="button" onClick={() => setModal({ item: null })} className="btn-primary">
+                Prévoir le premier achat
+              </button>
+            </div>
+          ) : (
+            <>
+              {section("Daté", null, dated, false)}
+              {section("Sans date", "coche quand c'est acheté", undated, false)}
+            </>
+          )}
+
+          {boughtThisQuarter.length > 0 && (
+            <button
+              type="button"
+              onClick={() => navigate("/money/prevue/achete")}
+              className="card flex items-center gap-3 text-left"
+            >
+              <IconCheck size={20} className="shrink-0 text-brand-600" />
+              <span className="flex-1 text-sm">
+                {boughtThisQuarter.length} achat{boughtThisQuarter.length > 1 ? "s" : ""} fait
+                {boughtThisQuarter.length > 1 ? "s" : ""} ce trimestre
+              </span>
+              <IconChevronRight size={20} className="shrink-0 text-slate-400" />
+            </button>
+          )}
+        </>
+      ) : bought.length === 0 ? (
+        <div className="card text-sm text-slate-400">Aucune dépense achetée.</div>
+      ) : (
+        <div className="card">{bought.map((p, i) => row(p, i === bought.length - 1, true))}</div>
+      )}
+
+      {sub === "prevue" && (
+        <>
+          <MobileActionBar label="Prévoir un achat" onClick={() => setModal({ item: null })} />
+          <div className="hidden justify-end md:flex">
+            <button type="button" onClick={() => setModal({ item: null })} className="btn-primary">
+              + Prévoir un achat
+            </button>
+          </div>
+        </>
+      )}
 
       {modal && (
         <PrevueModal
@@ -4235,28 +5022,6 @@ function Prevue({ view }: { view?: string }) {
             invalidate();
           }}
         />
-      )}
-
-      {/* Bouton flottant de création (mobile uniquement, onglet Prévue). */}
-      {sub === "prevue" && (
-      <button
-        type="button"
-        onClick={() => setModal({ item: null })}
-        aria-label="Ajouter une dépense prévue"
-        className="btn-primary fixed bottom-6 right-6 z-30 flex h-14 w-14 items-center justify-center rounded-full p-0 shadow-lg md:hidden"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          className="h-6 w-6"
-          aria-hidden="true"
-        >
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </button>
       )}
     </div>
   );
@@ -4375,157 +5140,717 @@ function PrevueModal({
 
 /* ---------------- Électricité ---------------- */
 
-interface ElecData {
-  years: number[];
-  byYear: Record<number, Record<number, number>>;
-  yearTotals: Record<number, number>;
+/**
+ * Deux vues, deux questions. « Cette année » répond à la seule chose qu'on
+ * vient vérifier (est-ce qu'on consomme plus ou moins que l'an dernier ?) ;
+ * « Années » sert à fouiller l'historique.
+ */
+const ELEC_VIEWS = ["annee", "annees"] as const;
+
+/** « janvier » — nom long du mois, pour les phrases. */
+const monthLongFr = (m: number) =>
+  new Date(2000, m - 1, 1).toLocaleDateString("fr-FR", { month: "long" });
+
+/** Première lettre en capitale — un nom de mois en tête de phrase ou de ligne. */
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** « juin, juillet et août » */
+const listFr = (parts: string[]) =>
+  parts.length <= 1
+    ? (parts[0] ?? "")
+    : `${parts.slice(0, -1).join(", ")} et ${parts[parts.length - 1]}`;
+
+/** « 2 783 » — séparateur de milliers français. */
+const kwhFr = (v: number) => v.toLocaleString("fr-FR");
+
+/** Variation en % ; null quand il n'y a rien à comparer. */
+const pctChange = (now: number, before: number) =>
+  before > 0 ? Math.round(((now - before) / before) * 100) : null;
+
+const MONTH_NUMBERS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+/**
+ * Ce que la page sait lire dans les relevés. Passé aux blocs plutôt que
+ * recalculé par chacun : tout l'écran répond des mêmes chiffres.
+ */
+interface ElecCalc {
+  /** Triés du plus récent au plus ancien. */
+  readings: UtilityReading[];
+  /** Prix TTC du kWh en euros ; null = le foyer n'a pas saisi de tarif. */
+  price: number | null;
+  kwhOf: (year: number, month: number) => number | undefined;
+  totalOf: (year: number) => number;
+  /** Coût estimé d'une consommation, en centimes ; null sans tarif. */
+  costOf: (kwh: number) => number | null;
+  /** Mois écoulés d'une année qui n'ont pas de relevé. */
+  missingOf: (year: number) => number[];
 }
 
-function Electricite() {
-  const qc = useQueryClient();
-  const { data } = useQuery({
-    queryKey: ["utilities"],
-    queryFn: () => api.get<ElecData>("/api/utilities?utility=electricity"),
-  });
-  // Pré-sélectionne le mois précédent (relevé du mois écoulé), avec bascule d'année en janvier.
-  const prevMonth = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1);
-  const [form, setForm] = useState({
-    year: prevMonth.getFullYear(),
-    month: prevMonth.getMonth() + 1,
-    kwh: 0,
+/**
+ * Pastille de variation. Ici la couleur porte une **donnée** — consommer moins
+ * est une bonne nouvelle — et non une action : vert quand ça baisse, rouge
+ * quand ça monte.
+ */
+function DeltaPill({ pct }: { pct: number }) {
+  const base =
+    "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold";
+  if (pct === 0) return <span className={`${base} bg-surface-2 text-ink-2`}>stable</span>;
+  const down = pct < 0;
+  return (
+    <span className={`${base} ${down ? "bg-brand-50 text-brand-700" : "bg-danger-soft text-danger"}`}>
+      {down ? "↓" : "↑"} {down ? "−" : "+"}
+      {Math.abs(pct)} %
+    </span>
+  );
+}
+
+/** Chiffre secondaire de la carte d'en-tête ; cliquable quand il se règle. */
+function MiniStat({
+  label,
+  value,
+  tone,
+  onClick,
+}: {
+  label: string;
+  value: string;
+  /** `danger` = de l'argent qui sort. Le vert, lui, dit « réglable au doigt ». */
+  tone?: "danger";
+  onClick?: () => void;
+}) {
+  const color = tone === "danger" ? "text-danger" : onClick ? "text-brand-600" : "";
+  const body = (
+    <>
+      <div className="truncate text-xs text-slate-400">{label}</div>
+      <div className={`mt-0.5 truncate text-sm font-semibold ${color}`}>{value}</div>
+    </>
+  );
+  return onClick ? (
+    <button type="button" onClick={onClick} className="min-w-0 flex-1 text-left">
+      {body}
+    </button>
+  ) : (
+    <div className="min-w-0 flex-1">{body}</div>
+  );
+}
+
+/**
+ * La réponse de la page : combien on a consommé cette année, et si c'est plus
+ * ou moins que l'an dernier. Remplace le tableau de 72 cases qu'il fallait
+ * déchiffrer pour arriver à la même conclusion.
+ */
+function ElecHero({
+  calc,
+  year,
+  onEditPrice,
+}: {
+  calc: ElecCalc;
+  year: number;
+  onEditPrice: () => void;
+}) {
+  const total = calc.totalOf(year);
+  // Comparaison à périmètre égal : seulement les mois relevés **dans les deux**
+  // années, sinon « −16 % » mettrait 5 mois en face de 12.
+  const common = MONTH_NUMBERS.filter(
+    (m) => calc.kwhOf(year, m) !== undefined && calc.kwhOf(year - 1, m) !== undefined,
+  );
+  const mine = common.reduce((s, m) => s + (calc.kwhOf(year, m) ?? 0), 0);
+  const theirs = common.reduce((s, m) => s + (calc.kwhOf(year - 1, m) ?? 0), 0);
+  const pct = common.length ? pctChange(mine, theirs) : null;
+  const last = calc.readings.find((r) => r.year === year);
+  const lastCost = last ? calc.costOf(last.kwh) : null;
+
+  return (
+    <div className="card">
+      <div className="text-sm text-ink-2">
+        {year === new Date().getFullYear() ? "Consommé depuis janvier" : `Consommé en ${year}`}
+      </div>
+      <div className="mt-1 flex items-baseline gap-2">
+        <span className="text-3xl font-bold">{kwhFr(total)}</span>
+        <span className="text-base text-ink-2">kWh</span>
+      </div>
+      {pct !== null && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <DeltaPill pct={pct} />
+          <span className="text-xs text-slate-400">
+            vs {kwhFr(theirs)} kWh en {year - 1}{" "}
+            {mine === total ? "à la même date" : `sur ${common.length} mois comparables`}
+          </span>
+        </div>
+      )}
+      <div className="mt-4 grid grid-cols-3 gap-3 border-t border-hairline pt-3">
+        <MiniStat label="Dernier relevé" value={last ? `${kwhFr(last.kwh)} kWh` : "—"} />
+        <MiniStat label="Mois" value={last ? `${MONTHS[last.month - 1]} ${last.year}` : "—"} />
+        <MiniStat
+          label="Coût estimé"
+          value={lastCost !== null ? eur0(lastCost) : "Prix du kWh"}
+          onClick={onEditPrice}
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Un « — » dans une grille ne dit pas si le mois s'est passé sans électricité
+ * ou sans relevé. On le dit donc en toutes lettres, une fois.
+ */
+function MissingCard({ year, missing }: { year: number; missing: number[] }) {
+  if (missing.length === 0) return null;
+  const many = missing.length > 1;
+  return (
+    <div className="flex gap-3 rounded-2xl border border-warning/40 bg-warning-soft p-4">
+      <IconAlert size={20} className="mt-0.5 shrink-0 text-warning" />
+      <div className="min-w-0">
+        <div className="text-sm font-semibold text-warning">
+          {missing.length} relevé{many ? "s" : ""} manquant{many ? "s" : ""}
+        </div>
+        <div className="mt-0.5 text-xs text-ink-2">
+          {cap(listFr(missing.map(monthLongFr)))} {year} n'{many ? "ont" : "a"} pas été saisi
+          {many ? "s" : ""}.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Une barre. Un mois non saisi n'est pas « zéro » : il garde un trait bas. */
+function MonthBar({
+  value,
+  max,
+  tone,
+  title,
+}: {
+  value?: number;
+  max: number;
+  tone: "brand" | "muted";
+  title: string;
+}) {
+  const missing = value === undefined;
+  return (
+    <span
+      title={missing ? `${title} — non saisi` : `${title} · ${kwhFr(value)} kWh`}
+      className={`w-1/2 rounded-t-[3px] ${
+        missing ? "bg-line" : tone === "brand" ? "bg-brand-600" : "bg-ink-3"
+      }`}
+      style={{ height: missing ? 2 : `${Math.max(3, ((value ?? 0) / max) * 100)}%` }}
+    />
+  );
+}
+
+/**
+ * Deux séries et pas six : cette année contre l'an dernier. Comparer 2021 à
+ * 2026 n'a aucun usage, et six couleurs sans légende ne se lisent pas.
+ */
+function MonthlyBars({ calc, year }: { calc: ElecCalc; year: number }) {
+  const values = MONTH_NUMBERS.flatMap((m) => [calc.kwhOf(year, m), calc.kwhOf(year - 1, m)]).filter(
+    (v): v is number => v !== undefined,
+  );
+  const max = Math.max(1, ...values);
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between gap-3">
+        <div className="eyebrow">Mois par mois</div>
+        <div className="flex items-center gap-3 text-xs text-slate-400">
+          <span className="flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full bg-brand-600" aria-hidden />
+            {year}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full bg-ink-3" aria-hidden />
+            {year - 1}
+          </span>
+        </div>
+      </div>
+      <div className="mt-4 flex items-end gap-1">
+        {MONTH_NUMBERS.map((m) => (
+          <div key={m} className="flex min-w-0 flex-1 flex-col items-center gap-1.5">
+            <div className="flex h-28 w-full items-end justify-center gap-[2px]">
+              <MonthBar
+                value={calc.kwhOf(year, m)}
+                max={max}
+                tone="brand"
+                title={`${cap(monthLongFr(m))} ${year}`}
+              />
+              <MonthBar
+                value={calc.kwhOf(year - 1, m)}
+                max={max}
+                tone="muted"
+                title={`${cap(monthLongFr(m))} ${year - 1}`}
+              />
+            </div>
+            <span className="text-2xs text-slate-400">{MONTHS[m - 1].charAt(0)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Les relevés d'une année, du plus récent au plus ancien. */
+function ReadingsCard({
+  calc,
+  year,
+  onPick,
+  onAdd,
+}: {
+  calc: ElecCalc;
+  year: number;
+  onPick: (r: UtilityReading) => void;
+  onAdd: () => void;
+}) {
+  const rows = calc.readings.filter((r) => r.year === year);
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="eyebrow">Relevés {year}</div>
+      {rows.length === 0 ? (
+        <div className="card">
+          <div className="text-sm text-ink-2">Aucun relevé saisi pour {year}.</div>
+          <button type="button" onClick={onAdd} className="btn-primary mt-3">
+            Ajouter le premier
+          </button>
+        </div>
+      ) : (
+        <div className="card">
+          {rows.map((r, i) => {
+            const before = calc.kwhOf(r.year - 1, r.month);
+            const pct = before === undefined ? null : pctChange(r.kwh, before);
+            return (
+              <div key={r.id} className={i === rows.length - 1 ? "" : "border-b border-hairline"}>
+                <button
+                  type="button"
+                  onClick={() => onPick(r)}
+                  className="flex min-h-[56px] w-full items-center gap-3 text-left"
+                >
+                  <span className="min-w-0 flex-1 truncate text-base font-medium">
+                    {cap(monthLongFr(r.month))}
+                  </span>
+                  <span className="shrink-0 text-base font-semibold">{kwhFr(r.kwh)} kWh</span>
+                  {pct !== null && <DeltaPill pct={pct} />}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Cinq totaux en barres : cinq nombres alignés en colonne demandaient de faire
+ * la soustraction soi-même.
+ */
+function YearTotals({
+  calc,
+  years,
+  current,
+  onPick,
+}: {
+  calc: ElecCalc;
+  years: number[];
+  current: number;
+  onPick: (year: number) => void;
+}) {
+  const max = Math.max(1, ...years.map(calc.totalOf));
+  const thisYear = new Date().getFullYear();
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="eyebrow">Total par année</div>
+      <div className="card flex flex-col gap-1">
+        {years.map((y) => {
+          const total = calc.totalOf(y);
+          return (
+            <button
+              key={y}
+              type="button"
+              onClick={() => onPick(y)}
+              className="flex min-h-tap items-center gap-3 text-left"
+            >
+              <span className="w-9 shrink-0 text-sm font-medium">{y}</span>
+              <span className="h-2.5 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-2">
+                <span
+                  className={`block h-full rounded-full ${y === current ? "bg-brand-600" : "bg-ink-3"}`}
+                  style={{ width: `${(total / max) * 100}%` }}
+                />
+              </span>
+              {y === thisYear && <span className="shrink-0 text-xs text-slate-400">en cours</span>}
+              <span className="w-14 shrink-0 text-right text-sm font-semibold">{kwhFr(total)}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Saisie d'un relevé — une feuille appelée par un bouton, plus le formulaire
+ * planté en bas de page en permanence pour une saisie mensuelle.
+ */
+function ReadingModal({
+  reading,
+  readings,
+  onClose,
+  onSaved,
+}: {
+  /** null = création : le mois écoulé le plus récent encore vide est proposé. */
+  reading: UtilityReading | null;
+  readings: UtilityReading[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [form, setForm] = useState(() => {
+    if (reading) return { year: reading.year, month: reading.month, kwh: String(reading.kwh) };
+    const now = new Date();
+    const past = Array.from({ length: 12 }, (_, i) => {
+      const d = new Date(now.getFullYear(), now.getMonth() - 1 - i, 1);
+      return { year: d.getFullYear(), month: d.getMonth() + 1 };
+    });
+    const free =
+      past.find((p) => !readings.some((r) => r.year === p.year && r.month === p.month)) ?? past[0];
+    return { year: free.year, month: free.month, kwh: "" };
   });
 
-  const add = useMutation({
-    mutationFn: () => api.post("/api/utilities", { utility: "electricity", ...form }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["utilities"] }),
+  // Un mois ne porte qu'un relevé : le dire avant d'écraser celui d'en face.
+  const clash = readings.find(
+    (r) => r.year === form.year && r.month === form.month && r.id !== reading?.id,
+  );
+  const kwh = Number(form.kwh);
+  const valid = form.kwh.trim() !== "" && Number.isFinite(kwh) && kwh >= 0;
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.post("/api/utilities", {
+        utility: "electricity",
+        year: form.year,
+        month: form.month,
+        kwh: Math.round(kwh),
+      }),
+    onSuccess: onSaved,
+  });
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center"
+      onClick={onClose}
+    >
+      <div className="card w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-lg font-bold">
+            {reading ? "Modifier le relevé" : "Ajouter un relevé"}
+          </h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            ✕
+          </button>
+        </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (valid) save.mutate();
+          }}
+          className="space-y-3"
+        >
+          {/* `flex flex-col gap-1` et non un `<label>` qui enveloppe le champ :
+              un input est `inline-block`, il retombe alors dans une ligne de
+              texte et se décale de la ligne de base — les deux colonnes ne
+              s'alignent plus. */}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="flex flex-col gap-1 text-xs text-slate-400">
+              Mois
+              <Select
+                value={String(form.month)}
+                onChange={(v) => setForm({ ...form, month: Number(v) })}
+                options={MONTHS.map((m, i) => ({ value: String(i + 1), label: m }))}
+              />
+            </div>
+            <label className="flex flex-col gap-1 text-xs text-slate-400">
+              Année
+              <Input
+                type="number"
+                inputMode="numeric"
+                value={form.year}
+                onChange={(e) => setForm({ ...form, year: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+          <label className="flex flex-col gap-1 text-xs text-slate-400">
+            Consommation (kWh)
+            <Input
+              autoFocus
+              type="number"
+              inputMode="numeric"
+              min={0}
+              placeholder="ex. 227"
+              value={form.kwh}
+              onChange={(e) => setForm({ ...form, kwh: e.target.value })}
+            />
+          </label>
+          {clash && (
+            <div className="text-xs text-warning">
+              {cap(monthLongFr(clash.month))} {clash.year} a déjà un relevé de {kwhFr(clash.kwh)} kWh
+              : il sera remplacé.
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-1">
+            <button type="button" onClick={onClose} className="btn-ghost">
+              Annuler
+            </button>
+            <button className="btn-primary disabled:opacity-40" disabled={!valid || save.isPending}>
+              {save.isPending ? "Enregistrement…" : "Enregistrer"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/** Tarif du foyer : ce qui transforme des kWh en euros sur la page. */
+function PriceModal({
+  price,
+  onClose,
+  onSaved,
+}: {
+  price: number | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [value, setValue] = useState(price === null ? "" : String(price));
+  const parsed = value.trim() === "" ? null : Number(value.replace(",", "."));
+  const valid = parsed === null || (Number.isFinite(parsed) && parsed >= 0 && parsed <= 10);
+
+  const save = useMutation({
+    mutationFn: () => api.patch("/api/utilities/price", { pricePerKwh: parsed }),
+    onSuccess: onSaved,
+  });
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center"
+      onClick={onClose}
+    >
+      <div className="card w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-lg font-bold">Prix du kWh</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            ✕
+          </button>
+        </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (valid) save.mutate();
+          }}
+          className="space-y-3"
+        >
+          <label className="flex flex-col gap-1 text-xs text-slate-400">
+            Prix TTC du kWh (€)
+            <Input
+              autoFocus
+              type="text"
+              inputMode="decimal"
+              placeholder="ex. 0,2516"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            />
+          </label>
+          <div className="text-xs text-slate-400">
+            Sert à estimer le coût d'un relevé. Laisser vide pour ne pas afficher de coût.
+          </div>
+          <div className="flex justify-end gap-2 pt-1">
+            <button type="button" onClick={onClose} className="btn-ghost">
+              Annuler
+            </button>
+            <button className="btn-primary disabled:opacity-40" disabled={!valid || save.isPending}>
+              {save.isPending ? "Enregistrement…" : "Enregistrer"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function Electricite({
+  view,
+  priceOpen,
+  onPriceOpen,
+}: {
+  view?: string;
+  /** Ouvert depuis le « ⋯ » de la barre, déclaré par le shell de la section. */
+  priceOpen: boolean;
+  onPriceOpen: (open: boolean) => void;
+}) {
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const toast = useToast();
+  const { data } = useQuery({
+    queryKey: ["utilities"],
+    queryFn: () => api.get<UtilityData>("/api/utilities?utility=electricity"),
+  });
+
+  const sub = useLastView("money:elec", ELEC_VIEWS, "annee", view, "/money/elec");
+  const items = [
+    { value: "annee", label: "Cette année" },
+    { value: "annees", label: "Années" },
+  ];
+  const go = (v: string) => navigate(`/money/elec/${v}`);
+  usePageTabs(sub, items, go);
+
+  // Feuille d'actions d'un relevé, puis formulaire : `editing.reading` à null
+  // = création. `open` est distinct pour garder le modal démonté au repos (son
+  // état initial dépend des relevés déjà saisis).
+  const [sheet, setSheet] = useState<UtilityReading | null>(null);
+  const [editing, setEditing] = useState<{ open: boolean; reading: UtilityReading | null }>({
+    open: false,
+    reading: null,
+  });
+  const [histYear, setHistYear] = useState<number | null>(null);
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["utilities"] });
+    qc.invalidateQueries({ queryKey: ["money-summary"] });
+    qc.invalidateQueries({ queryKey: ["dashboard"] });
+  };
+  const remove = useMutation({
+    mutationFn: (id: string) => api.del(`/api/utilities/${id}`),
+    onSuccess: () => {
+      invalidate();
+      toast.success("Relevé supprimé");
+    },
   });
 
   if (!data) return <PageLoader variant="argent" />;
 
-  const chart = MONTHS.map((m, i) => {
-    const row: Record<string, number | string> = { month: m };
-    for (const y of data.years) row[String(y)] = data.byYear[y]?.[i + 1] ?? 0;
-    return row;
-  });
-  const lineColors = ["#94a3b8", "#60a5fa", "#34d399", "#fbbf24", "#f472b6", "#4f46e5"];
+  const readings = data.readings;
+  const thisYear = new Date().getFullYear();
+  const years = [...new Set(readings.map((r) => r.year))].sort((a, b) => b - a);
+
+  const kwhOf = (year: number, month: number) =>
+    readings.find((r) => r.year === year && r.month === month)?.kwh;
+  const calc: ElecCalc = {
+    readings,
+    price: data.pricePerKwh,
+    kwhOf,
+    totalOf: (year) => readings.filter((r) => r.year === year).reduce((s, r) => s + r.kwh, 0),
+    costOf: (kwh) => (data.pricePerKwh === null ? null : Math.round(kwh * data.pricePerKwh * 100)),
+    // Un relevé n'est attendu qu'une fois le mois écoulé : le mois courant ne
+    // compte donc jamais comme manquant.
+    missingOf: (year) => {
+      const until = year === thisYear ? new Date().getMonth() : 12;
+      return MONTH_NUMBERS.slice(0, Math.max(0, until)).filter((m) => kwhOf(year, m) === undefined);
+    },
+  };
+
+  // L'année de référence : celle en cours dès qu'elle porte un relevé, sinon la
+  // dernière saisie (une instance neuve n'affiche pas une année vide).
+  const refYear = readings.some((r) => r.year === thisYear) ? thisYear : (years[0] ?? thisYear);
+  // L'historique s'ouvre sur l'année précédente : rejouer « Cette année » à
+  // l'identique n'apprendrait rien.
+  const pastYear = histYear ?? years.find((y) => y < refYear) ?? years[0] ?? refYear - 1;
+
+  const openHistory = (year: number) => {
+    setHistYear(year);
+    go("annees");
+  };
+  const sheetCost = sheet ? calc.costOf(sheet.kwh) : null;
 
   return (
-    <div className="space-y-4">
-      <div className="card">
-        <div className="mb-2 text-sm font-semibold">Consommation par mois (kWh)</div>
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chart}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="month" fontSize={11} />
-              <YAxis fontSize={11} />
-              <Tooltip />
-              {data.years.map((y, i) => (
-                <Line key={y} dataKey={String(y)} stroke={lineColors[i % lineColors.length]} dot={false} />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+    <div className="flex flex-col gap-4 pb-28 md:pb-0">
+      <div className="flex items-center justify-between gap-3">
+        <SubNav value={sub} onChange={go} items={items} className="hidden md:block" />
+        <button
+          type="button"
+          onClick={() => setEditing({ open: true, reading: null })}
+          className="btn-primary ml-auto hidden md:inline-flex"
+        >
+          Ajouter un relevé
+        </button>
       </div>
 
-      <div className="card overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="text-left text-xs text-slate-400">
-            <tr>
-              <th className="py-1">Mois</th>
-              {data.years.map((y) => (
-                <th key={y} className="text-right">
-                  {y}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {MONTHS.map((m, i) => {
-              // valeurs de ce mois sur toutes les années (comparaison mars vs mars, etc.)
-              const vals = data.years
-                .map((y) => data.byYear[y]?.[i + 1])
-                .filter((v): v is number => typeof v === "number");
-              const max = vals.length > 1 ? Math.max(...vals) : null;
-              const min = vals.length > 1 ? Math.min(...vals) : null;
-              return (
-                <tr key={m} className="border-t border-slate-100 dark:border-slate-800">
-                  <td className="py-1">{m}</td>
-                  {data.years.map((y) => {
-                    const v = data.byYear[y]?.[i + 1];
-                    const isMax = max !== null && v === max && min !== max;
-                    const isMin = min !== null && v === min && min !== max;
-                    return (
-                      <td
-                        key={y}
-                        className={`text-right font-medium ${
-                          isMax ? "text-red-600" : isMin ? "text-green-600" : ""
-                        }`}
-                      >
-                        {v ?? "—"}
-                      </td>
-                    );
-                  })}
-                </tr>
-              );
-            })}
-            <tr className="border-t-2 border-slate-300 font-semibold dark:border-slate-700">
-              <td className="py-1">Total</td>
-              {data.years.map((y) => (
-                <td key={y} className="text-right">
-                  {data.yearTotals[y] ?? 0}
-                </td>
-              ))}
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      {sub === "annee" ? (
+        <>
+          <ElecHero calc={calc} year={refYear} onEditPrice={() => onPriceOpen(true)} />
+          <MissingCard year={refYear} missing={calc.missingOf(refYear)} />
+          <MonthlyBars calc={calc} year={refYear} />
+          <ReadingsCard
+            calc={calc}
+            year={refYear}
+            onPick={setSheet}
+            onAdd={() => setEditing({ open: true, reading: null })}
+          />
+          {years.length > 1 && (
+            <YearTotals calc={calc} years={years} current={refYear} onPick={openHistory} />
+          )}
+        </>
+      ) : (
+        <>
+          {years.length > 0 && (
+            <FilterChips
+              value={String(pastYear)}
+              onChange={(v) => setHistYear(Number(v))}
+              items={years.map((y) => ({ value: String(y), label: String(y) }))}
+            />
+          )}
+          <ElecHero calc={calc} year={pastYear} onEditPrice={() => onPriceOpen(true)} />
+          <MissingCard year={pastYear} missing={calc.missingOf(pastYear)} />
+          <MonthlyBars calc={calc} year={pastYear} />
+          <ReadingsCard
+            calc={calc}
+            year={pastYear}
+            onPick={setSheet}
+            onAdd={() => setEditing({ open: true, reading: null })}
+          />
+        </>
+      )}
 
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          add.mutate();
-        }}
-        className="card"
-      >
-        <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-          <span aria-hidden>⚡</span> Ajouter un relevé
-        </div>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-[6rem,1fr,1fr,auto] sm:items-end">
-          <label className="flex flex-col gap-1 text-xs font-medium text-slate-500 dark:text-slate-400">
-            Année
-            <Input
-              type="number"
-              value={form.year}
-              onChange={(e) => setForm({ ...form, year: Number(e.target.value) })}
-            />
-          </label>
-          <div className="flex flex-col gap-1 text-xs font-medium text-slate-500 dark:text-slate-400">
-            Mois
-            <Select
-              value={String(form.month)}
-              onChange={(v) => setForm({ ...form, month: Number(v) })}
-              options={MONTHS.map((m, i) => ({ value: String(i + 1), label: m }))}
-            />
-          </div>
-          <label className="flex flex-col gap-1 text-xs font-medium text-slate-500 dark:text-slate-400">
-            Consommation (kWh)
-            <Input
-              type="number"
-              inputMode="numeric"
-              min={0}
-              value={form.kwh}
-              onChange={(e) => setForm({ ...form, kwh: Number(e.target.value) })}
-            />
-          </label>
-          <button
-            className="btn-primary col-span-2 disabled:opacity-40 sm:col-span-1"
-            disabled={add.isPending}
-          >
-            {add.isPending ? "Enregistrement…" : "Enregistrer"}
-          </button>
-        </div>
-      </form>
+      <MobileActionBar
+        label="Ajouter un relevé"
+        onClick={() => setEditing({ open: true, reading: null })}
+      />
+
+      {sheet && (
+        <ActionSheet
+          title={`${cap(monthLongFr(sheet.month))} ${sheet.year}`}
+          subtitle={`${kwhFr(sheet.kwh)} kWh${sheetCost !== null ? ` · ${eur0(sheetCost)}` : ""}`}
+          items={[
+            {
+              label: "Modifier le relevé",
+              onClick: () => setEditing({ open: true, reading: sheet }),
+            },
+            {
+              label: "Supprimer le relevé",
+              hint: "Le mois repassera en relevé manquant",
+              danger: true,
+              onClick: () => remove.mutate(sheet.id),
+            },
+          ]}
+          onClose={() => setSheet(null)}
+        />
+      )}
+
+      {editing.open && (
+        <ReadingModal
+          reading={editing.reading}
+          readings={readings}
+          onClose={() => setEditing({ open: false, reading: null })}
+          onSaved={() => {
+            setEditing({ open: false, reading: null });
+            invalidate();
+          }}
+        />
+      )}
+
+      {priceOpen && (
+        <PriceModal
+          price={data.pricePerKwh}
+          onClose={() => onPriceOpen(false)}
+          onSaved={() => {
+            onPriceOpen(false);
+            invalidate();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -4537,6 +5862,10 @@ function Equilibrage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const { view } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const members = me.household.members;
+  // Nature des lignes affichées : avances (dépenses partagées) ou remboursements.
+  const [nature, setNature] = useState<"tout" | "avances" | "remboursements">("tout");
   const statut: "actif" | "archive" = view === "archive" ? "archive" : "actif";
   const isArchived = statut === "archive";
   const [expModal, setExpModal] = useState<{ open: boolean; item: Transaction | null }>({
@@ -4606,234 +5935,301 @@ function Equilibrage() {
     onSuccess: invalidate,
   });
 
+  // « Nouvelle dépense » depuis le sommaire de la section : l'onglet s'ouvre
+  // avec sa modale. Le paramètre est retiré aussitôt, pour que le retour
+  // arrière ne la rouvre pas.
+  useEffect(() => {
+    if (searchParams.get("nouvelle") !== "1") return;
+    setExpModal({ open: true, item: null });
+    const rest = new URLSearchParams(searchParams);
+    rest.delete("nouvelle");
+    setSearchParams(rest, { replace: true });
+  }, [searchParams, setSearchParams]);
+
   if (!balance) return <PageLoader variant="argent" />;
 
-  // Filtrage selon le sous-onglet Actif / Archivé.
+  // Actif / archivé : ce qui compte encore dans le solde, ou ce qui est réglé.
   const txShown = (transactions ?? []).filter((t) => (isArchived ? t.archived : !t.archived));
   const setShown = (settlements ?? []).filter((s) => (isArchived ? s.archived : !s.archived));
   const activeCount =
     (transactions ?? []).filter((t) => !t.archived).length +
     (settlements ?? []).filter((s) => !s.archived).length;
 
+  // Les deux natures de ligne dans un même fil chronologique : une avance
+  // (quelqu'un a payé pour les deux) et un remboursement (on solde).
+  type Line =
+    | { kind: "avance"; id: string; date: string; label: string; amount: number; by: string; owed: number; owedTo: "a" | "b"; item: Transaction }
+    | { kind: "remb"; id: string; date: string; amount: number; from: string; to: string; note: string | null; item: Settlement };
+  const lines: Line[] = [
+    ...txShown
+      .filter((t) => t.amount < 0)
+      .map<Line>((t) => ({
+        kind: "avance",
+        id: t.id,
+        date: t.date,
+        label: t.label,
+        amount: Math.abs(t.amount),
+        by: t.paidBy,
+        // Ce que l'autre doit sur cette ligne : sa part.
+        owed: Math.abs(t.paidBy === "a" ? t.shareB : t.shareA),
+        owedTo: t.paidBy === "a" ? "a" : "b",
+        item: t,
+      })),
+    ...setShown.map<Line>((st) => ({
+      kind: "remb",
+      id: st.id,
+      date: st.date,
+      amount: st.amount,
+      from: st.fromUser,
+      to: st.toUser,
+      note: st.note,
+      item: st,
+    })),
+  ].sort((a, b) => b.date.localeCompare(a.date));
+
+  const shown = lines.filter(
+    (l) => nature === "tout" || (nature === "avances" ? l.kind === "avance" : l.kind === "remb"),
+  );
+  // Regroupement par mois : on relit ses comptes par période.
+  const months: { key: string; label: string; rows: Line[] }[] = [];
+  for (const l of shown) {
+    const key = l.date.slice(0, 7);
+    const last = months[months.length - 1];
+    if (last?.key === key) last.rows.push(l);
+    else months.push({ key, label: monthFr(key), rows: [l] });
+  }
+
+  const nAvances = lines.filter((l) => l.kind === "avance").length;
+  const nRemb = lines.length - nAvances;
+
+  /**
+   * Bascule en tête de la modale de création : les deux natures de ligne se
+   * saisissent depuis la même porte d'entrée. Sans elle, « Ajouter une ligne »
+   * ne créait que des dépenses partagées et les remboursements étaient
+   * inatteignables sur mobile.
+   */
+  const kindSwitcher = (current: "depense" | "remboursement") => (
+    <PillToggle
+      value={current}
+      align="start"
+      onChange={(v) => {
+        if (v === current) return;
+        if (v === "remboursement") {
+          setExpModal({ open: false, item: null });
+          setSetModal({ open: true, item: null });
+        } else {
+          setSetModal({ open: false, item: null });
+          setExpModal({ open: true, item: null });
+        }
+      }}
+      items={[
+        { value: "depense", label: "Dépense partagée" },
+        { value: "remboursement", label: "Remboursement" },
+      ]}
+    />
+  );
+
   return (
-    <div className="space-y-4">
-      {/* Sous-menus Actif / Archivé — une URL par vue */}
-      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-        <span aria-hidden="true" />
-        <PillToggle
-          value={statut}
-          onChange={(v) => navigate(`/money/equilibrage/${v}`)}
-          items={[
-            { value: "actif", label: "Actif" },
-            { value: "archive", label: "Archivé" },
-          ]}
-        />
-        <div className="flex justify-end">
-          {!isArchived && activeCount > 0 && (
-            <button
-              onClick={() => {
-                if (confirm("Archiver toutes les dépenses et remboursements en cours ? Ils ne compteront plus dans le solde."))
-                  archiveAll.mutate();
-              }}
-              disabled={archiveAll.isPending}
-              className="btn-ghost text-sm disabled:opacity-50"
-            >
-              🗄️ Tout archiver
-            </button>
+    <div className="flex flex-col gap-3 pb-28 md:pb-0">
+      <SubNav
+        value={statut}
+        onChange={(v) => navigate(`/money/equilibrage/${v}`)}
+        items={[
+          { value: "actif", label: "En cours" },
+          { value: "archive", label: "Réglé" },
+        ]}
+        className="hidden md:block"
+      />
+
+      {/* Le solde : qui doit combien à qui, et de quoi c'est fait. */}
+      {!isArchived && (
+        <div className="card">
+          <div className="text-sm text-ink-2">Solde entre vous</div>
+          {balance.amount === 0 ? (
+            <>
+              <div className="mt-1 text-3xl font-bold">Tout est équilibré</div>
+              <p className="mt-1 text-sm text-slate-400">
+                Rien à se rendre — les avances se compensent.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="mt-2 flex items-center gap-2">
+                <MemberAvatar id={balance.fromUser} className="h-8 w-8 text-xs" />
+                <IconArrowRight size={18} className="text-slate-400" />
+                <MemberAvatar id={balance.toUser} className="h-8 w-8 text-xs" />
+              </div>
+              <div className="mt-2 text-3xl font-bold tabular-nums">{eur(balance.amount)}</div>
+              <p className="mt-1 text-sm text-slate-400">
+                {members[balance.fromUser].name} doit ce montant à {members[balance.toUser].name}
+                {nAvances > 0 || nRemb > 0
+                  ? ` · ${nAvances} avance${nAvances > 1 ? "s" : ""}, ${nRemb} remboursement${nRemb > 1 ? "s" : ""}`
+                  : ""}
+              </p>
+              <button
+                type="button"
+                onClick={() => settle.mutate(balance)}
+                disabled={settle.isPending}
+                className="btn-primary mt-3 w-full"
+              >
+                Marquer comme réglé
+              </button>
+            </>
           )}
         </div>
-      </div>
-
-      {/* Solde — uniquement en vue Actif (les archives ne comptent pas) */}
-      {!isArchived && (
-      <div className="card">
-        <div className="text-sm font-semibold">Qui doit combien</div>
-        {balance.amount === 0 ? (
-          <div className="mt-2 text-green-600">Tout est équilibré ✅</div>
-        ) : (
-          <>
-            <div className="mt-2 flex flex-wrap items-center gap-2 text-lg">
-              <MemberAvatar id={balance.fromUser} /> doit <b>{eur(balance.amount)}</b> à{" "}
-              <MemberAvatar id={balance.toUser} />
-            </div>
-            <p className="mt-1 text-xs text-slate-400">
-              Calculé à partir des dépenses avancées par l'un pour les deux, moins les remboursements.
-            </p>
-            <button onClick={() => settle.mutate(balance)} className="btn-primary mt-3">
-              Marquer le solde comme réglé
-            </button>
-          </>
-        )}
-      </div>
       )}
 
-      {/* Dépenses partagées */}
-      <div className="card">
-        <div className="mb-2 flex items-center justify-between">
-          <div className="text-sm font-semibold">Dépenses partagées{isArchived ? " archivées" : ""}</div>
+      <FilterChips
+        value={nature}
+        onChange={(v) => setNature(v as "tout" | "avances" | "remboursements")}
+        items={[
+          { value: "tout", label: "Tout" },
+          { value: "avances", label: "Avances" },
+          { value: "remboursements", label: "Remboursements" },
+        ]}
+      />
+
+      {shown.length === 0 ? (
+        <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+          <p>{isArchived ? "Rien d'archivé." : "Aucune ligne en cours."}</p>
           {!isArchived && (
-            <button onClick={() => setExpModal({ open: true, item: null })} className="btn-primary">
-              + Dépense
+            <button
+              type="button"
+              onClick={() => setExpModal({ open: true, item: null })}
+              className="btn-primary"
+            >
+              Ajouter la première
             </button>
           )}
         </div>
-        {txShown.length === 0 ? (
-          <div className="text-sm text-slate-400">
-            {isArchived ? "Aucune dépense archivée." : "Aucune dépense partagée enregistrée."}
-          </div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="text-left text-xs text-slate-400">
-              <tr>
-                <th className="py-1">Date</th>
-                <th>Description</th>
-                <th>Payé par</th>
-                <th className="text-right">Montant</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {txShown
-                .slice()
-                .sort((a, b) => b.date.localeCompare(a.date))
-                .map((t) => (
-                  <tr key={t.id} className="group border-t border-slate-100 dark:border-slate-800">
-                    <td className="py-1.5 text-slate-500">{dateFr(t.date)}</td>
-                    <td>
-                      <span className="inline-flex items-center gap-1">
-                        {t.label}
-                        {!isArchived && (
-                          <button
-                            onClick={() => setExpModal({ open: true, item: t })}
-                            title="Modifier"
-                            className="text-slate-400 opacity-0 transition hover:text-brand-600 group-hover:opacity-100"
-                          >
-                            ✎
-                          </button>
-                        )}
+      ) : (
+        months.map((m) => (
+          <div key={m.key} className="flex flex-col gap-2">
+            <div className="eyebrow">{m.label}</div>
+            <div className="card">
+              {m.rows.map((l, i) => (
+                <div key={`${l.kind}-${l.id}`} className={i === m.rows.length - 1 ? "" : "border-b border-hairline"}>
+                  <div className="flex min-h-[60px] items-center gap-3">
+                    <span
+                      aria-hidden="true"
+                      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
+                        l.kind === "remb" ? "bg-brand-600/20 text-brand-600" : "bg-surface-2 text-ink-2"
+                      }`}
+                    >
+                      {l.kind === "remb" ? <IconArrowRight size={20} /> : <IconMoney size={20} />}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        l.kind === "avance"
+                          ? setExpModal({ open: true, item: l.item })
+                          : setSetModal({ open: true, item: l.item })
+                      }
+                      className="min-w-0 flex-1 py-2 text-left"
+                    >
+                      <span className="block text-base font-semibold leading-snug">
+                        {l.kind === "avance"
+                          ? l.label
+                          : `Remboursement de ${members[l.from as "a" | "b"]?.name ?? l.from}`}
                       </span>
-                    </td>
-                    <td>
-                      {t.paidBy === "joint" ? (
-                        <span className="text-slate-500">Compte joint</span>
-                      ) : (
-                        <MemberAvatar id={t.paidBy} />
-                      )}
-                    </td>
-                    <td className="text-right font-medium">{eur(Math.abs(t.amount))}</td>
-                    <td className="whitespace-nowrap text-right">
-                      {isArchived ? (
-                        <button
-                          onClick={() => setTxArchived.mutate({ id: t.id, archived: false })}
-                          title="Restaurer (revient dans le calcul du solde)"
-                          className="px-1 text-slate-400 hover:text-brand-600"
-                        >
-                          ↩︎
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => setTxArchived.mutate({ id: t.id, archived: true })}
-                          title="Archiver"
-                          className="px-1 text-slate-300 hover:text-brand-600"
-                        >
-                          🗄️
-                        </button>
-                      )}
-                      <button
-                        onClick={() => {
-                          if (confirm(`Supprimer « ${t.label} » ?`)) removeExpense.mutate(t.id);
-                        }}
-                        className="px-1 text-slate-300 hover:text-red-500"
+                      <span className="block text-xs text-slate-400">
+                        {l.kind === "avance"
+                          ? `${dateFrShort(l.date)} · avancé par ${members[l.by as "a" | "b"]?.name ?? l.by}`
+                          : [dateFrShort(l.date), l.note].filter(Boolean).join(" · ")}
+                      </span>
+                    </button>
+                    <span className="shrink-0 text-right">
+                      <span
+                        className={`block text-base font-semibold tabular-nums ${
+                          l.kind === "remb" ? "text-brand-600" : ""
+                        }`}
                       >
-                        ✕
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+                        {l.kind === "remb" ? "−" : ""}
+                        {eur(l.amount)}
+                      </span>
+                      {/* L'initiale suffit : le prénom entier pousserait le
+                          libellé de la ligne sur trois lignes. */}
+                      {l.kind === "avance" && l.owed > 0 && (
+                        <span className="block whitespace-nowrap text-xs text-slate-400">
+                          +{eur0(l.owed)} pour{" "}
+                          {members[(l.owedTo === "a" ? "b" : "a") as "a" | "b"].name.charAt(0)}
+                        </span>
+                      )}
+                    </span>
+                    <OverflowMenu
+                      label="Actions sur la ligne"
+                      items={[
+                        {
+                          label: "Modifier",
+                          onClick: () =>
+                            l.kind === "avance"
+                              ? setExpModal({ open: true, item: l.item })
+                              : setSetModal({ open: true, item: l.item }),
+                        },
+                        {
+                          label: isArchived ? "Remettre en cours" : "Archiver",
+                          onClick: () =>
+                            l.kind === "avance"
+                              ? setTxArchived.mutate({ id: l.id, archived: !isArchived })
+                              : setSettlementArchived.mutate({ id: l.id, archived: !isArchived }),
+                        },
+                        {
+                          label: "Supprimer",
+                          danger: true,
+                          onClick: () =>
+                            l.kind === "avance" ? removeExpense.mutate(l.id) : removeSettlement.mutate(l.id),
+                        },
+                      ]}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))
+      )}
 
-      {/* Remboursements */}
-      <div className="card">
-        <div className="mb-2 flex items-center justify-between">
-          <div className="text-sm font-semibold">Remboursements{isArchived ? " archivés" : ""}</div>
-          {!isArchived && (
-            <button onClick={() => setSetModal({ open: true, item: null })} className="btn-primary">
+      {!isArchived && activeCount > 0 && (
+        <button
+          type="button"
+          onClick={() => {
+            if (
+              confirm(
+                "Archiver toutes les dépenses et remboursements en cours ? Ils ne compteront plus dans le solde.",
+              )
+            )
+              archiveAll.mutate();
+          }}
+          className="px-1 text-left text-xs text-slate-400 underline"
+        >
+          Tout archiver ({activeCount})
+        </button>
+      )}
+
+      {!isArchived && (
+        <>
+          <MobileActionBar
+            label="Ajouter une ligne"
+            onClick={() => setExpModal({ open: true, item: null })}
+          />
+          <div className="hidden justify-end gap-2 md:flex">
+            <button
+              type="button"
+              onClick={() => setSetModal({ open: true, item: null })}
+              className="btn"
+            >
               + Remboursement
             </button>
-          )}
-        </div>
-        {setShown.length === 0 ? (
-          <div className="text-sm text-slate-400">
-            {isArchived ? "Aucun remboursement archivé." : "Aucun remboursement enregistré."}
+            <button
+              type="button"
+              onClick={() => setExpModal({ open: true, item: null })}
+              className="btn-primary"
+            >
+              + Dépense partagée
+            </button>
           </div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="text-left text-xs text-slate-400">
-              <tr>
-                <th className="py-1">Date</th>
-                <th>De → à</th>
-                <th className="text-right">Montant</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {setShown
-                .slice()
-                .sort((a, b) => b.date.localeCompare(a.date))
-                .map((srow) => (
-                  <tr key={srow.id} className="group border-t border-slate-100 dark:border-slate-800">
-                    <td className="py-1.5 text-slate-500">{dateFr(srow.date)}</td>
-                    <td>
-                      <span className="inline-flex items-center gap-1.5">
-                        <MemberAvatar id={srow.fromUser} /> → <MemberAvatar id={srow.toUser} />
-                        {!isArchived && (
-                          <button
-                            onClick={() => setSetModal({ open: true, item: srow })}
-                            title="Modifier"
-                            className="text-slate-400 opacity-0 transition hover:text-brand-600 group-hover:opacity-100"
-                          >
-                            ✎
-                          </button>
-                        )}
-                      </span>
-                    </td>
-                    <td className="text-right font-medium text-green-600">{eur(srow.amount)}</td>
-                    <td className="whitespace-nowrap text-right">
-                      {isArchived ? (
-                        <button
-                          onClick={() => setSettlementArchived.mutate({ id: srow.id, archived: false })}
-                          title="Restaurer"
-                          className="px-1 text-slate-400 hover:text-brand-600"
-                        >
-                          ↩︎
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => setSettlementArchived.mutate({ id: srow.id, archived: true })}
-                          title="Archiver"
-                          className="px-1 text-slate-300 hover:text-brand-600"
-                        >
-                          🗄️
-                        </button>
-                      )}
-                      <button
-                        onClick={() => {
-                          if (confirm("Supprimer ce remboursement ?")) removeSettlement.mutate(srow.id);
-                        }}
-                        className="px-1 text-slate-300 hover:text-red-500"
-                      >
-                        ✕
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+        </>
+      )}
 
       {expModal.open && (
         <ExpenseModal
@@ -4842,6 +6238,7 @@ function Equilibrage() {
           accounts={accounts ?? []}
           splitA={me.household.defaultSplitA}
           splitB={me.household.defaultSplitB}
+          switcher={expModal.item ? undefined : kindSwitcher("depense")}
           onClose={() => setExpModal({ open: false, item: null })}
           onSaved={() => {
             setExpModal({ open: false, item: null });
@@ -4854,6 +6251,7 @@ function Equilibrage() {
           key={setModal.item?.id ?? "new"}
           item={setModal.item}
           balance={balance}
+          switcher={setModal.item ? undefined : kindSwitcher("remboursement")}
           onClose={() => setSetModal({ open: false, item: null })}
           onSaved={() => {
             setSetModal({ open: false, item: null });
@@ -4870,6 +6268,7 @@ function ExpenseModal({
   accounts,
   splitA,
   splitB,
+  switcher,
   onClose,
   onSaved,
 }: {
@@ -4877,6 +6276,7 @@ function ExpenseModal({
   accounts: Account[];
   splitA: number;
   splitB: number;
+  switcher?: ReactNode;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -4921,6 +6321,7 @@ function ExpenseModal({
       splitA={splitA}
       splitB={splitB}
       pending={save.isPending}
+      switcher={switcher}
       onClose={onClose}
       onSave={(v) => save.mutate(v)}
     />
@@ -4930,12 +6331,14 @@ function ExpenseModal({
 function SettlementModal({
   item,
   balance,
+  switcher,
   onClose,
   onSaved,
 }: {
   item: Settlement | null;
   /** Solde courant : pré-remplit un nouveau remboursement (montant + sens). */
   balance?: Balance;
+  switcher?: ReactNode;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -4977,6 +6380,7 @@ function SettlementModal({
             ✕
           </button>
         </div>
+        {switcher && <div className="mb-3">{switcher}</div>}
         <form
           onSubmit={(e) => {
             e.preventDefault();

@@ -6,6 +6,7 @@ import { api, loginUrl, ApiError } from "../lib/api";
 import { APP_NAME } from "../lib/appName";
 import { Input, Select, Checkbox } from "../components/ui";
 import { NAV, ALWAYS_VISIBLE_NAV } from "../components/Layout";
+import { NavIcon } from "../components/icons";
 
 /**
  * Wizard de premier lancement — accessible uniquement avec le jeton généré par
@@ -594,7 +595,12 @@ export default function Setup() {
                     hidden.includes(n.to) ? hidden.filter((h) => h !== n.to) : [...hidden, n.to],
                   )
                 }
-                label={`${n.icon} ${n.label}`}
+                label={
+                  <span className="flex items-center gap-2">
+                    <NavIcon to={n.to} size={18} className="shrink-0 text-ink-2" />
+                    {n.label}
+                  </span>
+                }
               />
             ))}
           </div>

@@ -1,10 +1,25 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
+import type { NavBadges } from "@gfa/shared";
+import { eur0 } from "../lib/format";
 import { useMe } from "../auth";
 import { APP_NAME } from "../lib/appName";
 import { api } from "../lib/api";
+import { useNavBadges } from "../lib/badges";
 import { MemberAvatar } from "./MemberAvatar";
+import { PageHeaderProvider, usePageHeaderValue } from "./PageHeader";
+import { OverflowMenu, SubNav } from "./ui";
+import {
+  IconChevronDown,
+  IconChevronLeft,
+  IconClose,
+  IconHome,
+  IconLogout,
+  IconMenu,
+  IconSettings,
+  NavIcon,
+} from "./icons";
 
 // Section de premier niveau d'un chemin ("/money/tresorerie" -> "/money").
 const sectionOf = (path: string) => {
@@ -13,12 +28,13 @@ const sectionOf = (path: string) => {
 };
 
 /**
- * Sections sans sous-menu : on n'y mémorise aucune sous-page. Indispensable pour
- * `/courses`, dont les anciennes sous-pages (recettes, idées repas) sont parties
- * dans `/repas` et ne survivent que comme redirections — un chemin mémorisé y
- * renverrait le menu Courses vers Repas.
+ * Sections sans sous-menu mémorisé. Indispensable pour `/courses`, dont les
+ * anciennes sous-pages (recettes, idées repas) sont parties dans `/repas` et ne
+ * survivent que comme redirections — un chemin mémorisé y renverrait le menu
+ * Courses vers Repas. `/money` y figure parce que son accueil est un **hub** :
+ * le menu doit retomber sur le sommaire, pas sur le dernier onglet ouvert.
  */
-const FLAT_SECTIONS = ["/courses", "/tasks", "/chat"];
+const FLAT_SECTIONS = ["/courses", "/tasks", "/chat", "/money"];
 
 /**
  * Chemins qui ne sont plus que des redirections vers une autre section : les
@@ -27,6 +43,23 @@ const FLAT_SECTIONS = ["/courses", "/tasks", "/chat"];
  */
 const LEGACY_PATHS = ["/tools/films", "/tools/vacances", "/tools/wish", "/tools/activites"];
 const isLegacyPath = (path: string) => LEGACY_PATHS.some((p) => path.startsWith(p));
+
+/**
+ * Onglets dont le segment suivant est l'**identifiant d'un enregistrement**
+ * (une liste ouverte) et non un sous-menu : on n'en mémorise que l'onglet.
+ * Sinon le menu rouvrirait une liste précise — voire une liste supprimée.
+ */
+const RECORD_TABS = [
+  "/listes/partagees",
+  "/listes/perso",
+  "/repas/recettes",
+  "/vacances/prevu",
+  "/vacances/archive",
+];
+const memorablePath = (path: string) => {
+  const tab = RECORD_TABS.find((t) => path.startsWith(`${t}/`));
+  return tab ?? path;
+};
 
 // Mémorise la dernière page visitée par section (persistée en localStorage).
 function useLastPaths() {
@@ -47,9 +80,10 @@ function useLastPaths() {
   useEffect(() => {
     const sec = sectionOf(pathname);
     if (FLAT_SECTIONS.includes(sec) || isLegacyPath(pathname)) return;
+    const remembered = memorablePath(pathname);
     setMap((prev) => {
-      if (prev[sec] === pathname) return prev;
-      const next = { ...prev, [sec]: pathname };
+      if (prev[sec] === remembered) return prev;
+      const next = { ...prev, [sec]: remembered };
       try {
         localStorage.setItem("nav:lastPaths", JSON.stringify(next));
       } catch {
@@ -64,39 +98,42 @@ function useLastPaths() {
 export interface NavItem {
   to: string;
   label: string;
-  icon: string;
-  /** Trait de séparation entre deux groupes de menus (pas un lien). */
+  /** Ouvre un groupe de menus (pas un lien). Son nom vit dans `me.menuGroups`. */
   separator?: true;
 }
 
 /**
- * Les séparateurs sont stockés dans `menuOrder` comme des clés `sep:<id>`
- * (aucune migration : la colonne est un tableau JSON de chaînes libres).
+ * Les groupes sont stockés dans `menuOrder` comme des clés `sep:<id>`
+ * (aucune migration : la colonne est un tableau JSON de chaînes libres) ; leur
+ * nom vit dans `me.menuGroups`, indexé par cette même clé.
  */
 export const SEPARATOR_PREFIX = "sep:";
 export const isSeparatorKey = (key: string) => key.startsWith(SEPARATOR_PREFIX);
 export const newSeparatorKey = () => `${SEPARATOR_PREFIX}${Math.random().toString(36).slice(2, 9)}`;
-const separatorItem = (key: string): NavItem => ({
+export const separatorItem = (key: string): NavItem => ({
   to: key,
   label: "",
-  icon: "",
   separator: true,
 });
 
+/**
+ * L'icône d'un menu n'est pas stockée ici : elle est résolue depuis `to` par
+ * `NavIcon` (icônes de trait, cf. components/icons.tsx).
+ */
 export const NAV: NavItem[] = [
   // Accueil n'est plus un menu : on y accède par la maison à côté du nom de l'app.
-  { to: "/calendar", label: "Agenda", icon: "📅" },
-  { to: "/courses", label: "Courses", icon: "🛒" },
-  { to: "/repas", label: "Repas", icon: "🍽️" },
-  { to: "/sport", label: "Bien-être", icon: "🏋️" },
-  { to: "/tasks", label: "Tâches", icon: "✅" },
-  { to: "/money", label: "Argent", icon: "💶" },
-  { to: "/wedding", label: "Mariage", icon: "💍" },
-  { to: "/tools", label: "Activités", icon: "🎲" },
-  { to: "/listes", label: "Listes", icon: "📋" },
-  { to: "/films", label: "Films", icon: "🎬" },
-  { to: "/vacances", label: "Vacances", icon: "🏖️" },
-  { to: "/chat", label: "Chat", icon: "💬" },
+  { to: "/calendar", label: "Agenda" },
+  { to: "/courses", label: "Courses" },
+  { to: "/repas", label: "Repas" },
+  { to: "/sport", label: "Bien-être" },
+  { to: "/tasks", label: "Tâches" },
+  { to: "/money", label: "Argent" },
+  { to: "/wedding", label: "Mariage" },
+  { to: "/tools", label: "Activités" },
+  { to: "/listes", label: "Listes" },
+  { to: "/films", label: "Films" },
+  { to: "/vacances", label: "Vacances" },
+  { to: "/chat", label: "Chat" },
   // Réglages n'est plus un menu : on y accède par le menu du compte (avatar).
 ];
 
@@ -143,39 +180,174 @@ export function orderedNav(
 }
 
 /**
- * Nettoie les séparateurs qui n'ont plus rien à séparer une fois les menus
- * masqués retirés : en tête, en fin, ou collés à un autre séparateur.
+ * Retire les groupes vides : un groupe titre les menus qui le suivent, donc il
+ * ne survit que s'il en reste au moins un avant le groupe suivant. Contrairement
+ * à l'ancien séparateur (un simple trait), un groupe **en tête** de liste est
+ * légitime : c'est lui qui nomme le premier bloc.
  */
 export function withoutDanglingSeparators(items: NavItem[]): NavItem[] {
   return items.filter((n, i) => {
     if (!n.separator) return true;
-    const before = items.slice(0, i).some((x) => !x.separator);
-    const after = items.slice(i + 1).some((x) => !x.separator);
-    const prev = items[i - 1];
-    return before && after && !prev?.separator;
+    return !!items[i + 1] && !items[i + 1].separator;
   });
 }
 
-function LogoutIcon() {
+export interface NavGroup {
+  /** Clé `sep:<id>` du groupe, `null` pour les menus placés avant tout groupe. */
+  key: string | null;
+  name: string;
+  items: NavItem[];
+}
+
+/**
+ * Découpe la liste plate en groupes titrés. Les menus qui précèdent le premier
+ * groupe forment un bloc sans titre (clé `null`).
+ */
+export function groupNav(items: NavItem[], names: Record<string, string> | null | undefined): NavGroup[] {
+  const groups: NavGroup[] = [];
+  let current: NavGroup = { key: null, name: "", items: [] };
+  for (const n of items) {
+    if (n.separator) {
+      if (current.items.length > 0) groups.push(current);
+      current = { key: n.to, name: names?.[n.to]?.trim() ?? "", items: [] };
+      continue;
+    }
+    current.items.push(n);
+  }
+  if (current.items.length > 0) groups.push(current);
+  return groups;
+}
+
+/**
+ * Indicateurs de bout de menu. Une seule clé de cache (les pastilles ne doivent
+ * pas disparaître le temps d'un chargement), rafraîchie en arrière-plan à chaque
+ * changement de section : on coche une tâche, on quitte Tâches, le compteur est
+ * à jour.
+ */
+function useSectionBadges(section: string) {
+  const qc = useQueryClient();
+  useEffect(() => {
+    qc.invalidateQueries({ queryKey: ["nav-badges"] });
+  }, [section, qc]);
+  return useNavBadges();
+}
+
+/**
+ * Valeur affichée au bout d'une rangée de menu.
+ *
+ * Toutes les pastilles portent le même gris : un décompte n'a pas à réclamer
+ * l'attention. Elles ne passent au vert que sur la rangée **active**, où le vert
+ * ne signale rien de neuf — il suit simplement la rangée.
+ */
+function NavBadge({
+  to,
+  badges,
+  active,
+}: {
+  to: string;
+  badges: NavBadges | undefined;
+  active: boolean;
+}) {
+  if (!badges) return null;
+
+  const pill = `flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full px-2 text-2xs font-semibold ${
+    active ? "bg-brand-600 text-on-brand" : "bg-surface-2 text-ink-2"
+  }`;
+
+  if (to === "/wedding") {
+    if (badges.weddingDays === null) return null;
+    return (
+      <span className={pill}>
+        {badges.weddingDays === 0 ? "Jour J" : `J−${badges.weddingDays}`}
+      </span>
+    );
+  }
+  if (to === "/money") {
+    if (badges.moneyCents === null) return null;
+    // Un reste à vivre négatif reste rouge, actif ou non : c'est une alerte, pas
+    // une décoration.
+    return (
+      <span
+        className={`shrink-0 text-sm font-medium ${
+          badges.moneyCents < 0 ? "text-danger" : active ? "text-brand-700" : "text-ink-2"
+        }`}
+      >
+        {eur0(badges.moneyCents)}
+      </span>
+    );
+  }
+  const count = to === "/tasks" ? badges.tasks : to === "/courses" ? badges.courses : 0;
+  // Une pastille « 0 » n'apprend rien.
+  if (!count) return null;
+  return <span className={pill}>{count}</span>;
+}
+
+/**
+ * Liste de navigation groupée — même composant sur ordinateur et sur mobile,
+ * pour qu'un menu ne puisse jamais diverger entre les deux.
+ *
+ * Rangées de 56 px (cible confortable, règle 6), icône de trait de 22 px,
+ * groupe titré par une étiquette en majuscules, actif signalé par un aplat vert
+ * discret + une barre latérale — pas une pastille pleine qui crie plus fort que
+ * le nom de l'app.
+ */
+function NavList({
+  groups,
+  linkFor,
+  isActive,
+  onNavigate,
+  badges,
+}: {
+  groups: NavGroup[];
+  linkFor: (base: string) => string;
+  isActive: (base: string) => boolean;
+  onNavigate?: () => void;
+  badges: NavBadges | undefined;
+}) {
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-      <polyline points="16 17 21 12 16 7" />
-      <line x1="21" y1="12" x2="9" y2="12" />
-    </svg>
+    <nav className="flex flex-1 flex-col gap-4 overflow-y-auto">
+      {groups.map((g, gi) => (
+        <div key={g.key ?? `g${gi}`} className="flex flex-col gap-0.5">
+          {g.name && <div className="eyebrow px-3 pb-1 pt-1">{g.name}</div>}
+          {g.items.map((n) => {
+            const active = isActive(n.to);
+            return (
+              <Link
+                key={n.to}
+                to={linkFor(n.to)}
+                onClick={onNavigate}
+                aria-current={active ? "page" : undefined}
+                className={`relative flex h-14 items-center gap-3 rounded-xl px-3 text-base ${
+                  active
+                    ? "bg-brand-600/15 font-semibold text-brand-700"
+                    : "font-medium text-ink hover:bg-surface-2"
+                }`}
+              >
+                {active && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-y-3 left-0 w-[3px] rounded-full bg-brand-600"
+                  />
+                )}
+                <NavIcon to={n.to} size={22} className="shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{n.label}</span>
+                <NavBadge to={n.to} badges={badges} active={active} />
+              </Link>
+            );
+          })}
+        </div>
+      ))}
+    </nav>
   );
 }
+
+/**
+ * Rangée du menu du compte — mêmes gabarit, graisse et icône qu'une rangée de
+ * navigation (`NavList`) : les deux menus s'ouvrent au même endroit, ils ne
+ * doivent pas paraître venir de deux applications différentes.
+ */
+const ACCOUNT_ROW =
+  "flex h-14 w-full items-center gap-3 rounded-xl px-3 text-left text-base font-medium text-ink hover:bg-surface-2";
 
 /**
  * Entrées du menu du compte (avatar) : Paramètres et Déconnexion. Partagé par
@@ -190,12 +362,10 @@ function AccountMenuItems({
   onClose: () => void;
   onLogout: () => void;
 }) {
-  const cls =
-    "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800";
   return (
     <>
-      <Link to={settingsTo} onClick={onClose} className={cls}>
-        <span aria-hidden="true">⚙️</span>
+      <Link to={settingsTo} onClick={onClose} className={ACCOUNT_ROW}>
+        <IconSettings size={22} className="shrink-0" />
         Paramètres
       </Link>
       <button
@@ -203,9 +373,9 @@ function AccountMenuItems({
           onClose();
           onLogout();
         }}
-        className={cls}
+        className={ACCOUNT_ROW}
       >
-        <LogoutIcon />
+        <IconLogout size={22} className="shrink-0" />
         Déconnexion
       </button>
     </>
@@ -213,14 +383,31 @@ function AccountMenuItems({
 }
 
 export default function Layout({ children }: { children: ReactNode }) {
+  return (
+    <PageHeaderProvider>
+      <Shell>{children}</Shell>
+    </PageHeaderProvider>
+  );
+}
+
+/** Chassis de l'app. Séparé de `Layout` pour lire le titre déclaré par la page. */
+function Shell({ children }: { children: ReactNode }) {
   const me = useMe();
+  const pageHeader = usePageHeaderValue();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { pathname } = useLocation();
   const lastPaths = useLastPaths();
-  const nav = withoutDanglingSeparators(orderedNav(me.menuOrder, me.menuHidden));
+  const { data: badges } = useSectionBadges(sectionOf(pathname));
+  const navGroups = groupNav(
+    withoutDanglingSeparators(orderedNav(me.menuOrder, me.menuHidden)),
+    me.menuGroups,
+  );
   // Prénom du membre connecté (config foyer, jamais codé en dur).
   const myName = me.household.members[me.member].name;
+  // Une page peut déclarer une liste d'onglets vide (sous-page ouverte) : la
+  // rangée disparaît alors, et le filet du bas revient à l'en-tête.
+  const showTabs = (pageHeader?.tabs?.items.length ?? 0) > 0;
   const [menuOpen, setMenuOpen] = useState(false);
   const [hideHeader, setHideHeader] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -256,71 +443,45 @@ export default function Layout({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-full flex-col">
       {/* Sidebar (desktop) — fixe, pleine hauteur */}
-      <aside className="hidden border-r border-slate-200 p-4 pb-2 dark:border-slate-800 md:fixed md:inset-y-0 md:left-0 md:flex md:w-56 md:flex-col bg-[color:var(--paper)]">
-        <div className="mb-6 px-2">
+      <aside className="hidden border-r border-line p-4 pb-2 md:fixed md:inset-y-0 md:left-0 md:flex md:w-64 md:flex-col bg-[color:var(--paper)]">
+        <div className="mb-4 px-3">
           <Link
             to="/"
             aria-label="Accueil"
-            className={`flex items-center gap-2 text-lg font-bold transition hover:text-brand-600 ${
+            className={`flex items-center gap-2.5 text-lg font-semibold transition hover:text-brand-600 ${
               pathname === "/" ? "text-brand-600" : ""
             }`}
           >
-            <span aria-hidden="true">🏠</span>
+            <IconHome size={20} className="shrink-0" />
             {APP_NAME}
           </Link>
           {/* Nom du foyer masqué s'il répète le nom de l'app */}
           {me.household.name !== APP_NAME && (
-            <div className="text-xs text-slate-400">{me.household.name}</div>
+            <div className="mt-0.5 text-xs text-ink-2">{me.household.name}</div>
           )}
         </div>
-        <nav className="flex flex-1 flex-col gap-1 overflow-y-auto">
-          {nav.map((n) =>
-            n.separator ? (
-              <hr key={n.to} className="my-2 border-slate-200 dark:border-slate-700" />
-            ) : (
-            <Link
-              key={n.to}
-              to={linkFor(n.to)}
-              className={`flex items-center gap-3 rounded-xl px-3 py-2 text-base font-medium ${
-                isActive(n.to)
-                  ? "bg-brand-600 text-white"
-                  : "text-slate-600 hover:bg-white dark:text-slate-300 dark:hover:bg-slate-800"
-              }`}
-            >
-              <span>{n.icon}</span>
-              {n.label}
-            </Link>
-            ),
-          )}
-        </nav>
+        <NavList groups={navGroups} linkFor={linkFor} isActive={isActive} badges={badges} />
         {/* Compte : avatar + prénom, clic → Paramètres / Déconnexion */}
-        <div className="relative mt-2 border-t border-slate-200 pt-2 dark:border-slate-800">
+        <div className="relative mt-2 border-t border-line pt-2">
           <button
             onClick={() => setUserMenuOpen((o) => !o)}
             aria-haspopup="menu"
             aria-expanded={userMenuOpen}
-            className="flex w-full items-center gap-3 rounded-xl px-2 py-1.5 text-left transition hover:bg-white dark:hover:bg-slate-800"
+            className="flex min-h-tap w-full items-center gap-3 rounded-xl px-2 py-1.5 text-left transition hover:bg-surface-2"
           >
             <MemberAvatar id={me.member} className="h-9 w-9 shrink-0 text-sm" />
             <span className="min-w-0 flex-1 truncate text-base font-medium">{myName}</span>
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              className={`h-4 w-4 shrink-0 text-slate-400 transition ${userMenuOpen ? "rotate-180" : ""}`}
-              aria-hidden="true"
-            >
-              <path d="m6 15 6-6 6 6" />
-            </svg>
+            <IconChevronDown
+              size={16}
+              className={`shrink-0 text-ink-3 transition ${userMenuOpen ? "rotate-180" : ""}`}
+            />
           </button>
           {userMenuOpen && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
               <div
                 role="menu"
-                className="absolute bottom-full left-0 z-50 mb-2 w-full rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-900"
+                className="absolute bottom-full left-0 z-50 mb-2 w-full rounded-2xl border border-line bg-surface p-2 shadow-xl"
               >
                 <AccountMenuItems
                   settingsTo={linkFor("/settings")}
@@ -333,49 +494,96 @@ export default function Layout({ children }: { children: ReactNode }) {
         </div>
       </aside>
 
-      {/* Top bar (mobile) */}
+      {/* Top bar (mobile) — titre de la page, et son sous-menu collé en bas. */}
       <header
-        className={`sticky top-0 z-30 flex items-center justify-between border-b border-slate-200 bg-[color:var(--paper)] p-4 transition-transform duration-300 dark:border-slate-800 md:hidden ${
-          hideHeader ? "-translate-y-full" : "translate-y-0"
-        }`}
+        className={`sticky top-0 z-30 flex flex-col bg-[color:var(--paper)] px-3 pt-3 transition-transform duration-300 md:hidden ${
+          // Le trait du bas vient des onglets quand il y en a : un seul filet,
+          // et il appartient visiblement à l'en-tête.
+          showTabs ? "" : "border-b border-line pb-3"
+        } ${hideHeader ? "-translate-y-full" : "translate-y-0"}`}
       >
-        <div className="flex items-center gap-3">
-          <button onClick={() => setMenuOpen(true)} aria-label="Ouvrir le menu" className="text-slate-600 dark:text-slate-300">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="3" y1="6" x2="21" y2="6" />
-              <line x1="3" y1="12" x2="21" y2="12" />
-              <line x1="3" y1="18" x2="21" y2="18" />
-            </svg>
+        <div className="flex items-center gap-2">
+        {/* Sur une sous-page, le hamburger cède la place au retour : on ne
+            change pas de section, on remonte d'un cran. */}
+        {pageHeader?.chrome ? (
+          <Link
+            to={pageHeader.chrome.backTo}
+            aria-label="Retour"
+            className="flex h-tap w-tap shrink-0 items-center justify-center rounded-xl bg-surface-2 text-ink"
+          >
+            <IconChevronLeft />
+          </Link>
+        ) : (
+          <button
+            onClick={() => setMenuOpen(true)}
+            aria-label="Ouvrir le menu"
+            className="flex h-tap w-tap shrink-0 items-center justify-center rounded-xl bg-surface-2 text-ink"
+          >
+            <IconMenu />
           </button>
+        )}
+        {/* La page déclare son titre (usePageHeader) ; sinon, nom de l'app +
+            lien Accueil. Accueil reste joignable par le nom de l'app dans le
+            menu, ouvert par le bouton ci-dessus. */}
+        {pageHeader ? (
+          <div className="min-w-0 flex-1">
+            {/* Deux lignes au plus, pas de troncature au milieu d'un mot : un
+                sur-titre qui compte (« hors de tes recettes · 6 ingrédients
+                exclus ») doit se lire. La hauteur de ligne est forcée en style
+                inline — `.eyebrow` est hors `@layer` et son `leading-none`
+                rognerait les capitales accentuées sous l'`overflow: hidden`. */}
+            {pageHeader.eyebrow && (
+              <div className="eyebrow line-clamp-2" style={{ lineHeight: 1.35 }}>
+                {pageHeader.eyebrow}
+              </div>
+            )}
+            <div className="flex items-center gap-2 text-xl font-semibold">
+              {pageHeader.emoji && (
+                <span aria-hidden="true" className="shrink-0 leading-none">
+                  {pageHeader.emoji}
+                </span>
+              )}
+              <span className="truncate">{pageHeader.title}</span>
+            </div>
+          </div>
+        ) : (
           <Link
             to="/"
             aria-label="Accueil"
-            className={`flex items-center gap-2 font-bold ${pathname === "/" ? "text-brand-600" : ""}`}
+            className={`flex min-w-0 flex-1 items-center gap-2 font-semibold ${
+              pathname === "/" ? "text-brand-600" : ""
+            }`}
           >
-            <span aria-hidden="true">🏠</span>
-            {APP_NAME}
+            <IconHome size={20} className="shrink-0" />
+            <span className="truncate">{APP_NAME}</span>
           </Link>
-        </div>
-        {/* Avatar du compte : clic → Paramètres / Déconnexion */}
-        <div className="relative">
+        )}
+        {/* Avatar du compte : clic → Paramètres / Déconnexion.
+            Sur une sous-page, la place revient aux actions de cette page. */}
+        {pageHeader?.chrome && pageHeader.chrome.actions.length > 0 ? (
+          <OverflowMenu items={pageHeader.chrome.actions} label="Actions de la page" />
+        ) : (
+        <div className="relative shrink-0">
           <button
             onClick={() => setUserMenuOpen((o) => !o)}
             aria-label="Compte"
             aria-haspopup="menu"
             aria-expanded={userMenuOpen}
-            className="flex items-center rounded-full ring-brand-500 focus:outline-none focus:ring-2"
+            className="flex h-tap w-tap items-center justify-center rounded-full ring-brand-500 focus:outline-none focus:ring-2"
           >
-            <MemberAvatar id={me.member} className="h-8 w-8 text-sm" />
+            <MemberAvatar id={me.member} className="h-9 w-9 text-sm" />
           </button>
           {userMenuOpen && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
               <div
                 role="menu"
-                className="absolute right-0 z-50 mt-2 min-w-44 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-900"
+                className="absolute right-0 z-50 mt-2 w-60 rounded-2xl border border-line bg-surface p-2 shadow-xl"
               >
-                <div className="flex items-center gap-2 px-3 py-2 text-sm font-semibold">
-                  <MemberAvatar id={me.member} className="h-6 w-6 text-[10px]" />
+                {/* Même hauteur qu'une rangée, mais souligné : c'est un en-tête,
+                    pas une action — son avatar est plus large que les icônes. */}
+                <div className="mb-1 flex h-14 items-center gap-3 border-b border-hairline px-3 text-base font-semibold">
+                  <MemberAvatar id={me.member} className="h-9 w-9 shrink-0 text-sm" />
                   <span className="truncate">{myName}</span>
                 </div>
                 <AccountMenuItems
@@ -387,51 +595,61 @@ export default function Layout({ children }: { children: ReactNode }) {
             </>
           )}
         </div>
+        )}
+        </div>
+        {showTabs && pageHeader?.tabs && (
+          // `-mx-3` : le filet des onglets court jusqu'aux bords de la barre,
+          // et le retrait du premier onglet retombe sur celui du titre.
+          <SubNav
+            value={pageHeader.tabs.value}
+            onChange={pageHeader.tabs.onChange}
+            items={pageHeader.tabs.items}
+            bleed={false}
+            className="-mx-3 mt-1"
+          />
+        )}
       </header>
 
-      {/* Drawer menu (mobile) */}
+      {/* Drawer menu (mobile) — même liste groupée que la sidebar */}
       {menuOpen && (
         <div className="fixed inset-0 z-40 md:hidden">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setMenuOpen(false)} />
-          <div className="absolute inset-y-0 left-0 flex w-72 flex-col bg-[color:var(--paper)] p-4 shadow-xl">
-            <div className="mb-4 flex items-center justify-between">
+          {/* Voile opaque : le contenu derrière ne doit plus se lire au moment
+              où l'on cherche sa destination. */}
+          <div className="absolute inset-0 bg-black/70" onClick={() => setMenuOpen(false)} />
+          <div className="absolute inset-y-0 left-0 flex w-[min(20rem,88vw)] flex-col bg-[color:var(--paper)] p-4 shadow-xl">
+            <div className="mb-3 flex items-center gap-2">
               <Link
                 to="/"
                 onClick={() => setMenuOpen(false)}
                 aria-label="Accueil"
-                className={`flex items-center gap-2 text-lg font-bold ${
-                  pathname === "/" ? "text-brand-600" : ""
-                }`}
+                className="min-w-0 flex-1 px-1"
               >
-                <span aria-hidden="true">🏠</span>
-                {APP_NAME}
+                <div
+                  className={`truncate text-xl font-semibold ${
+                    pathname === "/" ? "text-brand-600" : ""
+                  }`}
+                >
+                  {APP_NAME}
+                </div>
+                {me.household.name !== APP_NAME && (
+                  <div className="truncate text-xs text-ink-2">{me.household.name}</div>
+                )}
               </Link>
-              <button onClick={() => setMenuOpen(false)} aria-label="Fermer" className="text-slate-400 hover:text-slate-600">
-                ✕
+              <button
+                onClick={() => setMenuOpen(false)}
+                aria-label="Fermer"
+                className="flex h-tap w-tap shrink-0 items-center justify-center rounded-xl bg-surface-2 text-ink"
+              >
+                <IconClose size={22} />
               </button>
             </div>
-            <nav className="flex flex-1 flex-col gap-1 overflow-y-auto">
-              {nav.map((n) =>
-                n.separator ? (
-                  <hr key={n.to} className="my-2 border-slate-200 dark:border-slate-700" />
-                ) : (
-                  <Link
-                    key={n.to}
-                    to={linkFor(n.to)}
-                    onClick={() => setMenuOpen(false)}
-                    // Libellés plus grands que sur ordinateur (text-base = 1rem).
-                    className={`flex items-center gap-3 rounded-xl px-3 py-2 text-[1.4rem] font-medium leading-tight ${
-                      isActive(n.to)
-                        ? "bg-brand-600 text-white"
-                        : "text-slate-600 hover:bg-white dark:text-slate-300 dark:hover:bg-slate-800"
-                    }`}
-                  >
-                    <span>{n.icon}</span>
-                    {n.label}
-                  </Link>
-                ),
-              )}
-            </nav>
+            <NavList
+              groups={navGroups}
+              linkFor={linkFor}
+              isActive={isActive}
+              onNavigate={() => setMenuOpen(false)}
+              badges={badges}
+            />
           </div>
         </div>
       )}
@@ -439,7 +657,7 @@ export default function Layout({ children }: { children: ReactNode }) {
       {/* Content (décalé de la sidebar fixe sur desktop) */}
       {/* flex-col + flex-1 jusqu'à la page : permet d'ancrer un pied de page
           en bas de l'écran même quand le contenu ne remplit pas la hauteur. */}
-      <main className="flex flex-1 flex-col p-4 md:ml-56 md:p-6">
+      <main className="flex flex-1 flex-col p-4 md:ml-64 md:p-6">
         <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col">{children}</div>
       </main>
     </div>

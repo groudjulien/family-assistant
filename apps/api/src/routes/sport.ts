@@ -7,10 +7,18 @@ import {
   upsertWellnessGoalSchema,
   upsertWellnessLogSchema,
   upsertWellnessSessionSchema,
+  setWellnessDayClosedSchema,
   type WellnessConfig,
+  type WellnessJournal,
   type WellnessLog,
 } from "@gfa/shared";
-import { wellnessActivity, wellnessGoal, wellnessLog, wellnessSession } from "../db/schema";
+import {
+  wellnessActivity,
+  wellnessDayClose,
+  wellnessGoal,
+  wellnessLog,
+  wellnessSession,
+} from "../db/schema";
 import { parseBody } from "../lib/validate";
 import { newId } from "../lib/util";
 import type { AppContext } from "../lib/types";
@@ -410,20 +418,55 @@ sport.put("/:member/goals/reorder", async (c) => {
 
 sport.get("/:member/logs", async (c) => {
   const db = c.get("db");
+  const hid = c.get("household").id;
   const member = slot(c.req.param("member"));
   const denied = assertSelf(c, member);
   if (denied) return denied;
   const rows = await db
     .select()
     .from(wellnessLog)
-    .where(and(eq(wellnessLog.householdId, c.get("household").id), eq(wellnessLog.member, member)));
-  const logs: WellnessLog[] = rows.map((r) => ({
-    date: r.date,
-    goalId: r.goalId,
-    value: r.value,
-    sessions: safeJson(r.sessions, [] as WellnessLog["sessions"]),
-  }));
-  return c.json(logs);
+    .where(and(eq(wellnessLog.householdId, hid), eq(wellnessLog.member, member)));
+  const closed = await db
+    .select({ date: wellnessDayClose.date })
+    .from(wellnessDayClose)
+    .where(and(eq(wellnessDayClose.householdId, hid), eq(wellnessDayClose.member, member)));
+  const journal: WellnessJournal = {
+    logs: rows.map((r) => ({
+      date: r.date,
+      goalId: r.goalId,
+      value: r.value,
+      sessions: safeJson(r.sessions, [] as WellnessLog["sessions"]),
+    })),
+    closedDates: closed.map((r) => r.date).sort(),
+  };
+  return c.json(journal);
+});
+
+/**
+ * Clôture d'une journée. Enregistrée à part des saisies : une ligne à zéro est
+ * supprimée (voir plus bas), donc « j'ai fini ma journée » ne peut pas se dire
+ * en écrivant des zéros.
+ */
+sport.put("/:member/logs/close/:date", async (c) => {
+  const member = slot(c.req.param("member"));
+  const denied = assertSelf(c, member);
+  if (denied) return denied;
+  const db = c.get("db");
+  const hid = c.get("household").id;
+  const date = c.req.param("date");
+  const body = await parseBody(c, setWellnessDayClosedSchema);
+  const where = and(
+    eq(wellnessDayClose.householdId, hid),
+    eq(wellnessDayClose.member, member),
+    eq(wellnessDayClose.date, date),
+  );
+  const existing = (await db.select().from(wellnessDayClose).where(where).limit(1))[0];
+  if (body.closed && !existing) {
+    await db.insert(wellnessDayClose).values({ id: newId(), householdId: hid, member, date });
+  } else if (!body.closed && existing) {
+    await db.delete(wellnessDayClose).where(eq(wellnessDayClose.id, existing.id));
+  }
+  return c.json({ ok: true });
 });
 
 /**
@@ -486,6 +529,16 @@ sport.delete("/:member/logs/:date", async (c) => {
   if (denied) return denied;
   const db = c.get("db");
   const hid = c.get("household").id;
+  // Remise à « non saisi » complète : la clôture de la journée part avec.
+  await db
+    .delete(wellnessDayClose)
+    .where(
+      and(
+        eq(wellnessDayClose.householdId, hid),
+        eq(wellnessDayClose.member, member),
+        eq(wellnessDayClose.date, c.req.param("date")),
+      ),
+    );
   const goals = await db
     .select({ id: wellnessGoal.id })
     .from(wellnessGoal)

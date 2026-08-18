@@ -25,6 +25,7 @@ Monorepo **pnpm** (`pnpm@9`), 2 apps + 1 package partagé :
 apps/web        # front React              → @gfa/web
 apps/api        # Worker Hono + D1 + R2    → @gfa/api
 packages/shared # schémas Zod + types      → @gfa/shared  (source de vérité des types)
+                #   src/groceries.ts — catalogue produits (emoji + rayon), lu par le front ET l'API
 scripts/setup.sh   # installation guidée · scripts/deploy.sh (pnpm release) · docs/
 ```
 
@@ -105,7 +106,9 @@ Les colonnes « config » riches sont stockées en **TEXT JSON** (ex. `user.menu
 ## Frontend (`apps/web`)
 
 - **Routing** : [`src/App.tsx`](apps/web/src/App.tsx) — React Router. Pages dans `src/pages/`, une par module (Dashboard, Tasks, Calendar, Money, Wedding, Courses, Tools, Sport, Chat, Settings).
-- **Shell** : [`src/components/Layout.tsx`](apps/web/src/components/Layout.tsx) — sidebar (≥ `md`) / menu hamburger (< `md`). `NAV` y est défini ; `orderedNav(me.menuOrder)` applique l'ordre perso.
+- **Shell** : [`src/components/Layout.tsx`](apps/web/src/components/Layout.tsx) — sidebar (≥ `md`) / drawer hamburger (< `md`), tous deux rendus par le **même** composant `NavList` : un menu ne peut pas diverger entre mobile et ordinateur. `NAV` y est défini (sans icône : elle est résolue depuis `to` par `NavIcon`) ; `orderedNav(me.menuOrder, me.menuHidden)` applique l'ordre et les masquages perso, puis `groupNav(items, me.menuGroups)` découpe en **groupes titrés**.
+  - Un **groupe** est une entrée `sep:<id>` dans `menuOrder` ; son nom vit dans `me.menuGroups` (`{ "sep:x7k": "Au quotidien" }`) et se modifie dans Réglages → Menus de navigation. Un groupe titre les menus **placés en dessous de lui** et disparaît s'il ne lui reste aucun menu visible.
+  - **Indicateurs de bout de menu** : `GET /api/badges` ([`routes/badges.ts`](apps/api/src/routes/badges.ts)) renvoie `{ tasks, courses, moneyCents, weddingDays }` pour l'utilisateur connecté ; rendu par `NavBadge`. Cet endpoint est appelé depuis **toutes** les pages : y ajouter un compteur signifie l'ajouter au chemin critique du shell — pas de synchro bancaire, pas d'appel externe.
 - **Appels API** : [`src/lib/api.ts`](apps/web/src/lib/api.ts) — `api.get/post/put/patch/del`, `credentials: "include"`, lève `ApiError(status, message)`. Ne jamais `fetch` à la main.
 - **Données** : **TanStack Query** partout. Clé = tableau (`["tasks"]`, `["me"]`, `["dashboard"]`, `["members"]`…). Après mutation : `qc.invalidateQueries({ queryKey: [...] })`.
 - **Utilisateur courant** : `useMe()` ([`src/auth.tsx`](apps/web/src/auth.tsx)) renvoie `Me` (id, member `a|b`, avatarUrl, household + config des membres, prefs perso). La query est `["me"]` — l'invalider après avoir changé une préférence.
@@ -113,7 +116,7 @@ Les colonnes « config » riches sont stockées en **TEXT JSON** (ex. `user.menu
 
 ### Composants UI réutilisables — [`src/components/ui.tsx`](apps/web/src/components/ui.tsx)
 
-`Select`, `SearchSelect`, `Checkbox`, `SubNav`, `Input`, `DateInput`, `TimeInput`, `DateTimeInput`, `DateRangeCalendar`. **Réutiliser ces primitives** avant d'en écrire une nouvelle. Un nouveau motif réutilisé ≥ 2 fois → l'extraire (dans `ui.tsx` si générique, sinon en composant local de la page).
+`Select`, `SearchSelect`, `Checkbox`, `Switch`, `SubNav`, `FilterChips`, `SearchField`, `OverflowMenu`, `MobileActionBar`, `Input`, `DateInput`, `TimeInput`, `DateTimeInput`, `DateRangeCalendar`. **Réutiliser ces primitives** avant d'en écrire une nouvelle. Un nouveau motif réutilisé ≥ 2 fois → l'extraire (dans `ui.tsx` si générique, sinon en composant local de la page).
 
 Composants partagés dédiés (hors `ui.tsx`) :
 - [`components/MemberAvatar.tsx`](apps/web/src/components/MemberAvatar.tsx) — `MemberAvatar` (photo Google d'un membre, repli sur pastille initiale) + `useMembers`.
@@ -131,10 +134,13 @@ Tout **sous-menu (onglet) DOIT être une URL distincte** et non un simple `useSt
 
 1. Route paramétrée dans [`App.tsx`](apps/web/src/App.tsx) : `<Route path="/xxx" …/>` **et** `<Route path="/xxx/:tab" …/>` (ou `:section`, `:view`, `:member`…).
 2. La page lit l'onglet via `useParams()` (avec repli sur l'onglet par défaut si absent/invalide) et change d'onglet via `navigate("/xxx/<tab>")` (pas de state local).
-3. Le **dernier sous-menu visité est mémorisé automatiquement** par `useLastPaths` dans [`Layout.tsx`](apps/web/src/components/Layout.tsx) (localStorage, clé `nav:lastPaths`) : `linkFor(base)` renvoie la dernière sous-page visitée de la section. Ne pas ré-implémenter cette mémoire.
-4. **Mémoire du dernier sous-menu (OBLIGATOIRE pour tout nouveau menu/sous-menu)** : `useLastPaths` ne couvre que la navigation par la sidebar. Pour qu'un retour sur un onglet retombe sur le dernier sous-menu visité (ex. Courses → Idées repas → « Repas de la semaine »), les sous-menus **imbriqués** (niveau 2) utilisent le hook [`useLastView`](apps/web/src/lib/lastView.ts) : `const sub = useLastView("section:onglet", ["a", "b"], "a", viewParam, "/section/onglet")`. Il mémorise en localStorage (`nav:lastView:<clé>`), restaure quand l'URL n'a pas de sous-chemin, et réaligne l'URL en `replace`. Motif de référence : `IdeasTab` dans [`Courses.tsx`](apps/web/src/pages/Courses.tsx).
+3. **Rendu** : onglets soulignés, en casse normale, défilants horizontalement quand ils débordent. Plus de `<Select>` sur mobile (il cachait les autres onglets), et **pas d'icône** dans un onglet.
+   - **Sur mobile, les onglets vivent dans la barre du haut** : la page appelle `usePageTabs(value, items, onChange)` et rend son `SubNav` en `hidden md:block` pour l'ordinateur. Le sous-menu se lit alors comme appartenant à la page, le filet du bas de la barre est celui des onglets (un seul trait), et la page gagne une rangée.
+   - `SubNav` reste utilisable en direct pour une rangée de filtres ou un popover : lui passer alors `bleed={false}` (il n'est pas un bloc pleine largeur de la page).
+4. Le **dernier sous-menu visité est mémorisé automatiquement** par `useLastPaths` dans [`Layout.tsx`](apps/web/src/components/Layout.tsx) (localStorage, clé `nav:lastPaths`) : `linkFor(base)` renvoie la dernière sous-page visitée de la section. Ne pas ré-implémenter cette mémoire.
+5. **Mémoire du dernier sous-menu (OBLIGATOIRE pour tout nouveau menu/sous-menu)** : `useLastPaths` ne couvre que la navigation par la sidebar. Pour qu'un retour sur un onglet retombe sur le dernier sous-menu visité (ex. Courses → Idées repas → « Repas de la semaine »), les sous-menus **imbriqués** (niveau 2) utilisent le hook [`useLastView`](apps/web/src/lib/lastView.ts) : `const sub = useLastView("section:onglet", ["a", "b"], "a", viewParam, "/section/onglet")`. Il mémorise en localStorage (`nav:lastView:<clé>`), restaure quand l'URL n'a pas de sous-chemin, et réaligne l'URL en `replace`. Motif de référence : `IdeasTab` dans [`Courses.tsx`](apps/web/src/pages/Courses.tsx).
 
-À chaque ajout de menus ou de sous-menus, appliquer ces quatre points — la mémoire du dernier menu/sous-menu visité n'est pas optionnelle.
+À chaque ajout de menus ou de sous-menus, appliquer ces cinq points — la mémoire du dernier menu/sous-menu visité n'est pas optionnelle.
 
 ---
 
@@ -144,24 +150,74 @@ Tout **sous-menu (onglet) DOIT être une URL distincte** et non un simple `useSt
 
 - **Classes maison** ([`src/index.css`](apps/web/src/index.css)) : `.card`, `.btn` / `.btn-primary` / `.btn-ghost`, `.input`, `.subtabs` / `.subtab`. Utiliser celles-là pour cartes, boutons, champs et onglets.
   - Les `.btn*` sont dans **`@layer components`** : les utilitaires les surchargent normalement (`hidden`, `md:hidden`, `rounded-full`, `flex`, `text-xs`…). On peut donc faire `btn-primary md:hidden` (FAB) ou `btn-primary hidden md:inline-flex` directement. ⚠️ `.card`, `.input`, `.subtab` ne sont **pas** dans un layer (définis après `@tailwind utilities`) : un utilitaire de même spécificité **ne les surcharge pas** → les envelopper dans un élément neutre (`<div className="hidden md:block">`) ou utiliser un style inline.
-- **Couleur primaire** = vert **brand** (`#5b8a4e`). Palette Tailwind `brand.{50,100,500,600,700}` ([`tailwind.config.js`](apps/web/tailwind.config.js)). Ne pas coder de vert en dur : `bg-brand-600`, `text-brand-700`, etc. Variable CSS `--primary` pour le hors-Tailwind.
-- **Dark mode** : `darkMode: "class"`. Toujours fournir les variantes `dark:` (ex. `bg-white dark:bg-slate-900`, `border-slate-200 dark:border-slate-800`).
-- **Typo** : titres en `Fraunces` (serif, `font-sans`/`font-serif`), monospace `JetBrains Mono` pour les onglets/labels techniques.
-- **Police d'icônes** : pas de librairie d'icônes. Utiliser des **SVG inline** (stroke `currentColor`) pour un rendu net et centré — pas de glyphe texte (`+`, `i`) seul dans un bouton rond.
+### Couleurs — tokens (RÈGLE)
+
+**La source de vérité est le bloc de tokens en tête de [`index.css`](apps/web/src/index.css)** (`:root` + `.dark`), exposé en utilitaires par [`tailwind.config.js`](apps/web/tailwind.config.js). **Ne jamais écrire une couleur d'UI en dur** (`#…`, `bg-[#…]`) : si le token manque, on l'ajoute ici.
+
+| Rôle | Utilitaire | Clair | Sombre |
+|---|---|---|---|
+| Fond de page | `var(--paper)` | `#F5F4F0` | `#0B1219` |
+| Carte | `bg-surface` | `#FFFFFF` | `#131E2A` |
+| Surface élevée (tuile, hover) | `bg-surface-2` | `#F1EFEA` | `#1B2836` |
+| Texte principal | `text-ink` | `#16202B` | `#F2F5F8` |
+| Texte secondaire | `text-ink-2` / `text-slate-400` | `#5B6570` | `#A7B4C2` |
+| Bordure | `border-line` | `#E2E7EC` | `#22303F` |
+| Action | `bg-brand-600` | `#2F6F47` | `#5FB574` |
+| Texte **sur** un aplat vert | `text-on-brand` | blanc | `#08120B` |
+| Argent qui sort | `text-danger` | `#B3261E` | `#F08A82` |
+| Attention | `text-warning` | `#8A6416` | `#E3B341` |
+| Info | `text-info` | `#2A5DA8` | `#8AB4F8` |
+
+- **Un token suit déjà le thème** : `bg-surface` n'a **pas** besoin de `dark:` — c'est tout l'intérêt. Ne remettre une variante `dark:` que sur les classes Tailwind natives (`bg-white dark:bg-slate-900`) encore présentes dans les pages historiques.
+- **`text-white` sur du vert est interdit** : en sombre le vert est clair, le texte doit être `text-on-brand`.
+- **Rôle des couleurs** : le vert dit « cliquable », pas « montant positif ». Rouge / ambre / bleu ne servent qu'aux **données** (`danger` / `warning` / `info`).
+- **`slate` est repointé** sur la rampe neutre du design (`slate-950` = fond sombre → `slate-100` = texte clair) : les usages historiques `dark:bg-slate-900`, `text-slate-400`… restent valides. `slate-400` et `slate-500` suivent le thème (elles portent le texte secondaire, presque toujours écrit sans `dark:`).
+- **Dark mode** : `darkMode: "class"`, **sombre par défaut** (`lib/theme.ts`).
+
+### Typo, échelle et icônes (RÈGLE)
+
+- **Police** : `Instrument Sans` partout (`font-sans` *et* `font-serif`), auto-hébergée en variable (`public/fonts/`, `src/fonts.css`) ; `JetBrains Mono` réservée aux étiquettes techniques (`.eyebrow`) — **pas aux onglets**, qui sont des noms de page en casse normale. **Pas de serif** : illisible sur une liste de 60 lignes et sur les chiffres.
+- **Échelle à 6 tailles, plancher 13 px** ([`tailwind.config.js`](apps/web/tailwind.config.js)) : `text-3xl` 27 (titre) · `text-xl` 20 (sous-titre) · `text-base` 16 (ligne de liste) · `text-sm` 14 (secondaire) · `text-xs` 13 (méta) · `text-2xs` 11 (étiquette majuscules **uniquement**). Ne pas écrire de taille arbitraire (`text-[10px]`).
+- **Chiffres tabulaires** : appliqués globalement sur `body`. Rien à faire par vue.
+- **Cibles tactiles** : 44 px minimum (`h-tap` / `w-tap` / `min-h-tap`), 8 px d'écart, jamais collé au bord.
+- **Icônes** : jeu de trait maison dans [`components/icons.tsx`](apps/web/src/components/icons.tsx) (24 px, `stroke-width` 1.85, `currentColor`). **Pas de librairie d'icônes, pas d'emoji dans un bouton d'action** — l'emoji est réservé au *contenu* (un plat, un film, un lieu). `NavIcon to="/money"` résout l'icône d'une section depuis son chemin.
 - **Responsive** : la frontière mobile/desktop de l'app est le breakpoint **`md`** (la sidebar apparaît à `md`). Aligner les bascules « mobile vs ordinateur » sur `md:` pour rester cohérent.
 
 ### Motifs mobile (RÈGLES)
 
-- **Bouton de création** : sur mobile, **toujours** un bouton flottant rond avec une icône **`+`** (SVG inline) en **bas à droite** de l'écran qui ouvre une **modale**. Sur ordinateur, garder le bouton/formulaire inline en haut.
-  - FAB : `fixed bottom-6 right-6 z-30 … h-14 w-14 rounded-full md:hidden` (z-30 pour passer **sous** le menu hamburger en `z-40`).
-  - Conteneur de page : ajouter `pb-24 md:pb-0` pour que la dernière ligne reste visible au scroll au-dessus du FAB.
+Motif de référence complet : [`Tasks.tsx`](apps/web/src/pages/Tasks.tsx) (rendu mobile et rendu ordinateur séparés, mutations partagées par `useTaskMutations`).
+
+- **Titre de page (OBLIGATOIRE)** : chaque page appelle `usePageHeader("Tâches", "3 en cours · 1 aujourd'hui")` ([`PageHeader.tsx`](apps/web/src/components/PageHeader.tsx)). La barre mobile porte alors le titre de la page et **un indicateur qui apprend quelque chose**, au lieu du nom de l'app. Sans appel, elle retombe sur le nom de l'app.
+  - L'appel se fait dans le composant **de plus haut niveau réellement monté** pour l'onglet courant, et **avant tout `return` conditionnel** (c'est un hook). Quand un parent et un enfant l'appellent tous les deux, c'est le **parent** qui gagne (les effets remontent) — ne le poser qu'à un seul endroit par onglet.
+  - Compteurs déjà agrégés : `useNavBadges()` ([`lib/badges.ts`](apps/web/src/lib/badges.ts)) lit le cache `["nav-badges"]` déjà chargé par le menu — gratuit pour « reste à vivre » (Argent) et le compte à rebours (Mariage).
+  - Un **emoji de contenu** (une liste, un plat) se passe en 3ᵉ argument : `usePageHeader(list.name, eyebrow, list.emoji)`. Il est rendu à part, avant le titre — jamais concaténé dans la chaîne (les emojis n'ont pas de chasse latérale).
+- **Sous-page (ouvrir un enregistrement)** : quand une ligne d'index ouvre un écran dédié (une liste dans Listes), la page appelle **`usePageChrome(backTo, actions)`** en plus de `usePageHeader`. La barre du haut échange alors le hamburger contre un **retour** et l'avatar contre le **« ⋯ »** de la page ; elle déclare aussi des onglets **vides** (`usePageTabs(tab, [], …)`) pour que la rangée d'onglets disparaisse. Motif de référence : `ListDetail` dans [`Listes.tsx`](apps/web/src/pages/Listes.tsx).
+  - L'URL reste le 3ᵉ segment de la section (`/listes/partagees/<id>`) : partageable, et le retour du navigateur remonte à l'index.
+  - Ce segment est un **identifiant**, pas un sous-menu : rien à mémoriser avec `useLastView`, et il est tronqué par `memorablePath` dans [`Layout.tsx`](apps/web/src/components/Layout.tsx) (`RECORD_TABS`) pour que la sidebar ne rouvre pas un enregistrement — voire un enregistrement supprimé.
+- **Hub de section** : quand une section a beaucoup d'onglets, son accueil mobile (`/money`) est un **sommaire chiffré** — un chiffre-héros, puis une rangée par onglet (icône, nom, ce qu'il contient, son chiffre, chevron), groupée par `.eyebrow`. La rangée d'onglets disparaît alors du mobile (`usePageTabs` n'est plus appelé) et chaque onglet devient une sous-page avec retour vers le hub. Sur ordinateur, rien ne change : le `SubNav` reste et `/money` ouvre son premier onglet. Motif de référence : `MoneyHub` dans [`Money.tsx`](apps/web/src/pages/Money.tsx).
+  - Le hub charge **un seul** endpoint de sommaire (`GET /api/money/summary`), pas les six requêtes des onglets qu'il résume — et pas non plus un ajout à `/api/badges`, qui est sur le chemin critique de toutes les pages.
+  - La section est ajoutée à `FLAT_SECTIONS` ([`Layout.tsx`](apps/web/src/components/Layout.tsx)) : le menu doit retomber sur le sommaire, pas sur le dernier onglet visité.
+  - Un onglet peut à son tour porter des **sous-onglets** dans la barre (`usePageTabs` depuis l'onglet, `useLastView` pour la mémoire) : retour + titre + sous-onglets cohabitent. Motif : `Tresorerie` dans [`Money.tsx`](apps/web/src/pages/Money.tsx) (`Virements` / `Reste à vivre`).
+  - Quand un **enfant** prend l'écran et déclare le titre, le parent passe `null` à `usePageHeader` : sans ça il écraserait le titre de l'enfant (les effets du parent s'exécutent après). Motif : `Repas` → `RecipeDetail`.
+  - **Pas d'état initial déduit du viewport** (`useState(!useIsMobile())`) : la première mesure peut tomber avant la mise en page et rester fausse. Choisir une valeur par défaut identique partout.
+  - L'index mobile n'a **aucun bouton dans la ligne** : on entre d'une touche, on réordonne d'un **appui long** (dnd-kit, `TouchSensor` + `activationConstraint: { delay: 250, tolerance: 8 }` ; les `listeners` vont sur l'enveloppe, pas sur le `<a>`, et on laisse tomber les `attributes` qui feraient du lien un `role="button"`). Les entrées « Déplacer vers le haut / bas » du « ⋯ » de la sous-page tiennent lieu de flèches ↑/↓.
+- **Action principale** : sur mobile, **`MobileActionBar`** — un bouton **libellé** pleine largeur ancré en bas (« Nouvelle tâche », pas un `+` muet), sous un dégradé. Le bouton rond est abandonné : il recouvrait une ligne réelle et disait la même chose partout. Sur ordinateur, garder le bouton inline en haut.
+  - Conteneur de page : `pb-28 md:pb-0`, pour que la dernière ligne reste atteignable au-dessus de la barre.
+- **Une seule action visible par ligne** : la case à cocher. Modifier / supprimer / partager vivent dans **`OverflowMenu`** (le « ⋯ » de fin de ligne). Jamais une action destructive collée à une case à cocher, et toute action irréversible porte un **libellé texte**.
+  - Quand les actions portent sur un **objet identifiable** (un film, un repas du menu), préférer **`ActionSheet`** : la feuille rappelle l'objet en tête (vignette + titre + méta), ses lignes ont la place d'un libellé complet et d'une phrase de conséquence (« retiré des propositions futures »). `OverflowMenu` reste le bon choix pour 2–3 actions courtes en fin de ligne.
+  - ⚠️ Le menu d'`OverflowMenu` s'ouvre **dans** son conteneur : un `overflow-hidden` sur la carte parente le rogne. Porter les coins arrondis sur l'image (`rounded-t-2xl`) plutôt que sur la carte.
+- **Cartes groupées** : une liste de lignes simples tient dans **une** carte à filets (`border-hairline`), pas une carte par ligne. Une ligne qui porte du détail (étapes, progression) prend sa propre carte.
+- **Filtres** : **`FilterChips`** — rangée de pastilles de 42 px défilable horizontalement, verte pleine quand active. Un seul style de filtre dans l'app (plus de segment vert / pills claires / onglets soulignés pour le même rôle). Quand le filtre est un sous-menu, il pilote l'URL (cf. WishList : `/listes/wishlist/<tous|commun|a|b>`).
+- **Recherche** : **`SearchField`** (icône + 48 px). Ne pas la bricoler avec `className="input pl-11"` : `.input` est hors `@layer`, son `px-3` bat le `pl-11` et l'icône passe sous le texte.
+- **Sections de liste** : une étiquette `.eyebrow` au-dessus de chaque carte (« PRIORITÉS », « FRAIS · 8 »), plutôt qu'un titre à l'intérieur — l'œil balaie la colonne des étiquettes.
 - **Modale alignée en haut** : toute modale doit être **alignée en haut** de l'écran sur mobile (la place du clavier) et centrée sur ordinateur : `fixed inset-0 … flex items-start justify-center overflow-y-auto … sm:items-center`.
-- **Filtres repliés** : sur mobile, masquer les filtres derrière un **bouton « Filtres »** (icône entonnoir) qui les déplie ; sur ordinateur les afficher inline (`md:flex`). Indiquer un filtre actif (ex. `ring-1 ring-brand-500`).
+- **États vides** : une phrase courte **et** un bouton (« Aucune tâche pour l'instant. » + « Ajouter la première »), jamais un simple constat.
+- **Pas de mode d'emploi dans l'UI** : si un encart doit expliquer des icônes, c'est l'icône qui est fausse (`GestureHelp` est en voie de retrait).
 - **Éviter la marge fantôme de `space-y`** : quand le premier enfant est masqué en mobile (`hidden md:block`), `space-y-*` lui applique quand même une marge (`:not([hidden])` ne voit pas la classe `hidden`). Utiliser **`flex flex-col gap-*`** sur le conteneur (le `gap` ignore les enfants `display:none`).
 
-### ⚠️ Piège de spécificité dark mode
+### ⚠️ Piège de spécificité sur `.card`
 
-`.card` applique `dark:border-slate-800`, qui compile en `.dark .card { … }` — un sélecteur **à 2 classes** qui **bat** une classe utilitaire simple (`border-l-red-500`) en mode sombre. Pour forcer une couleur de bordure/accent sur une `.card` en dark, utiliser un **style inline** (`style={{ borderLeftColor: … }}`) plutôt qu'une classe utilitaire.
+`.card` est défini **hors `@layer`** (après `@tailwind utilities`) : à spécificité égale il gagne par ordre de source. Une classe utilitaire simple (`border-l-red-500`) posée sur une `.card` **ne la surcharge pas**. Utiliser un **style inline** (`style={{ borderLeftColor: … }}`), ou envelopper dans un élément neutre.
 
 ---
 
@@ -175,7 +231,17 @@ Pour toute config personnelle (ordre de menus, ordre/visibilité de widgets…) 
 4. **Endpoint** `PATCH /api/household/<truc>` ([`routes/household.ts`](apps/api/src/routes/household.ts)) qui `JSON.stringify` dans la colonne.
 5. **Front** : lire via `useMe()`, muter avec `api.patch`, puis `invalidateQueries(["me"])`.
 
-Exemples en place : `menuOrder` (ordre des menus) et `widgetPrefs` (`{ order, hidden }` des widgets d'accueil).
+Exemples en place : `menuOrder` (ordre des menus), `menuGroups` (nom des groupes de menus) et `widgetPrefs` (`{ order, hidden }` des widgets d'accueil).
+
+Même schéma pour une config **de foyer** (partagée par les deux membres), colonne sur `household` : `expenseCategories`, `shoppingCategories` (rayons de courses, Réglages → Courses).
+
+## Liste de courses — rayons
+
+Un article porte une clé de rayon (`shopping_item.category`). Elle est résolue **côté API**, dans `addOrIncrement` ([`routes/courses.ts`](apps/api/src/routes/courses.ts)), via `categoryFor(nom)` du catalogue partagé : tous les chemins d'ajout (saisie, liste d'une recette, import) obtiennent donc un rayon, pas seulement le formulaire. Le front peut passer un `category` explicite pour surcharger.
+
+- Rayons par défaut : `DEFAULT_SHOPPING_CATEGORIES`. Le foyer les redéfinit dans Réglages → Courses ; l'ordre configuré est celui des sections de la page Courses (l'ordre du magasin).
+- La clé `autre` (`FALLBACK_SHOPPING_CATEGORY`) accueille les produits inconnus du catalogue et les articles dont le rayon a été supprimé — elle n'est pas supprimable.
+- Renommer un rayon ne déplace aucun article : la **clé** est stable, seul le `name` change.
 
 ---
 

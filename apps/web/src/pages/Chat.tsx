@@ -32,7 +32,7 @@ function ModelPicker({ value, onChange }: { value: string; onChange: (id: string
       >
         <span className="h-1.5 w-1.5 rounded-full bg-brand-500" />
         {current.label}
-        <span className={`text-[9px] transition ${open ? "rotate-180" : ""}`}>▼</span>
+        <span className={`text-2xs transition ${open ? "rotate-180" : ""}`}>▼</span>
       </button>
 
       {open && (
@@ -50,7 +50,7 @@ function ModelPicker({ value, onChange }: { value: string; onChange: (id: string
                 className={`flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-xs transition ${
                   m.id === value
                     ? "bg-brand-50 text-brand-700 dark:bg-brand-600/20 dark:text-brand-50"
-                    : "text-slate-600 hover:bg-[#f1ede4] dark:text-slate-300 dark:hover:bg-slate-800"
+                    : "text-ink-2 hover:bg-surface-2"
                 }`}
               >
                 {m.label}
@@ -69,7 +69,7 @@ function Avatar({ kind, initial }: { kind: "user" | "assistant"; initial?: strin
     <div
       className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${
         kind === "assistant"
-          ? "bg-brand-600 text-white"
+          ? "bg-brand-600 text-on-brand"
           : "bg-white text-slate-600 border border-slate-200 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
       }`}
     >
@@ -138,7 +138,7 @@ export default function Chat() {
             title={webSearch ? "Recherche web activée" : "Recherche web désactivée"}
             className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium shadow-sm transition ${
               webSearch
-                ? "border-brand-500 bg-brand-600 text-white"
+                ? "border-brand-500 bg-brand-600 text-on-brand"
                 : "border-slate-200 bg-white text-slate-500 hover:border-brand-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
             }`}
           >
@@ -151,7 +151,7 @@ export default function Chat() {
       <div className="flex-1 space-y-4 overflow-y-auto rounded-2xl border border-slate-200 bg-white/60 p-4 dark:border-slate-800 dark:bg-slate-900/40">
         {empty && (
           <div className="flex h-full flex-col items-center justify-center text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-brand-600 text-xl text-white">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-brand-600 text-xl text-on-brand">
               ✦
             </div>
             <div className="mt-3 font-semibold">Ton assistant du foyer</div>
@@ -181,7 +181,7 @@ export default function Chat() {
             <div
               className={`max-w-[80%] whitespace-pre-wrap px-4 py-2.5 text-sm shadow-sm ${
                 m.role === "user"
-                  ? "rounded-2xl rounded-br-md bg-brand-600 text-white"
+                  ? "rounded-2xl rounded-br-md bg-brand-600 text-on-brand"
                   : "rounded-2xl rounded-bl-md border border-slate-200 bg-white text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
               }`}
             >
@@ -200,7 +200,7 @@ export default function Chat() {
                           <button
                             onClick={() => confirmAction.mutate(a.id)}
                             disabled={confirmAction.isPending || cancelAction.isPending}
-                            className="rounded-lg bg-brand-600 px-3 py-1 font-medium text-white transition hover:bg-brand-700 disabled:opacity-40"
+                            className="rounded-lg bg-brand-600 px-3 py-1 font-medium text-on-brand transition hover:bg-brand-700 disabled:opacity-40"
                           >
                             Confirmer
                           </button>
@@ -220,7 +220,7 @@ export default function Chat() {
                     </div>
                   ))}
               {m.role === "assistant" && m.outputTokens != null && (
-                <div className="mt-1.5 text-[10px] text-slate-400">
+                <div className="mt-1.5 text-2xs text-slate-400">
                   {m.model?.replace("claude-", "")} · {(m.inputTokens ?? 0) + m.outputTokens} tokens
                 </div>
               )}
@@ -231,7 +231,7 @@ export default function Chat() {
 
         {send.isPending && typeof send.variables === "string" && (
           <div className="flex items-end justify-end gap-2">
-            <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-brand-600 px-4 py-2.5 text-sm text-white shadow-sm">
+            <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-brand-600 px-4 py-2.5 text-sm text-on-brand shadow-sm">
               {send.variables}
             </div>
             <Avatar kind="user" initial={initial} />
@@ -272,7 +272,7 @@ export default function Chat() {
           className="flex-1 bg-transparent text-sm outline-none disabled:opacity-60"
         />
         <button
-          className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-600 text-white transition hover:bg-brand-700 disabled:opacity-40"
+          className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-600 text-on-brand transition hover:bg-brand-700 disabled:opacity-40"
           disabled={send.isPending || !input.trim() || !me.hasAnthropicKey}
           aria-label="Envoyer"
         >
@@ -282,7 +282,7 @@ export default function Chat() {
           </svg>
         </button>
       </form>
-      <div className="mt-1 text-right text-[10px] text-slate-400">{totalTokens} tokens au total</div>
+      <div className="mt-1 text-right text-2xs text-slate-400">{totalTokens} tokens au total</div>
     </div>
   );
 }

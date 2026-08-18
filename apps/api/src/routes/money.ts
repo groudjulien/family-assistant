@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, eq, asc, like } from "drizzle-orm";
+import { and, eq, asc, like, inArray } from "drizzle-orm";
 import {
   updateAccountSchema,
   createAccountSchema,
@@ -9,6 +9,9 @@ import {
   reorderRecurringSchema,
   addMatchNameSchema,
   createSettlementSchema,
+  setTransferChecksSchema,
+  type MoneySummary,
+  type TransferCheck,
 } from "@gfa/shared";
 import {
   account,
@@ -18,9 +21,13 @@ import {
   recurringDebit,
   settlement,
   bankTransaction,
+  plannedExpense,
+  utilityReading,
+  transferCheck,
 } from "../db/schema";
 import { parseBody } from "../lib/validate";
 import { computeBalance } from "../lib/balance";
+import { daysUntilEndOfMonth, projectCashflow } from "../lib/cashflow";
 import { syncStaleLinkedAccounts } from "../lib/lunchflow";
 import { newId, nowIso } from "../lib/util";
 import type { AppContext } from "../lib/types";
@@ -453,6 +460,146 @@ money.patch("/settlements/:id", async (c) => {
 money.delete("/settlements/:id", async (c) => {
   await c.get("db").delete(settlement).where(eq(settlement.id, c.req.param("id")));
   return c.json({ ok: true });
+});
+
+/* ---------------- Virements de début de mois ---------------- */
+
+/**
+ * La liste des virements à faire est **calculée par le front** (elle dépend de
+ * la répartition, des salaires, du mariage…) ; le serveur ne conserve que les
+ * cases cochées, par mois. Rien en base = virement à faire.
+ */
+money.get("/transfers", async (c) => {
+  const month = c.req.query("month") ?? "";
+  if (!/^\d{4}-\d{2}$/.test(month)) return c.json({ done: [] });
+  const rows = await c
+    .get("db")
+    .select()
+    .from(transferCheck)
+    .where(
+      and(eq(transferCheck.householdId, c.get("household").id), eq(transferCheck.month, month)),
+    );
+  const done: TransferCheck[] = rows.map((r) => ({
+    key: r.key,
+    doneAt: r.doneAt,
+    doneBy: r.doneBy,
+  }));
+  return c.json({ done });
+});
+
+/** Coche (ou décoche) un lot de virements — une case, ou « tout marquer ». */
+money.put("/transfers", async (c) => {
+  const db = c.get("db");
+  const hid = c.get("household").id;
+  const body = await parseBody(c, setTransferChecksSchema);
+
+  if (!body.done) {
+    await db
+      .delete(transferCheck)
+      .where(
+        and(
+          eq(transferCheck.householdId, hid),
+          eq(transferCheck.month, body.month),
+          inArray(transferCheck.key, body.keys),
+        ),
+      );
+    return c.json({ ok: true });
+  }
+
+  const existing = await db
+    .select({ key: transferCheck.key })
+    .from(transferCheck)
+    .where(and(eq(transferCheck.householdId, hid), eq(transferCheck.month, body.month)));
+  const known = new Set(existing.map((r) => r.key));
+  const fresh = body.keys.filter((k) => !known.has(k));
+  if (fresh.length > 0) {
+    await db.insert(transferCheck).values(
+      fresh.map((key) => ({
+        id: newId(),
+        householdId: hid,
+        month: body.month,
+        key,
+        doneAt: nowIso(),
+        doneBy: c.get("user").member,
+      })),
+    );
+  }
+  return c.json({ ok: true });
+});
+
+/* ---------------- Sommaire de la section (hub mobile) ---------------- */
+
+/**
+ * Un chiffre par onglet d'Argent, en une requête.
+ *
+ * Pas de synchro LunchFlow ici : c'est l'écran d'entrée d'une section, on lit
+ * les soldes tels quels (l'onglet Trésorerie, lui, synchronise). Même arbitrage
+ * que `routes/badges.ts`.
+ */
+money.get("/money/summary", async (c) => {
+  const db = c.get("db");
+  const hid = c.get("household").id;
+
+  const now = new Date();
+  const to = new Date();
+  to.setDate(to.getDate() + daysUntilEndOfMonth(now));
+  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+  const [cash, balance, recs, planned, readings] = await Promise.all([
+    projectCashflow(db, hid, now, to),
+    computeBalance(db, hid),
+    db.select().from(recurring).where(eq(recurring.householdId, hid)),
+    db.select().from(plannedExpense).where(eq(plannedExpense.householdId, hid)),
+    db
+      .select()
+      .from(utilityReading)
+      .where(
+        and(eq(utilityReading.householdId, hid), eq(utilityReading.utility, "electricity")),
+      ),
+  ]);
+
+  // Répartition du disponible : soldes actuels + crédits attendus, découpé en
+  // charges fixes (récurrents) / variables (prévu + mariage) / libre.
+  const balanceCents = cash.accounts.reduce((s, a) => s + a.currentBalance, 0);
+  const creditsCents = cash.entries.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0);
+  const debitsOf = (source: (typeof cash.entries)[number]["source"] | "variables") =>
+    cash.entries
+      .filter((e) => e.amount < 0 && (source === "variables" ? e.source !== "recurring" : e.source === source))
+      .reduce((s, e) => s + Math.abs(e.amount), 0);
+  const chargesCents = debitsOf("recurring");
+  const variablesCents = debitsOf("variables");
+
+  // Charges fixes du mois : les récurrents actifs non annuels, comme l'onglet
+  // Dépenses → vue « Mensuel ».
+  const monthlyRecs = recs.filter((r) => r.active && r.frequency !== "yearly");
+
+  // Dépenses prévues encore à acheter — même jeu que le total de l'onglet Prévue.
+  const pending = planned.filter((p) => !p.purchasedAt);
+
+  // Dernier relevé électricité connu (le plus récent année, puis mois).
+  const last = readings
+    .slice()
+    .sort((a, b) => a.year - b.year || a.month - b.month)
+    .at(-1);
+
+  const result: MoneySummary = {
+    month: monthStart,
+    split: {
+      chargesCents,
+      variablesCents,
+      freeCents: balanceCents + creditsCents - chargesCents - variablesCents,
+    },
+    depenses: {
+      count: monthlyRecs.length,
+      monthlyCents: monthlyRecs.reduce((s, r) => s + r.amount, 0),
+    },
+    tresorerie: { balanceCents, accounts: cash.accounts.length },
+    equilibrage: balance,
+    prevue: { count: pending.length, totalCents: pending.reduce((s, p) => s + p.amount, 0) },
+    electricite: last ? { year: last.year, month: last.month, kwh: last.kwh } : null,
+    comptes: { count: cash.accounts.length, names: cash.accounts.map((a) => a.name) },
+  };
+  return c.json(result);
 });
 
 export default money;

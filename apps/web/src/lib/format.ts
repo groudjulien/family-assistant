@@ -32,5 +32,19 @@ export const monthFr = (ym: string): string => {
   });
 };
 
+/** « à l'instant » · « il y a 2 h » · « il y a 3 j » · au-delà, la date courte. */
+export const relativeFr = (iso: string): string => {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const min = Math.round((Date.now() - then) / 60000);
+  if (min < 1) return "à l'instant";
+  if (min < 60) return `il y a ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `il y a ${h} h`;
+  const d = Math.round(h / 24);
+  if (d <= 7) return `il y a ${d} j`;
+  return `le ${dateFrShort(iso)}`;
+};
+
 export const todayIso = (): string => new Date().toISOString().slice(0, 10);
 export const currentMonth = (): string => new Date().toISOString().slice(0, 7);

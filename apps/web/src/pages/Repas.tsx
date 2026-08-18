@@ -1,13 +1,38 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Recipe, RecipeIdea, MeatType, StarchType, CourseType } from "@gfa/shared";
 import { MEAT_TYPES, MEAT_META, STARCH_TYPES, STARCH_META, COURSE_TYPES, COURSE_META } from "@gfa/shared";
 import { api, ApiError } from "../lib/api";
-import { dateFr } from "../lib/format";
 import PageLoader from "../components/PageLoader";
-import { Input, Checkbox, Select, SearchSelect, SubNav, GestureHelp } from "../components/ui";
+import {
+  Input,
+  Checkbox,
+  Select,
+  SearchSelect,
+  SubNav,
+  SearchField,
+  FilterChips,
+  MobileActionBar,
+  OverflowMenu,
+  ActionSheet,
+} from "../components/ui";
+import {
+  IconArrows,
+  IconCart,
+  IconCheck,
+  IconChevronRight,
+  IconClock,
+  IconClose,
+  IconFilter,
+  IconLines,
+  IconMore,
+  IconRefresh,
+  IconSparkle,
+  IconUser,
+} from "../components/icons";
 import { useToast } from "../components/Toast";
+import { usePageHeader, usePageTabs, usePageChrome } from "../components/PageHeader";
 
 /**
  * Trois menus de même niveau (plus de sous-menu sous « Idées repas »). Les URLs
@@ -15,26 +40,51 @@ import { useToast } from "../components/Toast";
  * partagés et chemins mémorisés continuent de fonctionner.
  */
 type Tab = "recettes" | "semaine" | "nouvelles";
-const TABS: { id: Tab; label: string; icon: string; path: string }[] = [
-  { id: "recettes", label: "Mes recettes", icon: "📖", path: "/repas/recettes" },
-  { id: "semaine", label: "Menu", icon: "📅", path: "/repas/idees/semaine" },
-  { id: "nouvelles", label: "Idées repas", icon: "💡", path: "/repas/idees/nouvelles" },
+// Trois libellés courts : la rangée d'onglets tient sans défiler.
+const TABS: { id: Tab; label: string; path: string }[] = [
+  { id: "recettes", label: "Mes recettes", path: "/repas/recettes" },
+  { id: "semaine", label: "Menu", path: "/repas/idees/semaine" },
+  { id: "nouvelles", label: "Idées", path: "/repas/idees/nouvelles" },
 ];
 
 export default function Repas() {
   const navigate = useNavigate();
+  // Même clé que l'onglet Recettes : l'en-tête lit le cache, sans requête en plus.
+  const { data: recipes } = useQuery({
+    queryKey: ["recipes"],
+    queryFn: () => api.get<Recipe[]>("/api/courses/recipes"),
+  });
+  const nRecipes = recipes?.length ?? 0;
   const { tab: tabParam, view: viewParam } = useParams();
   const tab: Tab =
     tabParam === "idees" ? (viewParam === "nouvelles" ? "nouvelles" : "semaine") : "recettes";
+  // `/repas/recettes/<id>` : le 3ᵉ segment est l'identifiant d'une recette
+  // ouverte, pas un sous-menu. Elle prend l'écran, donc plus d'onglets.
+  const openRecipeId = tab === "recettes" ? viewParam : undefined;
+
+  // Le sur-titre appartient à l'onglet quand il a mieux à dire (les idées
+  // annoncent leurs exclusions) ou à la recette ouverte : dans ces cas le
+  // parent passe `null` et laisse l'enfant déclarer.
+  const ownHeader = !openRecipeId && tab === "recettes";
+  usePageHeader(
+    ownHeader ? "Repas" : null,
+    ownHeader ? `${nRecipes} recette${nRecipes > 1 ? "s" : ""}` : undefined,
+  );
+  usePageTabs(
+    tab,
+    openRecipeId ? [] : TABS.map((t) => ({ value: t.id, label: t.label })),
+    (v) => navigate(TABS.find((t) => t.id === v)?.path ?? "/repas/recettes"),
+  );
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4">
       <SubNav
         value={tab}
         onChange={(v) => navigate(TABS.find((t) => t.id === v)?.path ?? "/repas/recettes")}
-        items={TABS.map((t) => ({ value: t.id, label: t.label, icon: t.icon }))}
+        items={TABS.map((t) => ({ value: t.id, label: t.label }))}
+        className="hidden md:block"
       />
-      {tab === "recettes" && <Recipes />}
+      {tab === "recettes" && <Recipes openId={openRecipeId} />}
       {tab === "semaine" && <WeekMealPlan />}
       {tab === "nouvelles" && <MealIdeas />}
     </div>
@@ -301,23 +351,10 @@ function RecipeImportForm({ onDone }: { onDone?: () => void }) {
   );
 }
 
-function Recipes() {
-  const qc = useQueryClient();
-  const toast = useToast();
-  // Recette ouverte en modale (edit = ouvre directement en mode édition).
-  const [modal, setModal] = useState<{ id: string; edit: boolean } | null>(null);
+function Recipes({ openId }: { openId?: string }) {
+  const navigate = useNavigate();
   const [createOpen, setCreateOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  // Ingrédients décochés par recette (par défaut tout est coché)
-  const [unchecked, setUnchecked] = useState<Record<string, Set<number>>>({});
-  const isChecked = (rid: string, i: number) => !(unchecked[rid]?.has(i));
-  const toggleIng = (rid: string, i: number) =>
-    setUnchecked((prev) => {
-      const cur = new Set(prev[rid] ?? []);
-      cur.has(i) ? cur.delete(i) : cur.add(i);
-      return { ...prev, [rid]: cur };
-    });
-  const selectedIngredients = (r: Recipe) => r.ingredients.filter((_, i) => isChecked(r.id, i));
 
   // Filtres + recherche
   const [fVeg, setFVeg] = useState(false);
@@ -329,10 +366,8 @@ function Recipes() {
   const [fTotalMax, setFTotalMax] = useState("");
   // Ingrédients requis : ne garde que les recettes qui les contiennent tous.
   const [fIngredients, setFIngredients] = useState<string[]>([]);
-  // Types de plat sélectionnés (multi-sélection ; vide = tous).
-  const [fCourses, setFCourses] = useState<CourseType[]>([]);
-  const toggleCourse = (ct: CourseType) =>
-    setFCourses((prev) => (prev.includes(ct) ? prev.filter((c) => c !== ct) : [...prev, ct]));
+  // Type de plat : une rangée de pastilles, « » = tous.
+  const [fCourse, setFCourse] = useState<"" | CourseType>("");
   const [search, setSearch] = useState("");
   // Recherche insensible à la casse et aux accents, sur le titre et les ingrédients.
   const norm = (s: string) =>
@@ -344,19 +379,6 @@ function Recipes() {
   const { data } = useQuery({
     queryKey: ["recipes"],
     queryFn: () => api.get<Recipe[]>("/api/courses/recipes"),
-  });
-
-  const remove = useMutation({
-    mutationFn: (id: string) => api.del(`/api/courses/recipes/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["recipes"] }),
-  });
-  const addToList = useMutation({
-    mutationFn: (names: string[]) => api.post("/api/courses/items/bulk", { names }),
-    onSuccess: (_data, names) => {
-      qc.invalidateQueries({ queryKey: ["shopping-items"] });
-      toast.success(`${names.length} ingrédient${names.length > 1 ? "s" : ""} ajouté${names.length > 1 ? "s" : ""} à la liste`);
-    },
-    onError: () => toast.error("Impossible d'ajouter les ingrédients."),
   });
 
   // Filtres portés par la modale « Filtres » (les types de plat sont dans la barre).
@@ -371,6 +393,12 @@ function Recipes() {
 
   if (!data) return <PageLoader variant="repas" />;
 
+  // Une recette ouverte prend tout l'écran : c'est une sous-page, pas une modale.
+  if (openId) {
+    const r = data.find((x) => x.id === openId);
+    return <RecipeDetail recipe={r} backTo="/repas/recettes" />;
+  }
+
   const q = norm(search.trim());
   const filtered = data.filter(
     (r) =>
@@ -378,7 +406,7 @@ function Recipes() {
       (!fVegetables || r.vegetables) &&
       (!fMeat || r.meat === fMeat) &&
       (!fStarch || r.starch === fStarch) &&
-      (fCourses.length === 0 || fCourses.includes(r.course)) &&
+      (!fCourse || r.course === fCourse) &&
       (!fPrepMax || (r.prepMinutes != null && r.prepMinutes <= Number(fPrepMax))) &&
       (!fTotalMax || (r.totalMinutes != null && r.totalMinutes <= Number(fTotalMax))) &&
       fIngredients.every((sel) => r.ingredients.some((ing) => norm(ing).includes(norm(sel)))) &&
@@ -397,78 +425,50 @@ function Recipes() {
     .map((n) => ({ value: n, label: n }));
 
   return (
-    <div className="flex flex-col gap-4 pb-24 md:pb-0">
-      {/* Barre unique : recherche · types de plat · bouton Filtres (modale) · ajout. */}
-      <div className="flex flex-wrap items-center gap-2">
-        {(data ?? []).length > 0 && (
-          <>
-            {/* Mobile : recherche + Filtres sur la 1re ligne ; types de plat centrés dessous. */}
-            <div className="relative order-1 min-w-0 flex-1">
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Rechercher une recette ou un ingrédient…"
-                className="input"
-              />
-              {search && (
+    <div className="flex flex-col gap-3 pb-28 md:pb-0">
+      {/* Une seule barre de filtre : la recherche porte l'entonnoir, et les
+          types de plat sont une rangée de pastilles — plus de conteneur dans
+          un conteneur. */}
+      {data.length > 0 && (
+        <>
+          <div className="flex items-center gap-2">
+            <SearchField
+              value={search}
+              onChange={setSearch}
+              placeholder="Recette ou ingrédient…"
+              className="min-w-0 flex-1"
+              trailing={
                 <button
                   type="button"
-                  onClick={() => setSearch("")}
-                  aria-label="Effacer la recherche"
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 transition hover:text-brand-600"
+                  onClick={() => setFiltersOpen(true)}
+                  aria-label="Filtres"
+                  aria-pressed={moreFilters}
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition ${
+                    moreFilters ? "bg-brand-600 text-on-brand" : "text-ink-2 hover:bg-surface-2"
+                  }`}
                 >
-                  ✕
+                  <IconFilter size={20} />
                 </button>
-              )}
-            </div>
-            {/* Types de plat : groupe encadré (multi-sélection), même hauteur que l'input.
-                Padding en inline : .subtab (hors layer) n'est pas surchargeable par une utilitaire. */}
-            <div className="order-3 mt-1 flex w-full justify-center md:order-2 md:mt-0 md:w-auto">
-              <div className="flex items-center gap-1 rounded-xl border border-slate-200 px-1 py-0.5 dark:border-slate-700">
-                {COURSE_TYPES.map((ct) => (
-                  <button
-                    key={ct}
-                    type="button"
-                    onClick={() => toggleCourse(ct)}
-                    style={{ padding: "5px 10px" }}
-                    className={`subtab whitespace-nowrap ${fCourses.includes(ct) ? "active" : ""}`}
-                  >
-                    {COURSE_META[ct].icon} {COURSE_META[ct].label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {/* Le reste des filtres vit dans une modale. */}
+              }
+            />
             <button
               type="button"
-              onClick={() => setFiltersOpen(true)}
-              className={`btn-ghost order-2 shrink-0 text-xs md:order-3 ${moreFilters ? "ring-1 ring-brand-500" : ""}`}
+              onClick={() => setCreateOpen(true)}
+              className="btn-primary hidden shrink-0 whitespace-nowrap md:inline-flex"
             >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="h-4 w-4"
-                aria-hidden="true"
-              >
-                <path d="M3 4h18l-7 8v6l-4 2v-8z" />
-              </svg>
-              Filtres{moreFilters ? " ·" : ""}
+              + Ajouter une recette
             </button>
-          </>
-        )}
-        <button
-          type="button"
-          onClick={() => setCreateOpen(true)}
-          className="btn-primary order-4 ml-auto hidden whitespace-nowrap md:inline-flex"
-        >
-          + Ajouter une recette
-        </button>
-      </div>
+          </div>
+          <FilterChips
+            value={fCourse}
+            onChange={(v) => setFCourse(v as "" | CourseType)}
+            items={[
+              { value: "", label: "Tout" },
+              ...COURSE_TYPES.map((ct) => ({ value: ct, label: COURSE_META[ct].label })),
+            ]}
+          />
+        </>
+      )}
 
       {filtersOpen && (
         <div
@@ -630,99 +630,42 @@ function Recipes() {
         </div>
       )}
 
-      {(() => {
-        if ((data ?? []).length === 0)
-          return <div className="card text-sm text-slate-400">Aucune recette enregistrée.</div>;
-        if (filtered.length === 0)
-          return (
-            <div className="card text-sm text-slate-400">
-              Aucune recette ne correspond {q ? "à la recherche" : "aux filtres"}.
-            </div>
-          );
-        return (
-        <div className="grid items-stretch gap-4 md:grid-cols-3">
-          {filtered.map((r) => (
-            <RecipeCard
-              key={r.id}
-              r={r}
-              onOpen={() => setModal({ id: r.id, edit: false })}
-              onEdit={() => setModal({ id: r.id, edit: true })}
-              onAddToList={() => {
-                const sel = selectedIngredients(r);
-                if (sel.length === 0) {
-                  toast.error("Aucun ingrédient sélectionné.");
-                  return;
-                }
-                addToList.mutate(sel);
-              }}
-            />
-          ))}
+      {data.length === 0 ? (
+        <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+          <p>Aucune recette enregistrée.</p>
+          <button type="button" onClick={() => setCreateOpen(true)} className="btn-primary">
+            Ajouter la première
+          </button>
         </div>
-        );
-      })()}
+      ) : filtered.length === 0 ? (
+        <div className="card text-sm text-slate-400">
+          Aucune recette ne correspond {q ? "à la recherche" : "aux filtres"}.
+        </div>
+      ) : (
+        <>
+          {/* Mobile : une rangée par recette, vignette à gauche. Quatre recettes
+              par écran au lieu d'une et demie. */}
+          <div className="card md:hidden">
+            {filtered.map((r, i) => (
+              <RecipeRow
+                key={r.id}
+                r={r}
+                to={`/repas/recettes/${r.id}`}
+                last={i === filtered.length - 1}
+              />
+            ))}
+          </div>
 
-      {modal &&
-        (() => {
-          const r = (data ?? []).find((x) => x.id === modal.id);
-          if (!r) return null;
-          return (
-            <RecipeDetailModal
-              r={r}
-              edit={modal.edit}
-              setEdit={(e) => setModal({ id: r.id, edit: e })}
-              onClose={() => setModal(null)}
-              onDelete={() => {
-                if (confirm(`Supprimer « ${r.title} » ?`)) {
-                  remove.mutate(r.id);
-                  setModal(null);
-                }
-              }}
-              isChecked={(i) => isChecked(r.id, i)}
-              toggleIng={(i) => toggleIng(r.id, i)}
-              onAddToList={() => {
-                const sel = selectedIngredients(r);
-                if (sel.length === 0) {
-                  toast.error("Aucun ingrédient sélectionné.");
-                  return;
-                }
-                addToList.mutate(sel);
-              }}
-              onSaved={() => {
-                setModal({ id: r.id, edit: false });
-                qc.invalidateQueries({ queryKey: ["recipes"] });
-              }}
-            />
-          );
-        })()}
+          {/* Ordinateur : la grille de cartes, la largeur le permet. */}
+          <div className="hidden items-stretch gap-4 md:grid md:grid-cols-3">
+            {filtered.map((r) => (
+              <RecipeCard key={r.id} r={r} onOpen={() => navigate(`/repas/recettes/${r.id}`)} />
+            ))}
+          </div>
+        </>
+      )}
 
-      <GestureHelp
-        title="Gestes sur une recette"
-        items={[
-          "👆 Tap : ouvrir la recette",
-          "👉 Glisser à droite : + liste de course",
-          "👈 Glisser à gauche : modifier",
-        ]}
-      />
-
-      {/* Bouton flottant de création (mobile uniquement). */}
-      <button
-        type="button"
-        onClick={() => setCreateOpen(true)}
-        aria-label="Nouvelle recette"
-        className="btn-primary fixed bottom-6 right-6 z-30 flex h-14 w-14 items-center justify-center rounded-full p-0 shadow-lg md:hidden"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          className="h-6 w-6"
-          aria-hidden="true"
-        >
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </button>
+      <MobileActionBar label="Ajouter une recette" onClick={() => setCreateOpen(true)} />
 
       {createOpen && (
         <div
@@ -744,170 +687,390 @@ function Recipes() {
   );
 }
 
-/* ---------------- Carte recette (swipeable) ---------------- */
+/* ---------------- Rangée et carte d'une recette ---------------- */
+
+/** Vignette carrée, ou un aplat marqué du type de plat quand il n'y a pas de photo. */
+function RecipeThumb({ r, className }: { r: Recipe; className: string }) {
+  return r.imageUrl ? (
+    <img
+      src={r.imageUrl}
+      alt=""
+      loading="lazy"
+      className={`${className} shrink-0 rounded-xl object-cover`}
+      onError={(e) => {
+        (e.currentTarget as HTMLImageElement).style.display = "none";
+      }}
+    />
+  ) : (
+    <div
+      aria-hidden="true"
+      className={`${className} flex shrink-0 items-center justify-center rounded-xl bg-surface-2 text-2xl`}
+    >
+      {COURSE_META[r.course].icon}
+    </div>
+  );
+}
+
+/** Pastille de contenu : type de plat, régime, viande. */
+function RecipeTag({ children }: { children: ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-surface-2 px-2.5 py-1 text-xs text-ink-2">
+      {children}
+    </span>
+  );
+}
+
+/** Une ligne de méta : la même icône de trait pour tout le monde, plus son libellé. */
+function RecipeMeta({ r }: { r: Recipe }) {
+  // `totalMinutes` est le temps total « avec cuisson » : ce qui dépasse la
+  // préparation est donc du temps de cuisson, et on le dit plutôt que
+  // d'aligner deux horloges sans légende.
+  const cooking =
+    r.prepMinutes != null && r.totalMinutes != null && r.totalMinutes > r.prepMinutes
+      ? r.totalMinutes - r.prepMinutes
+      : null;
+  const minutes = r.prepMinutes ?? r.totalMinutes;
+  return (
+    <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+      {minutes != null && (
+        <span className="inline-flex items-center gap-1">
+          <IconClock size={14} /> {fmtDuration(minutes)}
+        </span>
+      )}
+      <span className="inline-flex items-center gap-1">
+        <IconUser size={14} /> {r.servings} pers
+      </span>
+      <span className="inline-flex items-center gap-1">
+        <IconLines size={14} /> {r.ingredients.length} ingr.
+      </span>
+      {cooking != null && <span>+{fmtDuration(cooking)} de cuisson</span>}
+    </span>
+  );
+}
+
+/** Les pastilles d'une recette : type de plat, puis régime ou viande. */
+function RecipeTags({ r }: { r: Recipe }) {
+  return (
+    <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      <RecipeTag>{COURSE_META[r.course].label}</RecipeTag>
+      {r.vegetarian ? (
+        <RecipeTag>🌿 Végé</RecipeTag>
+      ) : (
+        r.meat && (
+          <RecipeTag>
+            {MEAT_META[r.meat].icon} {MEAT_META[r.meat].label}
+          </RecipeTag>
+        )
+      )}
+    </span>
+  );
+}
+
+/** Rangée d'index (mobile) : vignette, titre, méta, pastilles. Toute la ligne ouvre. */
+function RecipeRow({ r, to, last }: { r: Recipe; to: string; last: boolean }) {
+  return (
+    <div className={last ? "" : "border-b border-hairline"}>
+      <Link to={to} className="flex items-start gap-3 py-3">
+        <RecipeThumb r={r} className="h-[78px] w-[78px]" />
+        <span className="min-w-0 flex-1">
+          <span className="block text-base font-semibold leading-snug">{r.title}</span>
+          <RecipeMeta r={r} />
+          <RecipeTags r={r} />
+        </span>
+      </Link>
+    </div>
+  );
+}
+
+/** Carte d'index (ordinateur) : la grille a la largeur pour une grande photo. */
+function RecipeCard({ r, onOpen }: { r: Recipe; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="card flex h-full flex-col text-left transition hover:border-brand-400"
+    >
+      <RecipeThumb r={r} className="h-32 w-full" />
+      <span className="mt-2 line-clamp-2 font-semibold leading-snug" title={r.title}>
+        {r.title}
+      </span>
+      <RecipeMeta r={r} />
+      <span className="mt-auto pt-2">
+        <RecipeTags r={r} />
+      </span>
+    </button>
+  );
+}
+
+/* ---------------- Sous-page : une recette ---------------- */
 
 /**
- * Carte compacte d'une recette. Clic = ouvrir la modale de détail.
- * Glissement (mobile, comme les tâches) : vers la droite = ajouter les
- * ingrédients à la liste de course ; vers la gauche = ouvrir en édition.
+ * Multiplie la quantité d'une ligne d'ingrédient. Gère « 200 », « 1,5 » et
+ * « 1/2 » ; laisse le reste intact (« 1 pincée » reste « 1 pincée » si le
+ * facteur est 1). Une quantité qu'on ne sait pas lire n'est pas inventée.
  */
-function RecipeCard({
-  r,
-  onOpen,
-  onEdit,
-  onAddToList,
-}: {
-  r: Recipe;
-  onOpen: () => void;
-  onEdit: () => void;
-  onAddToList: () => void;
-}) {
-  const [swipeX, setSwipeX] = useState(0);
-  const swipeXRef = useRef(0);
-  const swiping = useRef(false);
-  const swiped = useRef(false);
-  const touchStart = useRef<{ x: number; y: number } | null>(null);
-  const setSwipe = (x: number) => {
-    swipeXRef.current = x;
-    setSwipeX(x);
-  };
-  const onTouchStart = (e: React.TouchEvent) => {
-    const t = e.touches[0];
-    touchStart.current = { x: t.clientX, y: t.clientY };
-    swiping.current = false;
-  };
-  const onTouchMove = (e: React.TouchEvent) => {
-    if (!touchStart.current) return;
-    const t = e.touches[0];
-    const dx = t.clientX - touchStart.current.x;
-    const dy = t.clientY - touchStart.current.y;
-    if (!swiping.current && Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
-      swiping.current = true;
-      swiped.current = true; // empêche le clic d'ouverture qui suit le glissement
-    }
-    if (swiping.current) setSwipe(Math.max(-140, Math.min(140, dx)));
-  };
-  const onTouchEnd = () => {
-    touchStart.current = null;
-    if (swipeXRef.current >= 96) {
-      onAddToList(); // glissement droite = liste de course
-    } else if (swipeXRef.current <= -96) {
-      onEdit(); // glissement gauche = édition
-    }
-    swiping.current = false;
-    setSwipe(0);
-  };
-  const handleClick = () => {
-    if (swiped.current) {
-      swiped.current = false;
-      return;
-    }
-    onOpen();
-  };
+function scaleQty(qty: string, factor: number): string {
+  if (factor === 1 || !qty) return qty;
+  const fmt = (n: number) =>
+    Number(n.toFixed(2))
+      .toString()
+      .replace(".", ",");
+  const frac = qty.match(/^(\d+)\s*\/\s*(\d+)/);
+  if (frac) {
+    const value = (Number(frac[1]) / Number(frac[2])) * factor;
+    return qty.replace(frac[0], fmt(value));
+  }
+  return qty.replace(/\d+(?:[.,]\d+)?/, (m) => fmt(Number(m.replace(",", ".")) * factor));
+}
+
+function RecipeDetail({ recipe: r, backTo }: { recipe?: Recipe; backTo: string }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const navigate = useNavigate();
+  const [servings, setServings] = useState(r?.servings ?? 4);
+  const [editing, setEditing] = useState(false);
+  // Ingrédients cochés pendant la préparation (par défaut aucun).
+  const [checked, setChecked] = useState<Set<number>>(new Set());
+  const toggle = (i: number) =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      next.has(i) ? next.delete(i) : next.add(i);
+      return next;
+    });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api.del(`/api/courses/recipes/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["recipes"] });
+      navigate(backTo, { replace: true });
+    },
+  });
+  const addToList = useMutation({
+    mutationFn: (names: string[]) => api.post("/api/courses/items/bulk", { names }),
+    onSuccess: (_d, names) => {
+      qc.invalidateQueries({ queryKey: ["shopping-items"] });
+      toast.success(`${names.length} ingrédient${names.length > 1 ? "s" : ""} ajouté${names.length > 1 ? "s" : ""} à la liste`);
+    },
+    onError: () => toast.error("Impossible d'ajouter les ingrédients."),
+  });
+  const cookTonight = useMutation({
+    mutationFn: (id: string) => api.post("/api/courses/meal-plan/add", { recipeId: id }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["meal-plan"] });
+      toast.success("Ajoutée au menu de la semaine");
+    },
+    onError: () => toast.error("Impossible d'ajouter au menu."),
+  });
+
+  // Hooks déclarés avant tout retour anticipé.
+  usePageHeader(r?.title ?? "Recette", "Mes recettes");
+  usePageChrome(backTo, [
+    { label: "Modifier la recette", onClick: () => setEditing(true) },
+    {
+      label: "Supprimer la recette",
+      danger: true,
+      onClick: () => {
+        if (r && confirm(`Supprimer « ${r.title} » ?`)) remove.mutate(r.id);
+      },
+    },
+  ]);
+
+  if (!r) {
+    return (
+      <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+        <p>Cette recette n'existe plus.</p>
+        <Link to={backTo} className="btn-primary">
+          Revenir aux recettes
+        </Link>
+      </div>
+    );
+  }
+
+  const factor = r.servings > 0 ? servings / r.servings : 1;
+  // Le nom porte la ligne : il commence par une majuscule, la quantité vit à
+  // droite. C'est la colonne des noms qu'on balaie en cuisinant.
+  const scaled = r.ingredients.map((line) => {
+    const { qty, name } = splitIngredient(line);
+    const label = qty ? name : line;
+    return {
+      qty: scaleQty(qty, factor),
+      name: label.charAt(0).toUpperCase() + label.slice(1),
+    };
+  });
+  const allNames = scaled.map((s) => joinIngredient(s.qty, s.name));
+
+  const Stat = ({ label, children }: { label: string; children: ReactNode }) => (
+    <div className="flex flex-col items-center rounded-2xl border border-line bg-surface px-2 py-2.5">
+      <div className="text-xs text-slate-400">{label}</div>
+      <div className="mt-0.5 text-base font-semibold">{children}</div>
+    </div>
+  );
 
   return (
-    <div className="relative h-full">
-      {/* Fond vert révélé par le glissement vers la droite = liste de course (mobile). */}
-      <div
-        className="pointer-events-none absolute inset-0 flex items-center justify-start rounded-2xl bg-green-600 pl-6 md:hidden"
-        style={{ opacity: swipeX > 8 ? 1 : 0, transition: "opacity 0.15s" }}
-        aria-hidden="true"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="h-5 w-5 text-white"
-        >
-          <circle cx="9" cy="21" r="1" />
-          <circle cx="20" cy="21" r="1" />
-          <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6" />
-        </svg>
+    <div className="flex flex-col gap-4 pb-28 md:pb-0">
+      <RecipeThumb r={r} className="h-52 w-full md:h-64" />
+
+      <div>
+        <h1 className="text-xl font-bold leading-snug">{r.title}</h1>
+        <RecipeTags r={r} />
       </div>
 
-      {/* Fond gris révélé par le glissement vers la gauche = édition (mobile). */}
-      <div
-        className="pointer-events-none absolute inset-0 flex items-center justify-end rounded-2xl bg-slate-500 pr-6 md:hidden"
-        style={{ opacity: swipeX < -8 ? 1 : 0, transition: "opacity 0.15s" }}
-        aria-hidden="true"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="h-5 w-5 text-white"
-        >
-          <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-        </svg>
+      {/* Les trois chiffres de la recette. Les portions sont réglables : les
+          quantités d'ingrédients suivent. */}
+      <div className="grid grid-cols-3 gap-2">
+        <Stat label="Préparation">
+          {r.prepMinutes != null ? fmtDuration(r.prepMinutes) : "—"}
+        </Stat>
+        <Stat label="Total">{r.totalMinutes != null ? fmtDuration(r.totalMinutes) : "—"}</Stat>
+        <Stat label="Portions">
+          <span className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setServings((s) => Math.max(1, s - 1))}
+              aria-label="Moins de portions"
+              className="flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-ink-2"
+            >
+              −
+            </button>
+            <span className="min-w-4 text-center tabular-nums">{servings}</span>
+            <button
+              type="button"
+              onClick={() => setServings((s) => Math.min(30, s + 1))}
+              aria-label="Plus de portions"
+              className="flex h-7 w-7 items-center justify-center rounded-full bg-surface-2 text-ink-2"
+            >
+              +
+            </button>
+          </span>
+        </Stat>
       </div>
 
-      <div
-        className="card relative flex h-full cursor-pointer flex-col"
-        style={{
-          transform: `translateX(${swipeX}px)`,
-          transition: swiping.current ? "none" : "transform 0.2s",
-          touchAction: "pan-y",
-        }}
-        onTouchStart={onTouchStart}
-        onTouchMove={onTouchMove}
-        onTouchEnd={onTouchEnd}
-        onClick={handleClick}
-      >
-        {/* Photo en grand + colonne d'indicateurs à droite. */}
-        <div className="flex gap-3">
-          {r.imageUrl ? (
-            <img
-              src={r.imageUrl}
-              alt=""
-              loading="lazy"
-              className="h-32 min-w-0 flex-1 rounded-lg object-cover"
-              onError={(e) => {
-                (e.currentTarget as HTMLImageElement).style.display = "none";
-              }}
-            />
-          ) : (
-            <div className="flex h-32 min-w-0 flex-1 items-center justify-center rounded-lg bg-slate-100 text-4xl dark:bg-slate-800">
-              {COURSE_META[r.course].icon}
-            </div>
-          )}
-          <div className="flex w-20 shrink-0 flex-col justify-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-            <span title={COURSE_META[r.course].label}>
-              {COURSE_META[r.course].icon} {COURSE_META[r.course].label}
-            </span>
-            <span title="Personnes">👤 {r.servings} pers</span>
-            {r.prepMinutes != null && (
-              <span title="Préparation">🔪 {fmtDuration(r.prepMinutes)}</span>
-            )}
-            {r.totalMinutes != null && (
-              <span title="Temps total (avec cuisson)">⏱️ {fmtDuration(r.totalMinutes)}</span>
-            )}
+      <div>
+        <div className="mb-2 flex items-baseline justify-between gap-3">
+          <span className="eyebrow">Ingrédients · {r.ingredients.length}</span>
+          <button
+            type="button"
+            onClick={() => addToList.mutate(allNames)}
+            className="shrink-0 text-sm font-semibold text-brand-600"
+          >
+            Tout aux courses
+          </button>
+        </div>
+        <div className="card">
+          {scaled.map((ing, i) => {
+            const done = checked.has(i);
+            return (
+              <div
+                key={i}
+                className={`flex min-h-[52px] items-center gap-3 ${
+                  i === scaled.length - 1 ? "" : "border-b border-hairline"
+                }`}
+              >
+                <Checkbox size="lg" checked={done} onChange={() => toggle(i)} />
+                <button
+                  type="button"
+                  onClick={() => toggle(i)}
+                  className={`min-w-0 flex-1 py-2 text-left text-base ${
+                    done ? "text-slate-400 line-through" : ""
+                  }`}
+                >
+                  {ing.name}
+                </button>
+                {ing.qty && (
+                  <span
+                    className={`shrink-0 text-sm tabular-nums ${done ? "text-slate-400" : "text-ink-2"}`}
+                  >
+                    {ing.qty}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {r.steps.length > 0 && (
+        <div>
+          <div className="eyebrow mb-2">Étapes</div>
+          <div className="card flex flex-col gap-3">
+            {r.steps.map((st, i) => (
+              <div key={i} className="flex gap-3">
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-2 text-xs font-semibold text-ink-2">
+                  {i + 1}
+                </span>
+                <span className="min-w-0 flex-1 text-base leading-relaxed">{st}</span>
+              </div>
+            ))}
           </div>
         </div>
+      )}
 
-        {/* Nom sur 2 lignes maximum (coupé ensuite). */}
-        <div className="mt-2 line-clamp-2 font-semibold leading-snug" title={r.title}>
-          {r.title}
-        </div>
+      {r.sourceUrl && (
+        <a
+          href={r.sourceUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs text-brand-600 underline"
+        >
+          Voir la recette originale
+        </a>
+      )}
 
-        {/* Autres indicateurs (calés en bas de la carte). */}
-        <div className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 pt-3 text-xs text-slate-400">
-          <span title="Ingrédients">🥕 {r.ingredients.length} ingr.</span>
-          <span className="text-sm">
-            {r.vegetarian && <span title="Végétarien">🌱</span>}
-            {r.meat && <span title={MEAT_META[r.meat].label}>{MEAT_META[r.meat].icon}</span>}
-            {r.starch !== "aucun" && (
-              <span title={STARCH_META[r.starch].label}>{STARCH_META[r.starch].icon}</span>
-            )}
-            {r.vegetables && <span title="Avec légumes">🥦</span>}
-          </span>
-        </div>
+      {/* Action principale : la recette sert à cuisiner. Le panier envoie les
+          ingrédients aux courses sans quitter l'écran. */}
+      <div
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-30 flex gap-2 px-4 pt-6 md:hidden"
+        style={{
+          paddingBottom: "calc(1rem + env(safe-area-inset-bottom))",
+          background: "linear-gradient(to top, rgb(var(--c-bg)) 55%, rgb(var(--c-bg) / 0))",
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => cookTonight.mutate(r.id)}
+          className="pointer-events-auto flex h-[52px] flex-1 items-center justify-center rounded-full bg-brand-600 text-base font-semibold text-on-brand shadow-lg"
+        >
+          Cuisiner ce soir
+        </button>
+        <button
+          type="button"
+          onClick={() => addToList.mutate(allNames)}
+          aria-label="Envoyer les ingrédients aux courses"
+          className="pointer-events-auto flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-full border border-line bg-surface text-ink shadow-lg"
+        >
+          <IconCart size={22} />
+        </button>
       </div>
+
+      {/* Ordinateur : les mêmes actions, en ligne. */}
+      <div className="hidden items-center gap-2 md:flex">
+        <button type="button" onClick={() => cookTonight.mutate(r.id)} className="btn-primary">
+          Cuisiner ce soir
+        </button>
+        <button type="button" onClick={() => addToList.mutate(allNames)} className="btn">
+          Envoyer aux courses
+        </button>
+      </div>
+
+      {editing && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center"
+          onClick={() => setEditing(false)}
+        >
+          <div className="card my-4 w-full max-w-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 font-semibold">Modifier la recette</div>
+            <RecipeEditor
+              key={r.id}
+              recipe={r}
+              onClose={() => setEditing(false)}
+              onSaved={() => {
+                setEditing(false);
+                qc.invalidateQueries({ queryKey: ["recipes"] });
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1055,13 +1218,49 @@ interface MealPlanData {
   maxPrepMinutes: number | null;
   maxTotalMinutes: number | null;
   createdAt: string;
+  /** { recipeId: date ISO } — les repas déjà cuisinés. */
+  cooked: Record<string, string>;
   recipes: Recipe[];
+}
+
+/**
+ * Familles de repas de la semaine. Plus grossier que `MEAT_TYPES` : c'est
+ * l'équilibre qu'on regarde (combien de végé, combien de rouge), pas le détail.
+ */
+const MEAL_FAMILIES = [
+  { key: "vege", label: "végé", color: "bg-brand-600" },
+  { key: "volaille", label: "volaille", color: "bg-warning" },
+  { key: "poisson", label: "poisson", color: "bg-info" },
+  { key: "rouge", label: "viande rouge", color: "bg-danger" },
+] as const;
+type MealFamily = (typeof MEAL_FAMILIES)[number]["key"];
+
+function familyOf(r: Recipe): MealFamily {
+  if (r.vegetarian || !r.meat) return "vege";
+  if (r.meat === "poisson") return "poisson";
+  if (r.meat === "poulet" || r.meat === "canard") return "volaille";
+  return "rouge";
+}
+
+/** « Végé », « Poulet »… — ce que la ligne annonce à droite de la durée. */
+function mealLabel(r: Recipe): string {
+  if (r.vegetarian || !r.meat) return "Végé";
+  return MEAT_META[r.meat].label;
+}
+
+/** « lundi », « mercredi » — le jour où le repas a été coché. */
+function weekdayFr(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString("fr-FR", { weekday: "long" });
 }
 
 function WeekMealPlan() {
   const qc = useQueryClient();
   const toast = useToast();
   const [modal, setModal] = useState<{ id: string; edit: boolean } | null>(null);
+  // Repas dont la feuille d'actions est ouverte, et sélecteur « choisir moi-même ».
+  const [sheet, setSheet] = useState<Recipe | null>(null);
+  const [picking, setPicking] = useState<Recipe | null>(null);
   // Ingrédients décochés par recette (pour la modale et l'ajout à la liste).
   const [unchecked, setUnchecked] = useState<Record<string, Set<number>>>({});
   const isChecked = (rid: string, i: number) => !(unchecked[rid]?.has(i));
@@ -1084,6 +1283,12 @@ function WeekMealPlan() {
     queryKey: ["meal-plan"],
     queryFn: () => api.get<MealPlanData | null>("/api/courses/meal-plan"),
   });
+  // Même clé que l'onglet « Mes recettes » : déjà en cache, aucune requête de
+  // plus. Sert à compter les remplacements possibles et à les proposer.
+  const { data: allRecipesData } = useQuery({
+    queryKey: ["recipes"],
+    queryFn: () => api.get<Recipe[]>("/api/courses/recipes"),
+  });
   useEffect(() => {
     if (plan) {
       setCount(String(plan.count));
@@ -1092,6 +1297,13 @@ function WeekMealPlan() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan?.createdAt]);
+
+  // Le sur-titre dit où l'on en est du menu, pas le nombre total de recettes.
+  const remaining = (plan?.recipes ?? []).filter((r) => !plan?.cooked?.[r.id]).length;
+  usePageHeader(
+    "Repas",
+    plan ? `Menu en cours · ${remaining} à cuisiner` : "Aucun menu en cours",
+  );
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["meal-plan"] });
   const generate = useMutation({
@@ -1113,9 +1325,23 @@ function WeekMealPlan() {
       ),
   });
   const replace = useMutation({
-    mutationFn: (id: string) => api.post("/api/courses/meal-plan/replace", { recipeId: id }),
+    mutationFn: (v: { recipeId: string; withRecipeId?: string }) =>
+      api.post("/api/courses/meal-plan/replace", v),
     onSuccess: invalidate,
     onError: () => toast.error("Pas d'autre plat compatible pour remplacer celui-ci."),
+  });
+  const setCooked = useMutation({
+    mutationFn: (v: { recipeId: string; done: boolean }) =>
+      api.post("/api/courses/meal-plan/cooked", v),
+    onSuccess: invalidate,
+  });
+  const removeFromPlan = useMutation({
+    mutationFn: (recipeId: string) => api.post("/api/courses/meal-plan/remove", { recipeId }),
+    onSuccess: invalidate,
+  });
+  const moveTop = useMutation({
+    mutationFn: (recipeId: string) => api.post("/api/courses/meal-plan/move-top", { recipeId }),
+    onSuccess: invalidate,
   });
   const removeRecipe = useMutation({
     mutationFn: (id: string) => api.del(`/api/courses/recipes/${id}`),
@@ -1135,6 +1361,13 @@ function WeekMealPlan() {
 
   if (isLoading) return <PageLoader variant="repas" />;
   const recipes = plan?.recipes ?? [];
+  const allRecipes = allRecipesData ?? [];
+  const inPlan = new Set(recipes.map((r) => r.id));
+  /** Plats de « Mes recettes » qui pourraient prendre la place de celui-ci. */
+  const swapCandidates = (r: Recipe) =>
+    allRecipes.filter(
+      (c) => c.course === "plat" && !inPlan.has(c.id) && (!r.meat || c.meat !== r.meat),
+    );
 
   // Champs de génération, partagés par la carte (ordinateur) et la modale (mobile).
   const paramFields = (
@@ -1196,18 +1429,108 @@ function WeekMealPlan() {
       disabled={generate.isPending}
       className="btn-primary"
     >
-      {generate.isPending ? "Génération…" : plan ? "🔄 Regénérer les repas" : "✨ Générer les repas"}
+      {generate.isPending ? "Génération…" : plan ? "Régénérer la semaine" : "Générer les repas"}
     </button>
   );
 
-  return (
-    <div className="flex flex-col gap-3 pb-24 md:pb-0">
-      <p className="text-xs text-slate-400">
-        Une sélection variée piochée dans Mes recettes (jamais deux fois la même viande ni le même
-        féculent), figée et partagée avec tout le foyer jusqu'à la prochaine génération.
-      </p>
+  const cooked = plan?.cooked ?? {};
+  const todo = recipes.filter((r) => !cooked[r.id]);
+  const done = recipes.filter((r) => cooked[r.id]);
+  // Ce qu'il reste à acheter : les ingrédients des repas pas encore cuisinés.
+  const pendingIngredients = todo.flatMap((r) => selectedIngredients(r));
 
-      {/* Paramètres + génération : inline sur ordinateur, modale (bouton « + ») sur mobile. */}
+  // Équilibre : combien de chaque famille, et les deux chiffres de temps.
+  const counts = MEAL_FAMILIES.map((f) => ({
+    ...f,
+    n: recipes.filter((r) => familyOf(r) === f.key).length,
+  })).filter((f) => f.n > 0);
+  const times = recipes.map((r) => r.totalMinutes ?? r.prepMinutes).filter((v): v is number => !!v);
+  const avgTime = times.length ? Math.round(times.reduce((s, v) => s + v, 0) / times.length) : null;
+  const maxTime = times.length ? Math.max(...times) : null;
+  const meats = recipes.map((r) => r.meat).filter(Boolean);
+  const starches = recipes.map((r) => r.starch).filter((s) => s !== "aucun");
+  const noRepeat = new Set(meats).size === meats.length && new Set(starches).size === starches.length;
+
+  /** Une ligne de repas : la case à cocher est la seule action visible. */
+  const mealRow = (r: Recipe, last: boolean) => {
+    const at = cooked[r.id];
+    return (
+      <div key={r.id} className={last ? "" : "border-b border-hairline"}>
+        <div className="flex items-center gap-3 py-2.5">
+          <Checkbox
+            size="lg"
+            checked={!!at}
+            onChange={() => setCooked.mutate({ recipeId: r.id, done: !at })}
+          />
+          <button
+            type="button"
+            onClick={() => setModal({ id: r.id, edit: false })}
+            className="flex min-w-0 flex-1 items-center gap-3 text-left"
+          >
+            <RecipeThumb r={r} className="h-14 w-14" />
+            <span className="min-w-0 flex-1">
+              <span
+                className={`block text-base font-semibold leading-snug ${
+                  at ? "text-slate-400 line-through" : ""
+                }`}
+              >
+                {r.title}
+              </span>
+              <span className="mt-0.5 block text-xs text-slate-400">
+                {at
+                  ? `fait ${weekdayFr(at)} · ne sera plus proposé`
+                  : [
+                      r.totalMinutes ?? r.prepMinutes
+                        ? fmtDuration((r.totalMinutes ?? r.prepMinutes) as number)
+                        : null,
+                      mealLabel(r),
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+              </span>
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSheet(r)}
+            aria-label={`Autres actions sur ${r.title}`}
+            className="flex h-tap w-9 shrink-0 items-center justify-center rounded-lg text-ink-2"
+          >
+            <IconMore size={20} />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-3 pb-28 md:pb-0">
+      {/* Ce qu'est ce menu, et de quoi il est fait. Le ↻ régénère sans quitter. */}
+      <div className="card flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-base font-semibold">
+            {plan
+              ? `${recipes.length} repas piochés dans tes ${allRecipes.length} recettes`
+              : "Aucun menu en cours"}
+          </div>
+          <p className="mt-0.5 text-sm text-slate-400">
+            {plan
+              ? "Jamais deux fois la même viande ni le même féculent · dans l'ordre que tu veux"
+              : "Génère une sélection variée piochée dans Mes recettes."}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => generate.mutate()}
+          disabled={generate.isPending}
+          aria-label={plan ? "Régénérer la semaine" : "Générer les repas"}
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-ink disabled:opacity-50"
+        >
+          <IconRefresh size={20} />
+        </button>
+      </div>
+
+      {/* Paramètres inline sur ordinateur (sur mobile ils vivent dans « Règles »). */}
       <div className="card hidden flex-wrap items-end gap-3 md:flex">
         {paramFields}
         {generateButton}
@@ -1215,121 +1538,212 @@ function WeekMealPlan() {
 
       {!plan ? (
         <div className="card text-sm text-slate-400">
-          Aucune semaine générée pour le moment — choisis tes paramètres et lance « Générer les
-          repas ».
+          Aucune semaine générée pour le moment — lance une génération pour la remplir.
         </div>
       ) : (
         <>
-          <div className="text-xs text-slate-400">
-            Semaine générée le {dateFr(plan.createdAt)} — {recipes.length} repas
-            {recipes.length < plan.count
-              ? ` (pas assez de plats compatibles pour en proposer ${plan.count})`
-              : ""}
-            .
-          </div>
-
-          <div className="grid items-stretch gap-4 md:grid-cols-3">
-            {recipes.map((r) => (
-              <div key={r.id} className="card flex h-full flex-col">
-                <div
-                  className="flex cursor-pointer gap-3"
-                  onClick={() => setModal({ id: r.id, edit: false })}
-                >
-                  {r.imageUrl ? (
-                    <img
-                      src={r.imageUrl}
-                      alt=""
-                      loading="lazy"
-                      className="h-32 min-w-0 flex-1 rounded-lg object-cover"
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).style.display = "none";
-                      }}
-                    />
-                  ) : (
-                    <div className="flex h-32 min-w-0 flex-1 items-center justify-center rounded-lg bg-slate-100 text-4xl dark:bg-slate-800">
-                      {COURSE_META[r.course].icon}
-                    </div>
-                  )}
-                  <div className="flex w-20 shrink-0 flex-col justify-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-                    <span title="Personnes">👤 {r.servings} pers</span>
-                    {r.prepMinutes != null && (
-                      <span title="Préparation">🔪 {fmtDuration(r.prepMinutes)}</span>
-                    )}
-                    {r.totalMinutes != null && (
-                      <span title="Temps total">⏱️ {fmtDuration(r.totalMinutes)}</span>
-                    )}
-                  </div>
-                </div>
-                <div
-                  className="mt-2 line-clamp-2 cursor-pointer font-semibold leading-snug"
-                  title={r.title}
-                  onClick={() => setModal({ id: r.id, edit: false })}
-                >
-                  {r.title}
-                </div>
-                <div className="mt-auto flex items-center justify-between gap-2 pt-3">
-                  <span className="text-sm">
-                    {r.vegetarian && <span title="Végétarien">🌱</span>}
-                    {r.meat && <span title={MEAT_META[r.meat].label}>{MEAT_META[r.meat].icon}</span>}
-                    {r.starch !== "aucun" && (
-                      <span title={STARCH_META[r.starch].label}>{STARCH_META[r.starch].icon}</span>
-                    )}
-                    {r.vegetables && <span title="Avec légumes">🥦</span>}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => replace.mutate(r.id)}
-                    disabled={replace.isPending}
-                    className="btn-ghost whitespace-nowrap text-xs"
-                    title="Remplacer par un autre plat"
-                  >
-                    🔄 Remplacer
-                  </button>
-                </div>
+          {todo.length > 0 && (
+            <>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="eyebrow">À cuisiner · {todo.length}</span>
+                <span className="text-xs text-slate-400">coche quand c'est fait</span>
               </div>
-            ))}
-          </div>
+              <div className="card">
+                {todo.map((r, i) => mealRow(r, i === todo.length - 1))}
+              </div>
+            </>
+          )}
 
-          {/* Ajout groupé des ingrédients : en fin de page, après toutes les recettes. */}
-          <div className="flex justify-center pt-1">
+          {done.length > 0 && (
+            <>
+              <div className="eyebrow mt-1 flex items-center gap-1.5">
+                <IconCheck size={14} className="text-brand-600" />
+                Faits · {done.length}
+              </div>
+              <div className="card">
+                {done.map((r, i) => mealRow(r, i === done.length - 1))}
+              </div>
+            </>
+          )}
+
+          {/* L'équilibre de la semaine, en une barre et une phrase. */}
+          {recipes.length > 0 && (
+            <div className="card mt-1">
+              <div className="eyebrow">Équilibre de la semaine</div>
+              <div className="mt-2 flex gap-1">
+                {counts.map((f) => (
+                  <span
+                    key={f.key}
+                    className={`h-2 rounded-full ${f.color}`}
+                    style={{ flexGrow: f.n }}
+                  />
+                ))}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-2">
+                {counts.map((f) => (
+                  <span key={f.key} className="inline-flex items-center gap-1.5">
+                    <span className={`h-2 w-2 rounded-full ${f.color}`} aria-hidden="true" />
+                    {f.n} {f.label}
+                  </span>
+                ))}
+              </div>
+              <p className="mt-3 border-t border-hairline pt-3 text-sm text-slate-400">
+                {noRepeat
+                  ? "Aucune répétition de viande ni de féculent."
+                  : "Une viande ou un féculent revient deux fois."}
+                {avgTime != null && ` Temps moyen ${fmtDuration(avgTime)}`}
+                {maxTime != null && ` · le plus long ${fmtDuration(maxTime)}`}.
+              </p>
+            </div>
+          )}
+
+          {/* Les deux actions de la semaine, libellées. */}
+          <div className="card">
             <button
               type="button"
-              onClick={() => {
-                const all = recipes.flatMap((r) => selectedIngredients(r));
-                if (all.length === 0) {
-                  toast.error("Aucun ingrédient à ajouter.");
-                  return;
-                }
-                addToList.mutate(all);
-              }}
-              disabled={addToList.isPending}
+              onClick={() => generate.mutate()}
+              disabled={generate.isPending}
+              className="flex w-full items-center gap-3 border-b border-hairline py-2 text-left disabled:opacity-50"
+            >
+              <IconRefresh size={20} className="shrink-0 text-ink-2" />
+              <span className="min-w-0">
+                <span className="block text-base font-medium">
+                  {generate.isPending ? "Génération…" : "Régénérer la semaine"}
+                </span>
+                <span className="block text-xs text-slate-400">garde les repas déjà cuisinés</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setParamsOpen(true)}
+              className="flex w-full items-center gap-3 py-2 text-left"
+            >
+              <IconFilter size={20} className="shrink-0 text-ink-2" />
+              <span className="min-w-0 flex-1">
+                <span className="block text-base font-medium">Règles de génération</span>
+                <span className="block text-xs text-slate-400">
+                  {plan.count} repas
+                  {plan.maxTotalMinutes ? ` · max ${fmtDuration(plan.maxTotalMinutes)}` : ""}
+                  {plan.maxPrepMinutes ? ` · préparation ≤ ${fmtDuration(plan.maxPrepMinutes)}` : ""}
+                </span>
+              </span>
+              <IconChevronRight size={20} className="shrink-0 text-slate-400" />
+            </button>
+          </div>
+
+          <MobileActionBar
+            label={
+              pendingIngredients.length > 0
+                ? `Ajouter les ${pendingIngredients.length} ingrédients`
+                : "Aucun ingrédient à ajouter"
+            }
+            icon={<IconCart size={20} />}
+            disabled={pendingIngredients.length === 0 || addToList.isPending}
+            onClick={() => addToList.mutate(pendingIngredients)}
+          />
+          <div className="hidden justify-center pt-1 md:flex">
+            <button
+              type="button"
+              onClick={() => addToList.mutate(pendingIngredients)}
+              disabled={pendingIngredients.length === 0 || addToList.isPending}
               className="btn-primary"
             >
-              Ajouter les ingrédients à la liste de course
+              Ajouter les {pendingIngredients.length} ingrédients à la liste de course
             </button>
           </div>
         </>
       )}
 
-      {/* Bouton flottant d'ouverture des paramètres (mobile uniquement). */}
-      <button
-        type="button"
-        onClick={() => setParamsOpen(true)}
-        aria-label="Générer des repas"
-        className="btn-primary fixed bottom-6 right-6 z-30 flex h-14 w-14 items-center justify-center rounded-full p-0 shadow-lg md:hidden"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          className="h-6 w-6"
-          aria-hidden="true"
+      {sheet && (
+        <ActionSheet
+          title={sheet.title}
+          subtitle={[
+            sheet.totalMinutes ?? sheet.prepMinutes
+              ? fmtDuration((sheet.totalMinutes ?? sheet.prepMinutes) as number)
+              : null,
+            mealLabel(sheet),
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+          thumbnail={<RecipeThumb r={sheet} className="h-12 w-12" />}
+          items={[
+            {
+              label: "Remplacer par une autre recette",
+              hint: `${swapCandidates(sheet).length} proposition${
+                swapCandidates(sheet).length > 1 ? "s" : ""
+              }${sheet.meat ? ` sans ${MEAT_META[sheet.meat].label.toLowerCase()}` : ""}`,
+              icon: <IconRefresh size={20} />,
+              onClick: () => replace.mutate({ recipeId: sheet.id }),
+            },
+            {
+              label: "Choisir moi-même dans mes recettes",
+              icon: <IconLines size={20} />,
+              onClick: () => setPicking(sheet),
+            },
+            {
+              label: "Remonter en haut de la liste",
+              icon: <IconArrows size={20} />,
+              onClick: () => moveTop.mutate(sheet.id),
+            },
+            {
+              label: "Retirer ce repas",
+              hint: "il redevient piochable",
+              icon: <IconClose size={20} />,
+              danger: true,
+              onClick: () => removeFromPlan.mutate(sheet.id),
+            },
+          ]}
+          onClose={() => setSheet(null)}
+        />
+      )}
+
+      {picking && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center"
+          onClick={() => setPicking(null)}
         >
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </button>
+          <div className="card my-4 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-1 font-semibold">Remplacer « {picking.title} »</div>
+            <p className="mb-3 text-xs text-slate-400">
+              Choisis la recette qui prend sa place dans le menu.
+            </p>
+            <div className="max-h-[60vh] overflow-y-auto">
+              {swapCandidates(picking).length === 0 ? (
+                <p className="text-sm text-slate-400">
+                  Toutes tes recettes de plat sont déjà dans le menu.
+                </p>
+              ) : (
+                swapCandidates(picking).map((r) => (
+                  <button
+                    key={r.id}
+                    type="button"
+                    onClick={() => {
+                      replace.mutate({ recipeId: picking.id, withRecipeId: r.id });
+                      setPicking(null);
+                    }}
+                    className="flex w-full items-center gap-3 border-b border-hairline py-2.5 text-left last:border-0"
+                  >
+                    <RecipeThumb r={r} className="h-12 w-12" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-base font-medium">{r.title}</span>
+                      <span className="block text-xs text-slate-400">
+                        {[
+                          r.totalMinutes ?? r.prepMinutes
+                            ? fmtDuration((r.totalMinutes ?? r.prepMinutes) as number)
+                            : null,
+                          mealLabel(r),
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {paramsOpen && (
         <div
@@ -1398,9 +1812,13 @@ function WeekMealPlan() {
  */
 function IdeaImage({ src, course }: { src: string | null; course: CourseType }) {
   const [failed, setFailed] = useState(false);
+  // Les coins arrondis sont portés par l'image elle-même, pas par un
+  // `overflow-hidden` sur la carte : celui-ci rognait le menu « ⋯ » qui s'ouvre
+  // à l'intérieur de la carte.
+  const shape = "h-44 w-full rounded-t-2xl";
   if (!src || failed) {
     return (
-      <div className="flex h-40 w-full items-center justify-center bg-slate-100 text-4xl dark:bg-slate-800">
+      <div className={`${shape} flex items-center justify-center bg-surface-2 text-4xl`}>
         {COURSE_META[course].icon}
       </div>
     );
@@ -1410,9 +1828,73 @@ function IdeaImage({ src, course }: { src: string | null; course: CourseType }) 
       src={src}
       alt=""
       loading="lazy"
-      className="h-40 w-full object-cover"
+      className={`${shape} object-cover`}
       onError={() => setFailed(true)}
     />
+  );
+}
+
+/**
+ * Carte d'une idée : la photo, ce que c'est, ses ingrédients, **une** action.
+ * Le reste (ne plus la proposer) vit dans le « ⋯ » — plus de légende en tête de
+ * page pour expliquer un pictogramme.
+ */
+function IdeaCard({
+  idea,
+  onAdd,
+  onHide,
+  adding,
+}: {
+  idea: RecipeIdea;
+  onAdd: () => void;
+  onHide: () => void;
+  adding: boolean;
+}) {
+  // Trois ingrédients affichés, le reste compté : la carte annonce le plat,
+  // elle n'est pas la recette.
+  const shown = idea.ingredients.slice(0, 3);
+  const extra = idea.ingredients.length - shown.length;
+  return (
+    // Photo bord à bord : le retrait est porté par le bloc de texte, pas par la
+    // carte. `p-0` en style inline — `.card` est hors `@layer` et bat `p-0`.
+    // Pas d'`overflow-hidden` ici : il rognerait le menu « ⋯ » de la carte.
+    <div className="card flex flex-col" style={{ padding: 0 }}>
+      <IdeaImage src={idea.imageUrl} course={idea.course} />
+      <div className="flex flex-1 flex-col gap-2 p-4">
+        <div className="text-base font-semibold leading-snug">{idea.title}</div>
+        <p className="text-sm leading-relaxed text-slate-400">{idea.description}</p>
+        {shown.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {shown.map((ing) => (
+              <span
+                key={ing}
+                className="rounded-full bg-surface-2 px-2.5 py-1 text-xs text-ink-2"
+              >
+                {ing}
+              </span>
+            ))}
+            {extra > 0 && (
+              <span className="rounded-full px-2 py-1 text-xs text-slate-400">+{extra}</span>
+            )}
+          </div>
+        )}
+        <div className="mt-auto flex items-center gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onAdd}
+            disabled={adding}
+            className="flex h-[52px] flex-1 items-center justify-center rounded-full bg-brand-600 text-base font-semibold text-on-brand disabled:opacity-60"
+          >
+            {adding ? "Ajout…" : "Ajouter à mes recettes"}
+          </button>
+          <OverflowMenu
+            label={`Autres actions sur « ${idea.title} »`}
+            buttonClassName="flex h-[52px] w-[52px] items-center justify-center rounded-full border border-line bg-surface text-ink-2 transition hover:text-ink"
+            items={[{ label: "Ne plus proposer", danger: true, onClick: onHide }]}
+          />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1446,100 +1928,77 @@ function MealIdeas() {
     },
     onError: () => toast.error("Impossible d'ajouter cette recette."),
   });
+  const exclusions = data?.exclusions ?? [];
+  // Le sur-titre remplace le paragraphe d'explication : il dit d'où viennent
+  // les idées et combien d'ingrédients sont écartés. Le parent laisse la main.
+  usePageHeader(
+    "Repas",
+    `Hors de tes recettes${
+      exclusions.length > 0
+        ? ` · ${exclusions.length} ingrédient${exclusions.length > 1 ? "s" : ""} exclu${exclusions.length > 1 ? "s" : ""}`
+        : ""
+    }`,
+  );
+
   if (!data) return <PageLoader variant="repas" />;
-  const { ideas, exclusions } = data;
-  const visible = ideas.filter((i) => i.course === fCourse);
+  const visible = data.ideas.filter((i) => i.course === fCourse);
+  const generateLabel = generate.isPending
+    ? "Génération…"
+    : visible.length > 0
+      ? "Proposer d'autres idées"
+      : "Proposer des idées";
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-start justify-between gap-3">
-        <p className="text-xs text-slate-400">
-          Des idées de repas générées pour vous, en évitant vos recettes existantes et vos
-          ingrédients exclus. 🚫 = ne plus proposer · + = ajouter à Mes recettes.{" "}
-          <Link to="/settings/repas" className="text-brand-600 underline hover:text-brand-700">
-            Gérer les ingrédients exclus{exclusions.length > 0 ? ` (${exclusions.length})` : ""}
-          </Link>
-        </p>
+    <div className="flex flex-col gap-3 pb-28 md:pb-0">
+      <div className="flex items-center gap-2">
+        {/* La génération cible la catégorie affichée : le filtre EST le choix. */}
+        <FilterChips
+          value={fCourse}
+          onChange={(v) => setFCourse(v as CourseType)}
+          className="min-w-0 flex-1"
+          items={COURSE_TYPES.map((ct) => ({ value: ct, label: COURSE_META[ct].label }))}
+        />
         <button
           type="button"
           onClick={() => generate.mutate(fCourse)}
           disabled={generate.isPending}
-          className="btn-primary whitespace-nowrap"
+          className="btn-primary hidden shrink-0 whitespace-nowrap md:inline-flex"
         >
-          {generate.isPending ? "Génération…" : "✨ Proposer des idées"}
+          {generateLabel}
         </button>
-      </div>
-
-      {/* Filtre par type de plat (génération ciblée sur l'onglet actif) */}
-      <div className="flex justify-center gap-2">
-        {COURSE_TYPES.map((ct) => (
-          <button
-            key={ct}
-            type="button"
-            onClick={() => setFCourse(ct)}
-            className={`subtab ${fCourse === ct ? "active" : ""}`}
-          >
-            {COURSE_META[ct].icon} {COURSE_META[ct].label}
-          </button>
-        ))}
       </div>
 
       {visible.length === 0 ? (
         <div className="card text-sm text-slate-400">
           {generate.isPending
             ? "Génération des idées en cours…"
-            : `Aucune idée de type « ${COURSE_META[fCourse].label.toLowerCase()} ». Clique sur « Proposer des idées » pour en générer.`}
+            : `Aucune idée de type « ${COURSE_META[fCourse].label.toLowerCase()} » pour l'instant.`}
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {visible.map((idea) => (
-            <div key={idea.id} className="card flex flex-col overflow-hidden p-0">
-              <IdeaImage src={idea.imageUrl} course={idea.course} />
-              <div className="flex flex-1 flex-col gap-1.5 p-4">
-              <div className="text-xs font-medium text-brand-600">
-                {COURSE_META[idea.course].icon} {COURSE_META[idea.course].label}
-              </div>
-              <div className="font-semibold leading-tight">{idea.title}</div>
-              <p className="text-sm text-slate-600 dark:text-slate-300">{idea.description}</p>
-              {idea.ingredients.length > 0 && (
-                <div className="text-xs text-slate-400">🥕 {idea.ingredients.join(" · ")}</div>
-              )}
-              <div className="mt-auto flex items-center justify-end gap-3 pt-2">
-                <button
-                  onClick={() => hide.mutate(idea.id)}
-                  title="Ne plus me proposer"
-                  className="text-lg leading-none text-slate-300 transition hover:text-red-500"
-                >
-                  🚫
-                </button>
-                <button
-                  onClick={() => add.mutate(idea.id)}
-                  disabled={add.isPending}
-                  title="Ajouter à Mes recettes"
-                  className="flex items-center text-slate-300 transition hover:text-brand-600 disabled:opacity-50"
-                >
-                  {add.isPending && add.variables === idea.id ? (
-                    <span className="text-xs">…</span>
-                  ) : (
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2.5"
-                      strokeLinecap="round"
-                      className="h-5 w-5"
-                      aria-hidden="true"
-                    >
-                      <path d="M12 5v14M5 12h14" />
-                    </svg>
-                  )}
-                </button>
-              </div>
-              </div>
-            </div>
+            <IdeaCard
+              key={idea.id}
+              idea={idea}
+              adding={add.isPending && add.variables === idea.id}
+              onAdd={() => add.mutate(idea.id)}
+              onHide={() => hide.mutate(idea.id)}
+            />
           ))}
         </div>
       )}
+
+      <Link to="/settings/repas" className="px-1 text-xs text-slate-400 underline">
+        Gérer les ingrédients exclus
+        {exclusions.length > 0 ? ` (${exclusions.length})` : ""}
+      </Link>
+
+      <MobileActionBar
+        label={generateLabel}
+        icon={<IconSparkle size={20} />}
+        disabled={generate.isPending}
+        onClick={() => generate.mutate(fCourse)}
+      />
     </div>
   );
 }
@@ -1551,7 +2010,7 @@ function splitIngredient(line: string): { qty: string; name: string } {
   const m = line
     .trim()
     .match(
-      /^([\d.,/]+\s*(?:g|kg|mg|ml|cl|l|cs|cc|càs|càc|cuillères?(?:\s?à\s?(?:soupe|café))?|pincées?|sachets?|gousses?|tranches?|pièces?|verres?|tasses?|bottes?|boîtes?|c\.?\s?à\.?\s?[sc]\.?)?\.?)\s+(?:de\s+|d['’])?(.+)$/i,
+      /^([\d.,/]+\s*(?:g|kg|mg|ml|cl|l|cs|cc|càs|càc|cuillères?(?:\s?à\s?(?:soupe|café))?|pincées?|sachets?|gousses?|tranches?|pièces?|verres?|tasses?|bottes?|boîtes?|rouleaux?|feuilles?|brins?|bouquets?|filets?|barquettes?|c\.?\s?à\.?\s?[sc]\.?)?\.?)\s+(?:de\s+|d['’])?(.+)$/i,
     );
   if (m && /\d/.test(m[1])) return { qty: m[1].trim(), name: m[2].trim() };
   return { qty: "", name: line.trim() };

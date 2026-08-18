@@ -24,6 +24,19 @@ const lists = new Hono<AppContext>();
  * `ownedList` : c'est le seul point de contrôle d'accès.
  */
 
+/**
+ * Marque la liste comme modifiée par l'utilisateur courant. Appelé par **toute**
+ * mutation, y compris celles qui portent sur un élément : le pied de la
+ * sous-page annonce « Modifiée par X il y a … » pour la liste entière.
+ */
+async function touch(c: Context<AppContext>, listId: string) {
+  await c
+    .get("db")
+    .update(customList)
+    .set({ updatedAt: nowIso(), updatedBy: c.get("user").member })
+    .where(eq(customList.id, listId));
+}
+
 /** Charge une liste si — et seulement si — l'utilisateur courant y a droit. */
 async function ownedList(c: Context<AppContext>, listId: string) {
   const row = (
@@ -67,6 +80,9 @@ lists.get("/", async (c) => {
       id: r.id,
       scope: r.scope,
       name: r.name,
+      emoji: r.emoji ?? null,
+      updatedAt: r.updatedAt ?? null,
+      updatedBy: r.updatedBy ?? null,
       items: items
         .filter((i) => i.listId === r.id)
         .map((i) => ({ id: i.id, label: i.label, done: !!i.done })),
@@ -89,8 +105,11 @@ lists.post("/", async (c) => {
     scope: body.scope,
     ownerId: body.scope === "personal" ? c.get("user").id : null,
     name: body.name,
+    emoji: body.emoji || null,
     position: existing.reduce((max, r) => Math.max(max, r.position), 0) + 1,
     createdAt: nowIso(),
+    updatedAt: nowIso(),
+    updatedBy: c.get("user").member,
   });
   return c.json({ ok: true, id }, 201);
 });
@@ -112,7 +131,17 @@ lists.patch("/:id", async (c) => {
   const list = await ownedList(c, c.req.param("id"));
   if (!list) return c.json({ error: "not_found" }, 404);
   const body = await parseBody(c, updateCustomListSchema);
-  await c.get("db").update(customList).set({ name: body.name }).where(eq(customList.id, list.id));
+  await c
+    .get("db")
+    .update(customList)
+    .set({
+      ...(body.name !== undefined && { name: body.name }),
+      // `emoji: null` retire l'emoji ; champ absent = on n'y touche pas.
+      ...(body.emoji !== undefined && { emoji: body.emoji || null }),
+      updatedAt: nowIso(),
+      updatedBy: c.get("user").member,
+    })
+    .where(eq(customList.id, list.id));
   return c.json({ ok: true });
 });
 
@@ -144,6 +173,7 @@ lists.post("/:id/items", async (c) => {
     position: siblings.reduce((max, r) => Math.max(max, r.position), 0) + 1,
     createdAt: nowIso(),
   });
+  await touch(c, list.id);
   return c.json({ ok: true, id }, 201);
 });
 
@@ -160,6 +190,7 @@ lists.patch("/:id/items/reorder", async (c) => {
       .where(and(eq(customListItem.id, id), eq(customListItem.listId, list.id)));
     pos += 1;
   }
+  await touch(c, list.id);
   return c.json({ ok: true });
 });
 
@@ -177,6 +208,7 @@ lists.patch("/:id/items/:itemId", async (c) => {
     .where(
       and(eq(customListItem.id, c.req.param("itemId")), eq(customListItem.listId, list.id)),
     );
+  await touch(c, list.id);
   return c.json({ ok: true });
 });
 
@@ -189,6 +221,7 @@ lists.delete("/:id/items/:itemId", async (c) => {
     .where(
       and(eq(customListItem.id, c.req.param("itemId")), eq(customListItem.listId, list.id)),
     );
+  await touch(c, list.id);
   return c.json({ ok: true });
 });
 

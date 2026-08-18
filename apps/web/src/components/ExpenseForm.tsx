@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import type { ExpenseCategory } from "@gfa/shared";
 import { Select, Input, DateInput } from "./ui";
 import { MemberAvatar, usePersonMeta } from "./MemberAvatar";
@@ -30,6 +30,7 @@ export function ExpenseFormModal({
   categories,
   initialCategory,
   pending,
+  switcher,
   onClose,
   onSave,
 }: {
@@ -41,6 +42,8 @@ export function ExpenseFormModal({
   // undefined = nouvelle dépense (défaut) ; null = sans catégorie ; sinon la clé.
   initialCategory?: string | null;
   pending?: boolean;
+  /** Bascule posée sous le titre (dépense partagée ↔ remboursement). */
+  switcher?: ReactNode;
   onClose: () => void;
   onSave: (v: ExpenseFormValues) => void;
 }) {
@@ -101,6 +104,7 @@ export function ExpenseFormModal({
             ✕
           </button>
         </div>
+        {switcher && <div className="mb-3">{switcher}</div>}
         <form onSubmit={submit} className="space-y-3">
           <div className="text-xs text-slate-400">
             Qui a payé ?

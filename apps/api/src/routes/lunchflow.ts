@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { and, desc, eq, gte, inArray, lt } from "drizzle-orm";
 import {
   linkLunchflowSchema,
+  setBankTransactionCategorySchema,
   DEFAULT_EXPENSE_CATEGORIES,
   PAYER,
   type LunchflowAccount,
@@ -199,23 +200,29 @@ function dayOffsetIso(n: number): string {
 }
 
 /**
- * Transactions bancaires du membre demandé (défaut : utilisateur connecté), paginées
+ * Transactions bancaires du périmètre demandé (défaut : utilisateur connecté), paginées
  * par fenêtres de 100 jours (`?page=0` = 100 derniers jours ; pages suivantes = plus
- * ancien). Vue par membre = comptes dont il est propriétaire. Synchronise et enrichit
- * (page 0 uniquement). Renvoie `{ transactions, hasOlder, page }`.
+ * ancien). `?member=a|b|joint` = comptes de ce propriétaire, `?member=all` = tout le
+ * foyer. Synchronise et enrichit (page 0 uniquement).
+ * Renvoie `{ transactions, hasOlder, page }`.
  */
 lunchflow.get("/transactions", async (c) => {
   const db = c.get("db");
   const hid = c.get("household").id;
-  // Vue = propriétaire des comptes : a / b / joint (« Commun »).
+  // Périmètre = propriétaire des comptes : a / b / joint (« Commun »), ou tout le foyer.
   const q = c.req.query("member");
+  const everyone = q === "all";
   const owner = (PAYER as readonly string[]).includes(q ?? "") ? (q as string) : c.get("user").member;
   const page = Math.max(0, parseInt(c.req.query("page") ?? "0", 10) || 0);
 
   const myAccounts = await db
     .select()
     .from(account)
-    .where(and(eq(account.householdId, hid), eq(account.owner, owner)));
+    .where(
+      everyone
+        ? eq(account.householdId, hid)
+        : and(eq(account.householdId, hid), eq(account.owner, owner)),
+    );
 
   // Synchro (cache 1/h) + enrichissement borné : uniquement sur la 1re page.
   // L'enrichissement (appels Claude, ~10 s) tourne en tâche de fond (waitUntil)
@@ -293,6 +300,30 @@ lunchflow.get("/transactions", async (c) => {
     merchantAddress: r.merchantAddress,
   }));
   return c.json({ transactions, hasOlder: older.length > 0, page });
+});
+
+/**
+ * Classe une opération à la main. On stampe `enrichedAt` au passage : sans ça,
+ * une opération jamais enrichie repasserait dans la moulinette Claude, qui
+ * écraserait le choix de l'utilisateur.
+ */
+lunchflow.patch("/transactions/:id", async (c) => {
+  const db = c.get("db");
+  const hid = c.get("household").id;
+  const body = await parseBody(c, setBankTransactionCategorySchema);
+  const row = (
+    await db
+      .select({ id: bankTransaction.id, enrichedAt: bankTransaction.enrichedAt })
+      .from(bankTransaction)
+      .where(and(eq(bankTransaction.id, c.req.param("id")), eq(bankTransaction.householdId, hid)))
+      .limit(1)
+  )[0];
+  if (!row) return c.json({ error: "not_found" }, 404);
+  await db
+    .update(bankTransaction)
+    .set({ category: body.category, enrichedAt: row.enrichedAt ?? new Date().toISOString() })
+    .where(eq(bankTransaction.id, row.id));
+  return c.json({ ok: true });
 });
 
 export default lunchflow;

@@ -24,6 +24,7 @@ import type {
   TransitKind,
   TransitLineConfig,
   ExpenseCategory,
+  ShoppingCategory,
   DefaultPackingItem,
   PackingCategory,
   PackingPerson,
@@ -33,6 +34,8 @@ import {
   IDF_LINES,
   TRANSIT_KINDS,
   DEFAULT_EXPENSE_CATEGORIES,
+  DEFAULT_SHOPPING_CATEGORIES,
+  FALLBACK_SHOPPING_CATEGORY,
   PACKING_CATEGORIES,
   PACKING_CATEGORY_META,
   comparePackingItems,
@@ -48,6 +51,7 @@ import {
   newSeparatorKey,
   type NavItem,
 } from "../components/Layout";
+import { NavIcon } from "../components/icons";
 import { getStoredTheme, setTheme, type Theme } from "../lib/theme";
 import {
   getLoaderDelay,
@@ -56,6 +60,7 @@ import {
   DEFAULT_LOADER_DELAY_MS,
 } from "../lib/loaderDelay";
 import { APP_VERSION } from "../version";
+import { usePageHeader, usePageTabs } from "../components/PageHeader";
 
 function EyeIcon({ off }: { off: boolean }) {
   return (
@@ -90,6 +95,9 @@ function SortableMenuItem({
   item,
   hidden,
   canHide,
+  groupName,
+  onRenameGroup,
+  onCommitGroups,
   onToggleHidden,
   onRemove,
   onUp,
@@ -100,6 +108,11 @@ function SortableMenuItem({
   item: NavItem;
   hidden: boolean;
   canHide: boolean;
+  /** Nom du groupe (uniquement pour un item `separator`). */
+  groupName?: string;
+  onRenameGroup: (name: string) => void;
+  /** Enregistre le renommage (appelé à la sortie du champ, pas à chaque frappe). */
+  onCommitGroups: () => void;
   onToggleHidden: () => void;
   onRemove: () => void;
   onUp: () => void;
@@ -131,14 +144,18 @@ function SortableMenuItem({
         ⠿
       </button>
       {item.separator ? (
-        <span className="flex flex-1 items-center gap-2 text-xs text-slate-400">
-          <span className="h-px flex-1 bg-slate-300 dark:bg-slate-600" />
-          Séparateur
-          <span className="h-px flex-1 bg-slate-300 dark:bg-slate-600" />
-        </span>
+        <input
+          value={groupName ?? ""}
+          onChange={(e) => onRenameGroup(e.target.value)}
+          onBlur={onCommitGroups}
+          placeholder="Nom du groupe (ex. Au quotidien)"
+          aria-label="Nom du groupe"
+          maxLength={40}
+          className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1 text-2xs font-semibold uppercase text-ink outline-none placeholder:normal-case placeholder:font-normal placeholder:tracking-normal placeholder:text-ink-3 focus:border-brand-500"
+        />
       ) : (
         <>
-          <span>{item.icon}</span>
+          <NavIcon to={item.to} size={20} className="shrink-0 text-ink-2" />
           <span className={`font-medium ${hidden ? "line-through" : ""}`}>{item.label}</span>
         </>
       )}
@@ -146,9 +163,9 @@ function SortableMenuItem({
         {item.separator && (
           <button
             onClick={onRemove}
-            aria-label="Retirer le séparateur"
-            title="Retirer le séparateur"
-            className="rounded-lg px-2 py-1 text-slate-400 transition hover:bg-slate-100 hover:text-red-500 dark:hover:bg-slate-800"
+            aria-label="Retirer le groupe"
+            title="Retirer le groupe"
+            className="rounded-lg px-2 py-1 text-slate-400 transition hover:bg-slate-100 hover:text-danger dark:hover:bg-slate-800"
           >
             ✕
           </button>
@@ -225,7 +242,7 @@ function SortableTransitRow({
         ⠿
       </button>
       <span
-        className="flex h-6 min-w-6 items-center justify-center rounded px-1 text-[11px] font-bold text-white"
+        className="flex h-6 min-w-6 items-center justify-center rounded px-1 text-2xs font-bold text-white"
         style={{ backgroundColor: line.color }}
       >
         {line.lineCode}
@@ -278,12 +295,17 @@ function MenuOrderCard() {
   const qc = useQueryClient();
   const [order, setOrder] = useState<NavItem[]>(() => orderedNav(me.menuOrder));
   const [hidden, setHidden] = useState<string[]>(() => me.menuHidden ?? []);
+  const [groups, setGroups] = useState<Record<string, string>>(() => me.menuGroups ?? {});
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
   const save = useMutation({
-    mutationFn: (prefs: { order: string[]; hidden: string[] }) =>
+    mutationFn: (prefs: { order: string[]; hidden: string[]; groups: Record<string, string> }) =>
       api.patch("/api/household/menu-order", prefs),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
   });
+  /** Renommage : local à chaque frappe, enregistré à la sortie du champ. */
+  const renameGroup = (key: string, name: string) =>
+    setGroups((prev) => ({ ...prev, [key]: name }));
+  const commitGroups = () => save.mutate({ order: order.map((n) => n.to), hidden, groups });
   const onDragEnd = (e: DragEndEvent) => {
     const { active, over } = e;
     if (!over || active.id === over.id) return;
@@ -292,7 +314,7 @@ function MenuOrderCard() {
       const newI = prev.findIndex((n) => n.to === over.id);
       if (oldI < 0 || newI < 0) return prev;
       const next = arrayMove(prev, oldI, newI);
-      save.mutate({ order: next.map((n) => n.to), hidden });
+      save.mutate({ order: next.map((n) => n.to), hidden, groups });
       return next;
     });
   };
@@ -301,36 +323,42 @@ function MenuOrderCard() {
       const target = index + dir;
       if (target < 0 || target >= prev.length) return prev;
       const next = arrayMove(prev, index, target);
-      save.mutate({ order: next.map((n) => n.to), hidden });
+      save.mutate({ order: next.map((n) => n.to), hidden, groups });
       return next;
     });
   };
   const toggleHidden = (key: string) => {
     setHidden((prev) => {
       const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
-      save.mutate({ order: order.map((n) => n.to), hidden: next });
+      save.mutate({ order: order.map((n) => n.to), hidden: next, groups });
       return next;
     });
   };
-  // Séparateurs : ajoutés en fin de liste (puis déplaçables comme un menu).
-  const addSeparator = () => {
+  // Groupes : ajoutés en fin de liste (puis déplaçables comme un menu).
+  const addGroup = () => {
     setOrder((prev) => {
-      const next = [...prev, { to: newSeparatorKey(), label: "", icon: "", separator: true as const }];
-      save.mutate({ order: next.map((n) => n.to), hidden });
+      const next = [...prev, { to: newSeparatorKey(), label: "", separator: true as const }];
+      save.mutate({ order: next.map((n) => n.to), hidden, groups });
       return next;
     });
   };
   const removeAt = (index: number) => {
     setOrder((prev) => {
+      const removed = prev[index];
       const next = prev.filter((_, i) => i !== index);
-      save.mutate({ order: next.map((n) => n.to), hidden });
+      // Un groupe supprimé emporte son nom : pas de clé orpheline en base.
+      const nextGroups = { ...groups };
+      delete nextGroups[removed.to];
+      setGroups(nextGroups);
+      save.mutate({ order: next.map((n) => n.to), hidden, groups: nextGroups });
       return next;
     });
   };
   const reset = () => {
     setOrder(NAV);
     setHidden([]);
-    save.mutate({ order: NAV.map((n) => n.to), hidden: [] });
+    setGroups({});
+    save.mutate({ order: NAV.map((n) => n.to), hidden: [], groups: {} });
   };
   return (
     <div className="card">
@@ -342,8 +370,8 @@ function MenuOrderCard() {
       </div>
       <p className="mb-3 mt-1 text-xs text-slate-400">
         Glisse les menus pour choisir leur ordre, et utilise l'œil pour masquer ceux qui ne
-        t'intéressent pas. Les séparateurs tracent un trait entre deux groupes de menus dans le
-        menu latéral. Réglage propre à ton compte.
+        t'intéressent pas. Un groupe titre les menus placés en dessous de lui, dans le menu latéral
+        comme dans le menu mobile. Réglage propre à ton compte.
       </p>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
         <SortableContext items={order.map((n) => n.to)} strategy={verticalListSortingStrategy}>
@@ -354,6 +382,9 @@ function MenuOrderCard() {
                 item={n}
                 hidden={hidden.includes(n.to)}
                 canHide={!n.separator && !ALWAYS_VISIBLE_NAV.includes(n.to)}
+                groupName={groups[n.to]}
+                onRenameGroup={(name) => renameGroup(n.to, name)}
+                onCommitGroups={commitGroups}
                 onToggleHidden={() => toggleHidden(n.to)}
                 onRemove={() => removeAt(i)}
                 onUp={() => move(i, -1)}
@@ -365,7 +396,7 @@ function MenuOrderCard() {
           </div>
         </SortableContext>
       </DndContext>
-      <button onClick={addSeparator} className="btn-ghost mt-3 w-full justify-center gap-2 text-xs">
+      <button onClick={addGroup} className="btn-ghost mt-3 w-full justify-center gap-2 text-xs">
         <svg
           viewBox="0 0 24 24"
           fill="none"
@@ -377,7 +408,7 @@ function MenuOrderCard() {
         >
           <path d="M12 5v14M5 12h14" />
         </svg>
-        Ajouter un séparateur
+        Ajouter un groupe
       </button>
     </div>
   );
@@ -1000,6 +1031,123 @@ const CATEGORY_ICON_CHOICES = [
   "💇", "💐", "🐟", "🥾", "🎿", "🧾", "💶", "🎰", "🏛️", "🌍",
 ];
 
+/**
+ * Rayons de la liste de courses. L'ordre est celui du magasin : c'est lui qui
+ * dicte l'ordre des sections sur la page Courses.
+ *
+ * La clé d'un rayon ne change jamais (les articles y sont rattachés) : renommer
+ * « Frais » en « Marché » garde les articles en place.
+ */
+function ShoppingCategoriesCard() {
+  const me = useMe();
+  const qc = useQueryClient();
+  const [cats, setCats] = useState<ShoppingCategory[]>(
+    () => me.shoppingCategories ?? DEFAULT_SHOPPING_CATEGORIES.map((c) => ({ ...c })),
+  );
+  const [newName, setNewName] = useState("");
+
+  const save = useMutation({
+    mutationFn: (next: ShoppingCategory[]) =>
+      api.patch("/api/household/shopping-categories", { categories: next }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
+  });
+  const commit = (next: ShoppingCategory[]) => {
+    setCats(next);
+    save.mutate(next);
+  };
+  const move = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= cats.length) return;
+    const next = [...cats];
+    [next[i], next[j]] = [next[j], next[i]];
+    commit(next);
+  };
+  const add = () => {
+    const name = newName.trim();
+    if (!name) return;
+    // Le rayon « autre » reste le dernier : il accueille les produits inconnus.
+    const next = [...cats];
+    const fallbackAt = next.findIndex((c) => c.key === FALLBACK_SHOPPING_CATEGORY);
+    const entry = { key: `r_${Date.now().toString(36)}`, name };
+    if (fallbackAt >= 0) next.splice(fallbackAt, 0, entry);
+    else next.push(entry);
+    commit(next);
+    setNewName("");
+  };
+
+  return (
+    <div className="card">
+      <div className="text-sm font-semibold">🛒 Rayons de courses</div>
+      <p className="mb-3 mt-1 text-xs text-slate-400">
+        Les articles de la liste sont regroupés par rayon, dans cet ordre — mets-les dans l'ordre de
+        ton magasin. Le rayon « {DEFAULT_SHOPPING_CATEGORIES.at(-1)?.name} » reçoit les produits que
+        l'app ne connaît pas ; il ne peut pas être supprimé.
+      </p>
+      <div className="space-y-1.5">
+        {cats.map((c, i) => (
+          <div key={c.key} className="flex items-center gap-1 rounded-xl border border-line px-3 py-1.5">
+            <input
+              value={c.name}
+              onChange={(e) =>
+                setCats(cats.map((x) => (x.key === c.key ? { ...x, name: e.target.value } : x)))
+              }
+              onBlur={() => save.mutate(cats)}
+              aria-label="Nom du rayon"
+              className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1 text-sm font-medium text-ink outline-none focus:border-brand-500"
+            />
+            <button
+              type="button"
+              onClick={() => move(i, -1)}
+              disabled={i === 0}
+              aria-label="Monter"
+              className="rounded-lg px-2 py-1 text-slate-400 transition hover:text-brand-600 disabled:opacity-30"
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              onClick={() => move(i, 1)}
+              disabled={i === cats.length - 1}
+              aria-label="Descendre"
+              className="rounded-lg px-2 py-1 text-slate-400 transition hover:text-brand-600 disabled:opacity-30"
+            >
+              ↓
+            </button>
+            <button
+              type="button"
+              onClick={() => commit(cats.filter((x) => x.key !== c.key))}
+              disabled={c.key === FALLBACK_SHOPPING_CATEGORY}
+              aria-label="Supprimer le rayon"
+              title={
+                c.key === FALLBACK_SHOPPING_CATEGORY
+                  ? "Rayon de repli — non supprimable"
+                  : "Supprimer le rayon"
+              }
+              className="rounded-lg px-2 py-1 text-slate-400 transition hover:text-danger disabled:opacity-30 disabled:hover:text-slate-400"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          add();
+        }}
+        className="mt-3 flex gap-2"
+      >
+        <Input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          placeholder="Nouveau rayon…"
+        />
+        <button className="btn-primary shrink-0 text-xs">Ajouter</button>
+      </form>
+    </div>
+  );
+}
+
 function ExpenseCategoriesCard() {
   const me = useMe();
   const qc = useQueryClient();
@@ -1378,7 +1526,7 @@ function DefaultPackingCard() {
           options={packingPersons.map((p) => ({
             value: p.id,
             label: p.label,
-            icon: <PersonAvatar id={p.id} className="h-5 w-5 text-[10px]" />,
+            icon: <PersonAvatar id={p.id} className="h-5 w-5 text-2xs" />,
           }))}
         />
         <button className="btn-primary shrink-0" disabled={save.isPending || !newItem.trim()}>
@@ -1666,7 +1814,7 @@ function MembersConfigCard() {
             ) : (
               <span
                 title="Aucun compte Google connecté pour ce membre"
-                className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-400 dark:bg-slate-800"
+                className="rounded-full bg-slate-100 px-1.5 py-0.5 text-2xs text-slate-400 dark:bg-slate-800"
               >
                 non connecté
               </span>
@@ -2006,7 +2154,7 @@ export default function Settings() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
   });
 
-  const SECTIONS = ["generale", "argent", "accueil", "outils", "repas", "parametre"] as const;
+  const SECTIONS = ["generale", "argent", "accueil", "outils", "courses", "repas", "parametre"] as const;
   type Section = (typeof SECTIONS)[number];
   const { section } = useParams();
   const tab: Section = (SECTIONS as readonly string[]).includes(section ?? "")
@@ -2017,14 +2165,23 @@ export default function Settings() {
     { value: "argent", label: "Argent", icon: "💶" },
     { value: "accueil", label: "Accueil", icon: "🏠" },
     { value: "outils", label: "Activités", icon: "🏖️" },
+    { value: "courses", label: "Courses", icon: "🛒" },
     { value: "repas", label: "Repas", icon: "🍽️" },
     { value: "parametre", label: "Paramètre", icon: "🔧" },
   ];
 
+  usePageHeader("Réglages");
+  usePageTabs(tab, TABS, (v) => navigate(`/settings/${v}`));
+
   return (
     <div className="flex flex-1 flex-col gap-4">
-      <h1 className="text-2xl font-bold">Réglages</h1>
-      <SubNav value={tab} onChange={(v) => navigate(`/settings/${v}`)} items={TABS} />
+      <h1 className="hidden text-2xl font-bold md:block">Réglages</h1>
+      <SubNav
+        value={tab}
+        onChange={(v) => navigate(`/settings/${v}`)}
+        items={TABS}
+        className="hidden md:block"
+      />
 
       {/* ============================ GÉNÉRALE ============================ */}
       {tab === "generale" && (
@@ -2086,7 +2243,7 @@ export default function Settings() {
                   onClick={() => chooseTheme(t.id)}
                   className={`rounded-xl border px-3 py-2 text-sm font-medium transition ${
                     theme === t.id
-                      ? "border-brand-600 bg-brand-600 text-white"
+                      ? "border-brand-600 bg-brand-600 text-on-brand"
                       : "border-slate-300 bg-white text-slate-600 hover:border-brand-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
                   }`}
                 >
@@ -2374,7 +2531,7 @@ export default function Settings() {
             </p>
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="flex items-center gap-1.5">
-                <MemberAvatar id="a" className="h-5 w-5 text-[10px]" />
+                <MemberAvatar id="a" className="h-5 w-5 text-2xs" />
                 {me.household.members.a.name}
               </span>
               <input
@@ -2388,7 +2545,7 @@ export default function Settings() {
               <span>%</span>
               <span className="text-slate-300">/</span>
               <span className="flex items-center gap-1.5">
-                <MemberAvatar id="b" className="h-5 w-5 text-[10px]" />
+                <MemberAvatar id="b" className="h-5 w-5 text-2xs" />
                 {me.household.members.b.name} <b>{100 - splitJ}%</b>
               </span>
               <button
@@ -2427,6 +2584,13 @@ export default function Settings() {
       )}
 
       {/* Repas : ingrédients exclus des idées */}
+      {/* ============================ COURSES ============================ */}
+      {tab === "courses" && (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <ShoppingCategoriesCard />
+        </div>
+      )}
+
       {tab === "repas" && (
         <div className="grid gap-4 lg:grid-cols-2">
           <MealExclusionsCard />

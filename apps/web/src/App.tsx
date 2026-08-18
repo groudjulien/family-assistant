@@ -86,6 +86,9 @@ export default function App() {
           <Route path="/films/:view" element={<PageGate variant="activites"><Films /></PageGate>} />
           <Route path="/vacances" element={<PageGate variant="activites"><Vacances /></PageGate>} />
           <Route path="/vacances/:view" element={<PageGate variant="activites"><Vacances /></PageGate>} />
+          {/* Un voyage ouvert est une sous-page : /vacances/<vue>/<id>/<onglet>. */}
+          <Route path="/vacances/:view/:tripId" element={<PageGate variant="activites"><Vacances /></PageGate>} />
+          <Route path="/vacances/:view/:tripId/:tab" element={<PageGate variant="activites"><Vacances /></PageGate>} />
           {/* Anciennes URLs : films et vacances étaient des onglets de /tools. */}
           <Route path="/tools/films" element={<Navigate to="/films" replace />} />
           <Route path="/tools/films/:view" element={<LegacyToolsRedirect base="/films" />} />

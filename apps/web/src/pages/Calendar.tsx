@@ -121,6 +121,7 @@ export default function Calendar() {
         <SubNav
           value={view}
           onChange={(v) => routerNavigate(`/calendar/${v}`)}
+          bleed={false}
           items={VIEWS.map((v) => ({
             value: v,
             label: v === "today" ? "Aujourd'hui" : v === "week" ? "Semaine" : "Mois",
@@ -164,7 +165,7 @@ export default function Calendar() {
 
 function EventChip({ e }: { e: CalendarEvent }) {
   return (
-    <div className="truncate rounded-md bg-brand-50 px-1.5 py-0.5 text-[11px] text-brand-700 dark:bg-brand-600/20 dark:text-brand-50">
+    <div className="truncate rounded-md bg-brand-50 px-1.5 py-0.5 text-2xs text-brand-700 dark:bg-brand-600/20 dark:text-brand-50">
       {!e.allDay && (
         <span className="opacity-70">
           {new Date(e.start).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}{" "}
@@ -300,7 +301,7 @@ function MonthView({
                   <EventChip key={`${e.calendarId}-${e.id}`} e={e} />
                 ))}
                 {evs.length > 3 && (
-                  <div className="text-[10px] text-slate-400">+{evs.length - 3}</div>
+                  <div className="text-2xs text-slate-400">+{evs.length - 3}</div>
                 )}
               </div>
             </div>

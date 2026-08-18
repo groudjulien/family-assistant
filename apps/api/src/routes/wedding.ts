@@ -270,7 +270,14 @@ wedding.get("/savings", async (c) => {
     .from(savingsContribution)
     .where(eq(savingsContribution.householdId, c.get("household").id))
     .orderBy(asc(savingsContribution.month));
-  return c.json(rows.map((r) => ({ ...r, planned: Boolean(r.planned) })));
+  return c.json(
+    rows.map((r) => ({
+      ...r,
+      planned: Boolean(r.planned),
+      realizedA: Boolean(r.realizedA),
+      realizedB: Boolean(r.realizedB),
+    })),
+  );
 });
 
 /** Mois « YYYY-MM » de `from` à `to` inclus (toujours au moins un mois). */
@@ -321,8 +328,10 @@ wedding.post("/savings/init", async (c) => {
     amountA: body.monthlyPerPerson,
     amountB: body.monthlyPerPerson,
     planned: 1,
+    realizedA: 0,
+    realizedB: 0,
   }));
-  for (const batch of chunkForD1(rows, 6)) {
+  for (const batch of chunkForD1(rows, 8)) {
     await db.insert(savingsContribution).values(batch);
   }
   return c.json({ ok: true, months: months.length }, 201);
@@ -339,6 +348,8 @@ wedding.post("/savings", async (c) => {
     amountA: body.amountA,
     amountB: body.amountB,
     planned: body.planned ? 1 : 0,
+    realizedA: body.realizedA ? 1 : 0,
+    realizedB: body.realizedB ? 1 : 0,
   });
   return c.json({ ok: true, id }, 201);
 });
@@ -354,6 +365,8 @@ wedding.patch("/savings/:id", async (c) => {
       ...(body.amountA !== undefined && { amountA: body.amountA }),
       ...(body.amountB !== undefined && { amountB: body.amountB }),
       ...(body.planned !== undefined && { planned: body.planned ? 1 : 0 }),
+      ...(body.realizedA !== undefined && { realizedA: body.realizedA ? 1 : 0 }),
+      ...(body.realizedB !== undefined && { realizedB: body.realizedB ? 1 : 0 }),
     })
     .where(eq(savingsContribution.id, id));
   return c.json({ ok: true });

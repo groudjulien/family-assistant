@@ -1,17 +1,43 @@
 import { useState, useEffect, useMemo } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { SubNav, PillToggle } from "../components/ui";
+import type { SheetItem } from "../components/ui";
+import {
+  SubNav,
+  FilterChips,
+  SearchField,
+  MobileActionBar,
+  ActionSheet,
+} from "../components/ui";
+import {
+  IconBan,
+  IconCheck,
+  IconEye,
+  IconHeart,
+  IconMore,
+  IconPlay,
+  IconSparkle,
+  IconUndo,
+} from "../components/icons";
+import type { FilmAvailability } from "@gfa/shared";
 import { useLastView } from "../lib/lastView";
-import { dateFr } from "../lib/format";
+import { dateFrShort, monthFr } from "../lib/format";
 import { api } from "../lib/api";
 import PageLoader from "../components/PageLoader";
+import { usePageHeader, usePageTabs } from "../components/PageHeader";
 
 /* ---------------- Films disponibles sur nos abonnements ---------------- */
 
 type Audience = "enfants" | "adultes";
 /** Sous-menus de /films (URL : /films/<vue>). */
 type FilmView = "a-voir" | "propositions" | "historique";
+/** Onglets de la page (partagés entre la barre mobile et le SubNav ordinateur). */
+const FILM_TABS = [
+  { value: "a-voir", label: "À voir" },
+  { value: "propositions", label: "Propositions" },
+  { value: "historique", label: "Historique" },
+];
+
 const FILM_VIEWS = ["a-voir", "propositions", "historique"] as const;
 /** Filtre de l'historique : tout, seulement les vus, seulement les masqués. */
 type HistoryFilter = "tous" | "vues" | "masques";
@@ -27,6 +53,77 @@ interface Film {
   imageUrl: string | null;
   providers: Provider[];
   year: string | null;
+  /** Durée en minutes (null si TMDB ne la donne pas). */
+  runtime?: number | null;
+  /** Certification FR brute : « U », « 10 », « 12 », « 16 », « 18 ». */
+  ageLimit?: string | null;
+  /**
+   * Où le film se regarde. `null` sur les lignes enregistrées avant la
+   * recherche hors plateforme — elles portent toutes une plateforme.
+   */
+  availability?: FilmAvailability | null;
+}
+
+/**
+ * Lien de recherche des plateformes courantes. Sur mobile ce sont des liens
+ * universels : le système ouvre l'application si elle est installée, la page
+ * web sinon. On ne peut pas viser la fiche du film directement (les
+ * identifiants sont propres à chaque service), donc on ouvre sa recherche.
+ */
+const PROVIDER_LINKS: { match: string; label: string; url: (q: string) => string }[] = [
+  { match: "netflix", label: "Netflix", url: (q) => `https://www.netflix.com/search?q=${q}` },
+  { match: "disney", label: "Disney+", url: (q) => `https://www.disneyplus.com/fr-fr/search?q=${q}` },
+  { match: "prime", label: "Prime Video", url: (q) => `https://www.primevideo.com/search/?phrase=${q}` },
+  { match: "canal", label: "Canal+", url: (q) => `https://www.canalplus.com/recherche/?q=${q}` },
+  { match: "apple", label: "Apple TV", url: (q) => `https://tv.apple.com/fr/search?term=${q}` },
+  { match: "max", label: "Max", url: (q) => `https://play.max.com/search?q=${q}` },
+  { match: "paramount", label: "Paramount+", url: (q) => `https://www.paramountplus.com/fr/search/${q}/` },
+  { match: "ocs", label: "OCS", url: (q) => `https://www.ocs.fr/recherche?q=${q}` },
+  { match: "crunchyroll", label: "Crunchyroll", url: (q) => `https://www.crunchyroll.com/fr/search?q=${q}` },
+  { match: "arte", label: "arte.tv", url: (q) => `https://www.arte.tv/fr/search/?q=${q}` },
+];
+
+/** Où lancer le film : la première plateforme reconnue parmi les siennes. */
+function launchTarget(f: Film): { label: string; href: string } | null {
+  for (const p of f.providers) {
+    const known = PROVIDER_LINKS.find((l) => p.name.toLowerCase().includes(l.match));
+    if (known) return { label: known.label, href: known.url(encodeURIComponent(f.title)) };
+  }
+  return null;
+}
+
+/**
+ * Étiquette de disponibilité : la plateforme du foyer si le film y est, sinon
+ * ce que TMDB sait des offres françaises. Un film hors abonnement reste
+ * retenable dans « À voir » — l'étiquette dit juste ce qu'il faudra faire pour
+ * le regarder, au lieu de laisser un vide.
+ */
+function providerLabel(f: Film): string {
+  if (f.providers[0]) return f.providers[0].name;
+  return f.availability === "unknown" ? "Non trouvé" : "VOD";
+}
+
+/** Où trouver un film hors abonnement : le comparateur d'offres, pas une plateforme. */
+function vodSearchUrl(title: string): string {
+  return `https://www.justwatch.com/fr/recherche?q=${encodeURIComponent(title)}`;
+}
+
+/** « 2025 · 1 h 43 · dès 10 ans » — seulement ce qu'on connaît. */
+function filmMeta(f: Film): string {
+  const bits: string[] = [];
+  if (f.year) bits.push(f.year);
+  if (f.runtime) {
+    const h = Math.floor(f.runtime / 60);
+    const m = f.runtime % 60;
+    bits.push(h > 0 ? (m > 0 ? `${h} h ${String(m).padStart(2, "0")}` : `${h} h`) : `${m} min`);
+  }
+  // TMDB renvoie « TP » ou « U » pour « tous publics » selon les fiches, et un
+  // âge en clair sinon. Sans ce cas, on affichait « dès TP ans ».
+  if (f.ageLimit) {
+    const all = /^(tp|u|tous)/i.test(f.ageLimit);
+    bits.push(all ? "tous publics" : `dès ${f.ageLimit} ans`);
+  }
+  return bits.join(" · ");
 }
 /** Film déjà vu : `seenAt` = date ISO du marquage « vue ». */
 interface SeenFilm extends Film {
@@ -39,32 +136,7 @@ interface HiddenFilm extends Film {
   hiddenAt?: string;
 }
 /** Entrée d'historique : un film vu ou masqué, avec la date de l'action. */
-type HistoryFilm = Film & { kind: "vue" | "masque"; at: string };
-
-function ProviderLogos({ providers }: { providers: Provider[] }) {
-  return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      {providers.map((p) =>
-        p.logo ? (
-          <img
-            key={p.name}
-            src={p.logo}
-            alt={p.name}
-            title={p.name}
-            className="h-6 w-6 rounded-md object-cover"
-          />
-        ) : (
-          <span
-            key={p.name}
-            className="rounded bg-brand-50 px-1.5 py-0.5 text-[10px] font-medium text-brand-700 dark:bg-brand-600/20 dark:text-brand-50"
-          >
-            {p.name}
-          </span>
-        ),
-      )}
-    </div>
-  );
-}
+type HistoryFilm = Film & { kind: "vue" | "masque"; at: string; audience?: string };
 
 interface FilmDetails {
   id: string;
@@ -87,7 +159,11 @@ interface FilmDetails {
 /**
  * Modale de fiche film : synopsis complet, note, casting et bande-annonce.
  * Alignée en haut sur mobile (place du clavier / grands contenus), centrée sur
- * ordinateur, contenu scrollable dans l'overlay.
+ * ordinateur.
+ *
+ * Hauteur bornée à l'écran : la bande-annonce et sa croix de fermeture restent
+ * en place, seul le texte défile. Sans ça, la fiche poussait la modale au-delà
+ * de l'écran (une longue distribution suffit) et la croix partait avec.
  */
 function FilmDetailsModal({ id, onClose }: { id: string; onClose: () => void }) {
   const { data, isLoading, isError } = useQuery({
@@ -114,11 +190,11 @@ function FilmDetailsModal({ id, onClose }: { id: string; onClose: () => void }) 
       onClick={onClose}
     >
       <div
-        className="card w-full max-w-2xl overflow-hidden p-0"
+        className="card flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-hidden p-0"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Média d'en-tête : bande-annonce si dispo, sinon image large */}
-        <div className="relative">
+        <div className="relative shrink-0">
           {data?.trailerKey ? (
             <iframe
               src={`https://www.youtube-nocookie.com/embed/${data.trailerKey}`}
@@ -155,7 +231,7 @@ function FilmDetailsModal({ id, onClose }: { id: string; onClose: () => void }) 
           </button>
         </div>
 
-        <div className="space-y-3 p-4 sm:p-5">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 sm:p-5">
           {isLoading && <div className="text-sm text-slate-400">Chargement de la fiche…</div>}
           {isError && (
             <div className="text-sm text-slate-400">Impossible de charger la fiche du film.</div>
@@ -228,11 +304,11 @@ function FilmDetailsModal({ id, onClose }: { id: string; onClose: () => void }) 
                             {a.name.charAt(0)}
                           </div>
                         )}
-                        <div className="mt-1 line-clamp-2 text-[11px] font-medium leading-tight">
+                        <div className="mt-1 line-clamp-2 text-2xs font-medium leading-tight">
                           {a.name}
                         </div>
                         {a.character && (
-                          <div className="line-clamp-2 text-[10px] leading-tight text-slate-400">
+                          <div className="line-clamp-2 text-2xs leading-tight text-slate-400">
                             {a.character}
                           </div>
                         )}
@@ -263,13 +339,22 @@ export default function Films() {
   ) as FilmView;
   // Fiche film ouverte (modale de détails), quel que soit le sous-onglet.
   const [detailId, setDetailId] = useState<string | null>(null);
+  // Film dont la feuille d'actions est ouverte.
+  const [sheet, setSheet] = useState<Film | HistoryFilm | null>(null);
   // Filtre public, partagé par « À voir » et « Propositions ».
   const [audience, setAudience] = useState<Audience>("enfants");
   const [history, setHistory] = useState<HistoryFilter>("tous");
+  const [historySearch, setHistorySearch] = useState("");
 
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ["films", audience],
-    queryFn: () => api.get<{ films: Film[]; error?: string }>(`/api/films?audience=${audience}`),
+  // « Proposer d'autres films » avance dans le vivier plutôt que de recharger
+  // la même page ; l'API boucle quand on arrive au bout.
+  const [offset, setOffset] = useState(0);
+  const { data, isLoading, isFetching, isError } = useQuery({
+    queryKey: ["films", audience, offset],
+    queryFn: () =>
+      api.get<{ films: Film[]; error?: string }>(
+        `/api/films?audience=${audience}&offset=${offset}`,
+      ),
     staleTime: 30 * 60 * 1000,
     retry: false,
     enabled: view === "propositions",
@@ -277,7 +362,8 @@ export default function Films() {
   const { data: favData } = useQuery({
     queryKey: ["film-favorites", audience],
     queryFn: () => api.get<{ films: Film[] }>(`/api/films/favorites?audience=${audience}`),
-    enabled: view !== "historique",
+    // Toujours activée : l'en-tête affiche le nombre de films à voir, y compris
+    // depuis l'historique.
   });
   const { data: seenData } = useQuery({
     queryKey: ["films-seen"],
@@ -326,6 +412,9 @@ export default function Films() {
         imageUrl: f.imageUrl,
         providers: JSON.stringify(f.providers),
         year: f.year,
+        runtime: f.runtime ?? null,
+        ageLimit: f.ageLimit ?? null,
+        availability: f.availability ?? null,
       }),
     onSuccess: invalidate,
   });
@@ -340,6 +429,9 @@ export default function Films() {
     imageUrl: f.imageUrl,
     providers: JSON.stringify(f.providers),
     year: f.year,
+    runtime: f.runtime ?? null,
+    ageLimit: f.ageLimit ?? null,
+    availability: f.availability ?? null,
   });
   const markSeen = useMutation({
     mutationFn: (f: Film) => api.post("/api/films/seen", snapshot(f)),
@@ -359,83 +451,169 @@ export default function Films() {
   });
 
   const favorites = favData?.films ?? [];
+  const historySeen = seenData?.films.length ?? 0;
+  const historyHidden = hiddenData?.films.length ?? 0;
+  // Le sur-titre dit ce que porte l'onglet ouvert, pas toujours la même chose.
+  usePageHeader(
+    "Films",
+    view === "historique"
+      ? `${historySeen} vus · ${historyHidden} masqués`
+      : `${favorites.length} à voir`,
+  );
+  usePageTabs(view, FILM_TABS, (v) => navigate(`/films/${v}`));
   const favIds = new Set(favorites.map((f) => f.id));
 
-  const card = (f: Film) => {
+  /**
+   * Les actions secondaires d'un film, dans une feuille : lancer sur la
+   * plateforme, marquer vu, ne plus proposer. La carte, elle, ne montre que
+   * son action principale.
+   */
+  const sheetItems = (f: Film | HistoryFilm): SheetItem[] => {
+    const target = launchTarget(f);
+    // Un film déjà vu (historique) n'a plus à être marqué vu ni masqué : ce qui
+    // reste utile, c'est de le relancer ou de le remettre dans le tirage.
+    const alreadySeen = "kind" in f && f.kind === "vue";
+    return [
+      {
+        ...(target
+          ? {
+              label: `Lancer dans ${target.label}`,
+              hint: "ouvre l'application si elle est installée",
+              onClick: () => window.open(target.href, "_blank", "noopener,noreferrer"),
+            }
+          : {
+              label: "Chercher où le voir",
+              hint:
+                f.availability === "unknown"
+                  ? "aucune offre française connue"
+                  : "location, achat ou autre plateforme",
+              onClick: () =>
+                window.open(vodSearchUrl(f.title), "_blank", "noopener,noreferrer"),
+            }),
+        icon: <IconPlay size={20} />,
+      },
+      ...(alreadySeen
+        ? [
+            {
+              label: "Remettre dans les propositions",
+              hint: "il pourra être reproposé",
+              icon: <IconUndo size={20} />,
+              onClick: () => unsee.mutate(f.id),
+            },
+          ]
+        : [
+            ...(favIds.has(f.id)
+              ? [
+                  {
+                    label: "Retirer de À voir",
+                    icon: <IconHeart size={20} />,
+                    onClick: () => removeFav.mutate(f.id),
+                  },
+                ]
+              : []),
+            {
+              label: "Marquer comme vu",
+              icon: <IconEye size={20} />,
+              onClick: () => markSeen.mutate(f),
+            },
+            {
+              label: "Ne plus proposer",
+              hint: "retiré des propositions futures",
+              icon: <IconBan size={20} />,
+              danger: true,
+              onClick: () => hideFilm.mutate(f),
+            },
+          ]),
+    ];
+  };
+
+  /** Étiquette de plateforme (ou « VOD »), posée sur l'affiche. */
+  const providerTag = (f: Film) => (
+    <span className="rounded-md bg-black/70 px-1.5 py-0.5 text-2xs font-semibold uppercase tracking-wide text-white backdrop-blur">
+      {providerLabel(f)}
+    </span>
+  );
+
+  /**
+   * Carte de film : l'affiche décide, une seule action visible.
+   *
+   * L'action change selon l'onglet — dans les propositions on retient le film
+   * (« À voir »), dans sa liste à voir on le sort une fois regardé (« Vue »).
+   */
+  const card = (f: Film, primary: "fav" | "seen" = "fav") => {
     const fav = favIds.has(f.id);
     return (
-      <div key={f.id} className="card flex flex-col overflow-hidden p-0">
-        {f.imageUrl && (
-          <img
-            src={f.imageUrl}
-            alt=""
-            loading="lazy"
+      <div key={f.id} className="card flex flex-col" style={{ padding: 0 }}>
+        <div className="relative">
+          <button
+            type="button"
             onClick={() => setDetailId(f.id)}
-            className="aspect-[2/3] w-full cursor-pointer object-cover"
-          />
-        )}
-        {/* `.card` n'est pas dans un @layer : son `p-4` s'applique malgré `p-0`.
-            On ne remet donc qu'un espacement vertical, sinon le texte serait plus
-            resserré que l'affiche. */}
-        <div className="flex flex-1 flex-col gap-1.5 pt-3">
-          <div
+            aria-label={`Fiche de ${f.title}`}
+            className="block w-full"
+          >
+            {f.imageUrl ? (
+              <img
+                src={f.imageUrl}
+                alt=""
+                loading="lazy"
+                className="aspect-[2/3] w-full rounded-t-2xl object-cover"
+              />
+            ) : (
+              <div className="flex aspect-[2/3] w-full items-center justify-center rounded-t-2xl bg-surface-2 text-3xl">
+                🎬
+              </div>
+            )}
+          </button>
+          <span className="pointer-events-none absolute left-2 top-2">{providerTag(f)}</span>
+          {fav && primary === "fav" && (
+            <span
+              className="pointer-events-none absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-brand-600 text-on-brand"
+              aria-label="Dans ta liste à voir"
+            >
+              <IconCheck size={16} />
+            </span>
+          )}
+        </div>
+        {/* `.card` est hors `@layer` : son `p-4` gagne sur `p-0`. Le retrait est
+            donc posé ici, sur le bloc de texte seulement. */}
+        <div className="flex flex-1 flex-col gap-1 px-3 pb-3 pt-2.5">
+          <button
+            type="button"
             onClick={() => setDetailId(f.id)}
-            className="cursor-pointer font-semibold leading-tight hover:text-brand-600"
+            className="line-clamp-3 text-left text-base font-semibold leading-snug"
           >
             {f.title}
-            {f.year && <span className="ml-1 text-xs font-normal text-slate-400">({f.year})</span>}
-          </div>
-          <ProviderLogos providers={f.providers} />
-          {f.description && (
-            <p
-              onClick={() => setDetailId(f.id)}
-              className="mt-1 line-clamp-3 cursor-pointer text-xs text-slate-600 dark:text-slate-300"
-            >
-              {f.description}
-            </p>
-          )}
-          {/* Actions en 3 colonnes : icône au-dessus, libellé en dessous */}
-          <div className="mt-auto grid grid-cols-3 gap-1 pt-2">
-            <button
-              onClick={() => hideFilm.mutate(f)}
-              title="Ne plus me proposer"
-              className="flex flex-col items-center gap-0.5 text-slate-400 transition hover:text-red-500"
-            >
-              <span className="text-lg leading-none">🚫</span>
-              <span className="text-[11px] font-medium leading-none">Masqué</span>
-            </button>
-            <button
-              onClick={() => markSeen.mutate(f)}
-              title="Marquer comme déjà vu"
-              className="flex flex-col items-center gap-0.5 text-slate-400 transition hover:text-brand-600"
-            >
-              <span className="text-lg leading-none">👁</span>
-              <span className="text-[11px] font-medium leading-none">Vue</span>
-            </button>
-            <button
-              onClick={() => (fav ? removeFav.mutate(f.id) : addFav.mutate(f))}
-              title={fav ? "Retirer des favoris" : "Ajouter aux favoris"}
-              className="group flex flex-col items-center gap-0.5 transition"
-            >
-              {/* Cœur rouge + libellé vert quand le film est retenu. Au survol on
-                  montre l'état inverse : aperçu de ce que fera le clic. */}
-              <span
-                className={`text-lg leading-none ${
-                  fav ? "text-red-500 group-hover:text-slate-400" : "text-slate-400 group-hover:text-red-500"
+          </button>
+          <div className="text-xs text-slate-400">{filmMeta(f)}</div>
+          <div className="mt-auto flex items-center gap-2 pt-2.5">
+            {primary === "seen" ? (
+              <button
+                type="button"
+                onClick={() => markSeen.mutate(f)}
+                className="flex h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full bg-brand-600 text-sm font-semibold text-on-brand"
+              >
+                <IconCheck size={16} />
+                <span className="truncate">Vue</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => (fav ? removeFav.mutate(f.id) : addFav.mutate(f))}
+                className={`flex h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full text-sm font-semibold ${
+                  fav ? "border border-line bg-surface text-ink-2" : "bg-brand-600 text-on-brand"
                 }`}
               >
-                <span className="group-hover:hidden">{fav ? "♥" : "♡"}</span>
-                <span className="hidden group-hover:inline">{fav ? "♡" : "♥"}</span>
-              </span>
-              <span
-                className={`text-[11px] font-medium leading-none ${
-                  fav
-                    ? "text-brand-600 group-hover:text-slate-400"
-                    : "text-slate-400 group-hover:text-brand-600"
-                }`}
-              >
-                À voir
-              </span>
+                <IconHeart size={16} />
+                <span className="truncate">{fav ? "Retirer" : "À voir"}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setSheet(f)}
+              aria-label={`Autres actions sur ${f.title}`}
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line text-ink-2"
+            >
+              <IconMore size={20} />
             </button>
           </div>
         </div>
@@ -443,47 +621,82 @@ export default function Films() {
     );
   };
 
-  const historyCard = (f: HistoryFilm) => (
-    <div key={`${f.kind}-${f.id}`} className="card flex flex-col overflow-hidden p-0">
-      {f.imageUrl && (
-        <img
-          src={f.imageUrl}
-          alt=""
-          loading="lazy"
-          onClick={() => setDetailId(f.id)}
-          className="aspect-[2/3] w-full cursor-pointer object-cover opacity-80"
-        />
-      )}
-      <div className="flex flex-1 flex-col gap-1.5 pt-3">
-        <div
-          onClick={() => setDetailId(f.id)}
-          className="cursor-pointer font-semibold leading-tight hover:text-brand-600"
-        >
-          {f.title}
-          {f.year && <span className="ml-1 text-xs font-normal text-slate-400">({f.year})</span>}
-        </div>
-        <ProviderLogos providers={f.providers} />
-        <div className="text-xs text-slate-400">
-          <span
-            className={`mr-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-              f.kind === "vue"
-                ? "bg-brand-50 text-brand-700 dark:bg-brand-600/20 dark:text-brand-50"
-                : "bg-red-50 text-red-600 dark:bg-red-500/20 dark:text-red-200"
-            }`}
+  /**
+   * Rangée d'historique. L'affiche ne sert plus à choisir — elle sert à
+   * reconnaître : petite vignette, et la place va au statut et à sa date.
+   *
+   * Un film masqué n'a qu'une action utile (le re-proposer) : elle est posée
+   * directement dans la ligne. Un film vu en a plusieurs, elles passent par
+   * la feuille.
+   */
+  const historyRow = (f: HistoryFilm, last: boolean) => {
+    const seen = f.kind === "vue";
+    return (
+      <div key={`${f.kind}-${f.id}`} className={last ? "" : "border-b border-hairline"}>
+        <div className="flex items-center gap-3 py-2.5">
+          <button type="button" onClick={() => setDetailId(f.id)} className="shrink-0">
+            {f.imageUrl ? (
+              <img
+                src={f.imageUrl}
+                alt=""
+                loading="lazy"
+                className="h-16 w-11 rounded-lg object-cover opacity-80"
+              />
+            ) : (
+              <span className="flex h-16 w-11 items-center justify-center rounded-lg bg-surface-2">
+                🎬
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => setDetailId(f.id)}
+            className="min-w-0 flex-1 text-left"
           >
-            {f.kind === "vue" ? "👁 Vue" : "🚫 Masqué"}
-          </span>
-          {f.at ? `le ${dateFr(f.at)}` : ""}
+            <span className="block truncate text-base font-semibold">{f.title}</span>
+            <span className="block truncate text-xs text-slate-400">
+              {[f.year, providerLabel(f)].filter(Boolean).join(" · ")}
+            </span>
+            <span className="mt-1.5 flex flex-wrap items-center gap-2">
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-2xs font-semibold ${
+                  seen ? "bg-brand-600/20 text-brand-600" : "bg-danger-soft text-danger"
+                }`}
+              >
+                {seen ? <IconCheck size={12} /> : <IconBan size={12} />}
+                {seen ? "Vu" : "Masqué"}
+              </span>
+              <span className="text-xs text-slate-400">
+                {[f.at ? dateFrShort(f.at) : null, f.audience === "enfants" ? "en famille" : null]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </span>
+            </span>
+          </button>
+          {seen ? (
+            <button
+              type="button"
+              onClick={() => setSheet(f)}
+              aria-label={`Autres actions sur ${f.title}`}
+              className="flex h-tap w-9 shrink-0 items-center justify-center rounded-lg text-ink-2"
+            >
+              <IconMore size={20} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => unhide.mutate(f.id)}
+              aria-label={`Re-proposer ${f.title}`}
+              title="Re-proposer"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-ink-2"
+            >
+              <IconUndo size={20} />
+            </button>
+          )}
         </div>
-        <button
-          onClick={() => (f.kind === "vue" ? unsee.mutate(f.id) : unhide.mutate(f.id))}
-          className="mt-auto pt-2 text-left text-xs font-medium text-brand-600 hover:underline"
-        >
-          ↩︎ Re-proposer
-        </button>
       </div>
-    </div>
-  );
+    );
+  };
 
   const films = data?.films ?? [];
   const searchResults = searchData?.films ?? [];
@@ -498,108 +711,121 @@ export default function Films() {
     ];
     return rows.sort((a, b) => b.at.localeCompare(a.at));
   }, [seenFilms, hiddenFilms]);
+  const hq = historySearch.trim().toLowerCase();
   const historyShown = historyFilms.filter(
     (f) =>
-      history === "tous" ||
-      (history === "vues" && f.kind === "vue") ||
-      (history === "masques" && f.kind === "masque"),
+      (history === "tous" ||
+        (history === "vues" && f.kind === "vue") ||
+        (history === "masques" && f.kind === "masque")) &&
+      (!hq || f.title.toLowerCase().includes(hq)),
   );
+  // Regroupé par mois : l'historique se parcourt par période, pas à plat.
+  const historyMonths: { key: string; label: string; rows: HistoryFilm[] }[] = [];
+  for (const f of historyShown) {
+    const key = f.at.slice(0, 7) || "?";
+    const last = historyMonths[historyMonths.length - 1];
+    if (last?.key === key) last.rows.push(f);
+    else
+      historyMonths.push({
+        key,
+        label: f.at ? monthFr(key) : "Sans date",
+        rows: [f],
+      });
+  }
 
-  const audienceToggle = (
-    <PillToggle
+  const audienceChips = (
+    <FilterChips
       value={audience}
       onChange={(v) => setAudience(v as Audience)}
       items={[
-        { value: "enfants", label: "Enfants", icon: "🧸" },
-        { value: "adultes", label: "Adultes", icon: "🎞️" },
+        { value: "enfants", label: "Enfants" },
+        { value: "adultes", label: "Adultes" },
       ]}
     />
   );
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-3 pb-28 md:pb-0">
       {/* Onglets de premier niveau (pleine largeur), comme les autres pages */}
       <SubNav
         value={view}
         onChange={(v) => navigate(`/films/${v}`)}
-        items={[
-          { value: "a-voir", label: "À voir", icon: "♥" },
-          { value: "propositions", label: "Propositions", icon: "🎬" },
-          { value: "historique", label: "Historique", icon: "🕓" },
-        ]}
+        items={FILM_TABS}
+        className="hidden md:block"
       />
 
       {view === "a-voir" ? (
         <>
-          {audienceToggle}
-          <p className="text-xs text-slate-400">
-            Films mis de côté pour plus tard. Les marquer 👁 « Vue » ou 🚫 « Masqué » les retire de
-            cette liste.
-          </p>
+          {audienceChips}
           {favorites.length === 0 ? (
-            <div className="card text-sm text-slate-400">
-              Aucun film à voir pour l'instant — ajoutez-en depuis les propositions avec ♡.
+            <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+              <p>Aucun film à voir pour l'instant.</p>
+              <button
+                type="button"
+                onClick={() => navigate("/films/propositions")}
+                className="btn-primary"
+              >
+                Voir les propositions
+              </button>
             </div>
           ) : (
+            /* Même grille que les propositions : l'affiche reste ce qui fait
+               choisir. Seule l'action change — ici on marque le film vu. */
             <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
-              {favorites.map(card)}
+              {favorites.map((f) => card(f, "seen"))}
             </div>
           )}
         </>
       ) : view === "historique" ? (
         <>
-          <PillToggle
+          <SearchField
+            value={historySearch}
+            onChange={setHistorySearch}
+            placeholder="Chercher dans l'historique…"
+          />
+          <FilterChips
             value={history}
             onChange={(v) => setHistory(v as HistoryFilter)}
             items={[
-              { value: "tous", label: "Tous", icon: "🕓" },
-              { value: "vues", label: "Vues", icon: "👁" },
-              { value: "masques", label: "Masqués", icon: "🚫" },
+              { value: "tous", label: "Tous" },
+              { value: "vues", label: "Vus" },
+              { value: "masques", label: "Masqués" },
             ]}
           />
-          <p className="text-xs text-slate-400">
-            Films vus ou masqués (exclus des propositions), du plus récent au plus ancien.
-          </p>
           {historyShown.length === 0 ? (
-            <div className="card text-sm text-slate-400">Aucun film dans l'historique.</div>
-          ) : (
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
-              {historyShown.map(historyCard)}
+            <div className="card text-sm text-slate-400">
+              {hq ? `Aucun film « ${historySearch} » dans l'historique.` : "Aucun film dans l'historique."}
             </div>
+          ) : (
+            historyMonths.map((m) => (
+              <div key={m.key} className="flex flex-col gap-2">
+                <div className="eyebrow">{m.label}</div>
+                <div className="card">
+                  {m.rows.map((f, i) => historyRow(f, i === m.rows.length - 1))}
+                </div>
+              </div>
+            ))
           )}
         </>
       ) : (
         <>
-          {audienceToggle}
-
           {/* Recherche par titre parmi les plateformes activées du foyer */}
-          <div className="relative">
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Rechercher un film par son nom…"
-              className="input"
-            />
-            {search && (
-              <button
-                type="button"
-                onClick={() => setSearch("")}
-                aria-label="Effacer la recherche"
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 transition hover:text-brand-600"
-              >
-                ✕
-              </button>
-            )}
+          <SearchField value={search} onChange={setSearch} placeholder="Chercher un film…" />
+          <div className="flex items-center gap-2">
+            {audienceChips}
+            <button
+              type="button"
+              disabled={isFetching}
+              onClick={() => setOffset((o) => o + (films.length || 15))}
+              className="btn-primary ml-auto hidden shrink-0 whitespace-nowrap md:inline-flex"
+            >
+              Proposer d'autres films
+            </button>
           </div>
 
-          <p className="text-xs text-slate-400">
-            {searching
-              ? "Résultats disponibles avec vos abonnements. ♡ = à voir plus tard."
-              : `${audience === "enfants" ? "Dessins animés" : "Films d'action / fantastique"} dispo avec vos abonnements. 👁 = déjà vu (ne sera plus proposé).`}
-          </p>
-
-          {isError && (
+          {/* Ces avertissements portent sur les propositions : la recherche, elle,
+              fonctionne sans plateforme activée (tout ressort en VOD). */}
+          {isError && !searching && (
             <div className="card text-sm text-slate-400">Impossible de charger les films.</div>
           )}
           {data?.error === "no_key" && (
@@ -607,7 +833,7 @@ export default function Films() {
               Clé TMDB manquante : ajoute le secret <code>TMDB_API_KEY</code> côté serveur.
             </div>
           )}
-          {data?.error === "no_provider" && (
+          {data?.error === "no_provider" && !searching && (
             <div className="card text-sm text-amber-600">
               Aucune plateforme activée. Active-les dans les Réglages.
             </div>
@@ -617,11 +843,11 @@ export default function Films() {
               <div className="text-sm text-slate-400">Recherche…</div>
             ) : searchResults.length === 0 ? (
               <div className="card text-sm text-slate-400">
-                Aucun film « {debounced} » disponible sur vos plateformes.
+                Aucun film « {debounced} » trouvé.
               </div>
             ) : (
               <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
-                {searchResults.map(card)}
+                {searchResults.map((f) => card(f))}
               </div>
             )
           ) : isLoading ? (
@@ -629,9 +855,36 @@ export default function Films() {
           ) : films.length === 0 ? (
             <div className="card text-sm text-slate-400">Aucune proposition pour le moment.</div>
           ) : (
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">{films.map(card)}</div>
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">{films.map((f) => card(f))}</div>
+          )}
+
+          {/* Renouveler la sélection : l'action principale de l'onglet. */}
+          {!searching && (
+            <MobileActionBar
+              label="Proposer d'autres films"
+              icon={<IconSparkle size={20} />}
+              disabled={isFetching}
+              onClick={() => {
+                setOffset((o) => o + (films.length || 15));
+                window.scrollTo({ top: 0 });
+              }}
+            />
           )}
         </>
+      )}
+
+      {sheet && (
+        <ActionSheet
+          title={sheet.title}
+          subtitle={[providerLabel(sheet), filmMeta(sheet)].filter(Boolean).join(" · ")}
+          thumbnail={
+            sheet.imageUrl ? (
+              <img src={sheet.imageUrl} alt="" className="h-12 w-8 shrink-0 rounded-md object-cover" />
+            ) : undefined
+          }
+          items={sheetItems(sheet)}
+          onClose={() => setSheet(null)}
+        />
       )}
 
       {detailId && <FilmDetailsModal id={detailId} onClose={() => setDetailId(null)} />}

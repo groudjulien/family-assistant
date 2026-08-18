@@ -56,6 +56,7 @@ trips.get("/", async (c) => {
     rows.map((t) => ({
       id: t.id,
       name: t.name,
+      emoji: t.emoji ?? null,
       startDate: t.startDate,
       endDate: t.endDate,
       budget: t.budget,
@@ -145,6 +146,7 @@ trips.post("/", async (c) => {
     id,
     householdId,
     name: body.name,
+    emoji: body.emoji ?? null,
     startDate: body.startDate ?? null,
     endDate: body.endDate ?? null,
     budget: body.budget ?? null,
@@ -187,6 +189,7 @@ trips.patch("/:id", async (c) => {
     .update(trip)
     .set({
       ...(body.name !== undefined && { name: body.name }),
+      ...(body.emoji !== undefined && { emoji: body.emoji || null }),
       ...(body.startDate !== undefined && { startDate: body.startDate ?? null }),
       ...(body.endDate !== undefined && { endDate: body.endDate ?? null }),
       ...(body.budget !== undefined && { budget: body.budget ?? null }),

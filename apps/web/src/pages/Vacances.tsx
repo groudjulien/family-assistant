@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useRef, Fragment, type ReactNode } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useState, type ReactNode } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type {
   Trip,
@@ -18,15 +18,26 @@ import {
   PACKING_CATEGORY_META,
   comparePackingItems,
 } from "@gfa/shared";
-import { Select, Input, Checkbox, DateTimeInput, DateRangeCalendar, SubNav } from "../components/ui";
+import {
+  Select,
+  Input,
+  Checkbox,
+  DateTimeInput,
+  DateRangeCalendar,
+  SubNav,
+  MobileActionBar,
+  OverflowMenu,
+  FilterChips,
+  ActionSheet,
+} from "../components/ui";
 import { useToast } from "../components/Toast";
 import { MemberAvatar, PersonAvatar, PersonPicker, usePackingPersons } from "../components/MemberAvatar";
-import { Indicator } from "../components/Indicator";
 import { ExpenseFormModal, type ExpenseFormValues } from "../components/ExpenseForm";
 import { useExpenseCategories, categoryMeta } from "../lib/categories";
 import { useMe } from "../auth";
 import { dateFr, eur, eur0, eurToCents, todayIso } from "../lib/format";
 import { api, API_URL, ApiError } from "../lib/api";
+import { usePageHeader, usePageTabs, usePageChrome } from "../components/PageHeader";
 
 /* ---------------- Vacances / voyages ---------------- */
 
@@ -63,377 +74,161 @@ function transportWhen(start: string | null, end: string | null): string {
 }
 
 function itemIcon(it: TripItem): string {
-  if (it.type === "transport") return it.mode ? TRANSPORT_META[it.mode].icon : "🚗";
+  // Le mode vient d'une colonne texte : on ne suppose pas qu'il est connu.
+  if (it.type === "transport") return (it.mode && TRANSPORT_META[it.mode]?.icon) || "🚗";
   if (it.type === "lodging") return "🏠";
   return "🎯";
 }
 
 // Sous-onglets d'un voyage : valise (affaires à prendre), planning, dépenses.
-type TripSubTab = "valise" | "agenda" | "argent";
-
-// Types d'étape proposés par le bouton flottant (même ordre que dans la timeline).
+/** Types d'étape d'un planning, dans l'ordre où on les ajoute. */
 const ITEM_TYPES: { type: TripItemType; icon: string; label: string }[] = [
   { type: "transport", icon: "🚆", label: "Transport" },
   { type: "lodging", icon: "🏠", label: "Logement" },
   { type: "activity", icon: "🎯", label: "Activité" },
 ];
 
-// Option du menu du bouton flottant (mobile) : pastille arrondie au-dessus du « + ».
-function FabOption({
-  icon,
-  label,
-  hint,
-  disabled = false,
-  onClick,
-}: {
-  icon: string;
-  label: string;
-  hint?: string;
-  disabled?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={hint}
-      className="flex items-center gap-2 rounded-full border border-slate-200 bg-white py-2 pl-3 pr-4 text-sm font-medium text-slate-700 shadow-lg disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-    >
-      <span aria-hidden="true">{icon}</span>
-      <span className="flex flex-col items-start leading-tight">
-        {label}
-        {hint && <span className="text-[10px] font-normal text-slate-400">{hint}</span>}
-      </span>
-    </button>
-  );
+/** Onglets de premier niveau de la page (mobile et ordinateur). */
+const VACANCES_TABS = [
+  { value: "prevu", label: "Prévu" },
+  { value: "archive", label: "Archivé" },
+];
+
+/** Onglets d'un voyage ouvert (sous-page). */
+const TRIP_TABS = [
+  { value: "affaires", label: "Affaires" },
+  { value: "planning", label: "Planning" },
+  { value: "couts", label: "Coûts" },
+];
+type TripTab = "affaires" | "planning" | "couts";
+
+/** « 29 juin → 16 juil. » — la période, sans jour de semaine ni heure. */
+function tripPeriod(t: Trip): string {
+  const short = (iso: string) =>
+    new Date(iso).toLocaleDateString("fr-FR", { day: "numeric", month: "short" }).replace(".", "");
+  if (!t.startDate) return "";
+  return t.endDate ? `${short(t.startDate)} → ${short(t.endDate)}` : short(t.startDate);
+}
+
+/** « J-16 », « Jour 2 sur 18 », « Terminé » — où en est un voyage. */
+function tripCountdown(t: Trip): string | null {
+  if (!t.startDate) return null;
+  const day = (d: string) => Date.parse(`${d.slice(0, 10)}T00:00:00Z`);
+  const today = day(todayIso());
+  const start = day(t.startDate);
+  const end = day(t.endDate ?? t.startDate);
+  if (today < start) return `J-${Math.round((start - today) / 86_400_000)}`;
+  if (today > end) return "Terminé";
+  const total = Math.round((end - start) / 86_400_000) + 1;
+  return `Jour ${Math.round((today - start) / 86_400_000) + 1} sur ${total}`;
+}
+
+/** Nombre de nuits/jours d'un voyage, pour la ligne de résumé. */
+function tripLength(t: Trip): number | null {
+  if (!t.startDate) return null;
+  const day = (d: string) => Date.parse(`${d.slice(0, 10)}T00:00:00Z`);
+  return Math.round((day(t.endDate ?? t.startDate) - day(t.startDate)) / 86_400_000) + 1;
 }
 
 export default function Vacances() {
+  const navigate = useNavigate();
+  const { view, tripId, tab } = useParams();
+  const statut: "prevu" | "archive" = view === "archive" ? "archive" : "prevu";
+  const { data: trips } = useQuery({ queryKey: ["trips"], queryFn: () => api.get<Trip[]>("/api/trips") });
+  const trip = tripId ? (trips ?? []).find((t) => t.id === tripId) : undefined;
+  const tripTab: TripTab = (TRIP_TABS.some((t) => t.value === tab) ? tab : "affaires") as TripTab;
+
+  // Un voyage ouvert prend l'écran : ce sont ses onglets qui s'affichent, et la
+  // barre du haut porte un retour vers l'index (cf. `TripDetail`).
+  usePageTabs(
+    tripId ? tripTab : statut,
+    tripId ? TRIP_TABS : VACANCES_TABS,
+    (v) => navigate(tripId ? `/vacances/${statut}/${tripId}/${v}` : `/vacances/${v}`),
+  );
+
+  return (
+    <div className="flex flex-col gap-3 pb-28 md:pb-0">
+      <SubNav
+        value={tripId ? tripTab : statut}
+        onChange={(v) => navigate(tripId ? `/vacances/${statut}/${tripId}/${v}` : `/vacances/${v}`)}
+        items={tripId ? TRIP_TABS : VACANCES_TABS}
+        className="hidden md:block"
+      />
+      {tripId ? (
+        <TripDetail trip={trip} tab={tripTab} backTo={`/vacances/${statut}`} />
+      ) : (
+        <TripsIndex statut={statut} trips={trips} />
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Index : un voyage = une carte d'état ---------------- */
+
+function TripsIndex({ statut, trips }: { statut: "prevu" | "archive"; trips?: Trip[] }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const { view } = useParams();
-  const statut: "prevu" | "archive" = view === "archive" ? "archive" : "prevu";
-  const [openId, setOpenId] = useState<string | null>(null);
   const [modal, setModal] = useState<{ trip: Trip | null } | null>(null);
-  const [itemModal, setItemModal] = useState<{ type: TripItemType } | null>(null);
-  const [fabOpen, setFabOpen] = useState(false);
-  const autoOpenedFor = useRef<string | null>(null); // statut déjà auto-ouvert (une fois par vue)
-  const [searchParams] = useSearchParams();
-  const tripParam = searchParams.get("trip");
 
-  // Recherche (nom / budget global) + filtre de période (dates début-fin).
-  const [search, setSearch] = useState("");
-  const [fFrom, setFFrom] = useState("");
-  const [fTo, setFTo] = useState("");
-  const [filtersModalOpen, setFiltersModalOpen] = useState(false);
+  const list = (trips ?? []).filter((t) => (statut === "archive" ? t.archived : !t.archived));
+  // Le prochain départ décide du sur-titre : c'est l'information qu'on vient
+  // chercher en ouvrant la page.
+  const today = todayIso();
+  const dated = list.filter((t) => t.startDate).sort((a, b) => a.startDate!.localeCompare(b.startDate!));
+  const ongoing = dated.find(
+    (t) => t.startDate!.slice(0, 10) <= today && (t.endDate ?? t.startDate)!.slice(0, 10) >= today,
+  );
+  const next = dated.find((t) => t.startDate!.slice(0, 10) > today);
+  const days = next
+    ? Math.round(
+        (Date.parse(`${next.startDate!.slice(0, 10)}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) /
+          86_400_000,
+      )
+    : null;
+  usePageHeader(
+    "Vacances",
+    ongoing
+      ? `${ongoing.name} · en cours`
+      : days !== null
+        ? `${next!.name} dans ${days} jour${days > 1 ? "s" : ""}`
+        : statut === "archive"
+          ? `${list.length} voyage${list.length > 1 ? "s" : ""} archivé${list.length > 1 ? "s" : ""}`
+          : "0 voyage prévu",
+  );
 
-  // Sous-onglet par voyage (valise | agenda | argent), mémorisé entre les visites.
-  const [subTabs, setSubTabs] = useState<Record<string, TripSubTab>>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("trip-subtabs") || "{}");
-    } catch {
-      return {};
-    }
-  });
-  // Clic simple sur l'entête = ouvrir/fermer ; double clic = éditer le voyage.
-  const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const handleHeaderClick = (t: Trip) => {
-    if (clickTimer.current) {
-      clearTimeout(clickTimer.current);
-      clickTimer.current = null;
-      setModal({ trip: t });
-      return;
-    }
-    clickTimer.current = setTimeout(() => {
-      clickTimer.current = null;
-      setOpenId((cur) => (cur === t.id ? null : t.id));
-    }, 250);
-  };
-
-  const subTabOf = (id: string): TripSubTab => {
-    const v = subTabs[id];
-    return v === "valise" || v === "argent" ? v : "agenda";
-  };
-  const setSubTab = (id: string, v: TripSubTab) =>
-    setSubTabs((prev) => {
-      const next = { ...prev, [id]: v };
-      localStorage.setItem("trip-subtabs", JSON.stringify(next));
-      return next;
-    });
-
-  const { data: trips } = useQuery({ queryKey: ["trips"], queryFn: () => api.get<Trip[]>("/api/trips") });
-
-  // Ouverture auto : voyage ciblé via ?trip=, sinon l'unique voyage de la vue courante
-  // (prévu / archivé). On ne compte que les voyages de la vue → l'ajout d'archives
-  // ne casse plus l'ouverture auto. Une seule fois par vue.
-  useEffect(() => {
-    if (!trips) return;
-    // Priorité : voyage ciblé explicitement via ?trip= (au premier passage seulement).
-    if (autoOpenedFor.current === null && tripParam && trips.some((t) => t.id === tripParam)) {
-      setOpenId(tripParam);
-      autoOpenedFor.current = statut;
-      return;
-    }
-    if (autoOpenedFor.current === statut) return;
-    const inView = trips.filter((t) => (statut === "archive" ? t.archived : !t.archived));
-    if (inView.length === 1) setOpenId(inView[0].id);
-    autoOpenedFor.current = statut;
-  }, [trips, tripParam, statut]);
   const remove = useMutation({
     mutationFn: (id: string) => api.del(`/api/trips/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["trips"] }),
   });
 
-  const period = (t: Trip) =>
-    t.startDate ? `${fmtDT(t.startDate)}${t.endDate ? ` → ${fmtDT(t.endDate)}` : ""}` : "";
-
-  const byStatut = (trips ?? []).filter((t) => (statut === "archive" ? t.archived : !t.archived));
-
-  // Recherche : nom du voyage OU budget global (montant en euros).
-  const q = search.trim().toLowerCase();
-  const qDigits = q.replace(/[^\d]/g, "");
-  const matchesSearch = (t: Trip) => {
-    if (!q) return true;
-    if (t.name.toLowerCase().includes(q)) return true;
-    return qDigits !== "" && t.budget != null && String(Math.round(t.budget / 100)).includes(qDigits);
-  };
-  // Période : le voyage doit chevaucher la plage choisie (dates requises si filtre actif).
-  const matchesPeriod = (t: Trip) => {
-    if (!fFrom && !fTo) return true;
-    if (!t.startDate) return false;
-    const end = t.endDate ?? t.startDate;
-    if (fFrom && end < fFrom) return false;
-    if (fTo && t.startDate > fTo) return false;
-    return true;
-  };
-  const visibleTrips = byStatut.filter((t) => matchesSearch(t) && matchesPeriod(t));
-  const hasFilters = q !== "" || fFrom !== "" || fTo !== "";
-
-  // Voyage cible d'une étape créée depuis le bouton flottant :
-  // le voyage en cours, sinon l'unique voyage, sinon le prochain à venir.
-  const targetTrip = useMemo(() => {
-    const list = (trips ?? []).filter((t) => !t.archived);
-    const today = todayIso();
-    const dayOf = (d: string) => d.slice(0, 10);
-    const current = list.find(
-      (t) => t.startDate && dayOf(t.startDate) <= today && dayOf(t.endDate ?? t.startDate) >= today,
-    );
-    if (current) return current;
-    if (list.length === 1) return list[0];
-    return (
-      list
-        .filter((t) => t.startDate && dayOf(t.startDate) > today)
-        .sort((a, b) => a.startDate!.localeCompare(b.startDate!))[0] ?? null
-    );
-  }, [trips]);
-
   return (
-    <div className="space-y-4 pb-24 md:pb-0">
-      {/* Onglets de premier niveau Prévu / Archivé — une URL par vue. */}
-      <SubNav
-        value={statut}
-        onChange={(v) => navigate(`/vacances/${v}`)}
-        items={[
-          { value: "prevu", label: "Prévu", icon: "📅" },
-          { value: "archive", label: "Archivé", icon: "📦" },
-        ]}
-      />
-      {/* Actions : « Filtres » (modale) sur mobile, création de voyage sur ordinateur. */}
-      <div className="flex items-center justify-end gap-2">
-          {byStatut.length > 0 && (
-            <button
-              onClick={() => setFiltersModalOpen(true)}
-              className={`flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm sm:hidden ${
-                hasFilters
-                  ? "border-brand-500 text-brand-600 ring-1 ring-brand-500"
-                  : "border-slate-300 text-slate-500 dark:border-slate-700"
-              }`}
-              aria-label="Filtres"
-            >
-              <FunnelIcon />
-              Filtres
+    <>
+      {list.length === 0 ? (
+        <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+          <p>{statut === "archive" ? "Aucun voyage archivé." : "Aucun voyage prévu."}</p>
+          {statut === "prevu" && (
+            <button type="button" onClick={() => setModal({ trip: null })} className="btn-primary">
+              Créer le premier
             </button>
           )}
-          {/* Ordinateur : bouton en haut. Mobile : bouton flottant en bas à droite. */}
-        <button onClick={() => setModal({ trip: null })} className="btn-primary hidden md:inline-flex">
+        </div>
+      ) : (
+        list.map((t) => (
+          <TripStateCard
+            key={t.id}
+            trip={t}
+            onOpen={() => navigate(`/vacances/${statut}/${t.id}/affaires`)}
+            onEdit={() => setModal({ trip: t })}
+          />
+        ))
+      )}
+
+      <MobileActionBar label="Nouveau voyage" onClick={() => setModal({ trip: null })} />
+      <div className="hidden justify-end md:flex">
+        <button onClick={() => setModal({ trip: null })} className="btn-primary">
           + Créer un voyage
         </button>
       </div>
-
-      {/* Ordinateur : recherche + période inline */}
-      {byStatut.length > 0 && (
-        <div className="hidden gap-2 sm:flex sm:items-center">
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Rechercher (nom, budget…)"
-            className="input min-w-0 flex-1"
-          />
-          <DateRangeField
-            from={fFrom}
-            to={fTo}
-            onChange={(a, b) => {
-              setFFrom(a);
-              setFTo(b);
-            }}
-            className="sm:w-56"
-          />
-        </div>
-      )}
-
-      {/* Mobile : modale Filtres (recherche + période) */}
-      {filtersModalOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:hidden"
-          onClick={() => setFiltersModalOpen(false)}
-        >
-          <div className="card w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-lg font-bold">Filtres</h2>
-              <button onClick={() => setFiltersModalOpen(false)} className="text-slate-400 hover:text-slate-600">
-                ✕
-              </button>
-            </div>
-            <div className="flex flex-col gap-3">
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Rechercher (nom, budget…)"
-                className="input"
-              />
-              <div>
-                <label className="mb-1 block text-xs text-slate-400">Période</label>
-                <DateRangeField
-                  from={fFrom}
-                  to={fTo}
-                  onChange={(a, b) => {
-                    setFFrom(a);
-                    setFTo(b);
-                  }}
-                />
-              </div>
-            </div>
-            <div className="mt-4 flex items-center justify-between">
-              <button
-                onClick={() => {
-                  setSearch("");
-                  setFFrom("");
-                  setFTo("");
-                }}
-                className="btn-ghost text-sm"
-              >
-                Réinitialiser
-              </button>
-              <button onClick={() => setFiltersModalOpen(false)} className="btn-primary">
-                Voir les résultats
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {visibleTrips.length === 0 ? (
-        <div className="card text-sm text-slate-400">
-          {hasFilters
-            ? "Aucun voyage ne correspond à la recherche."
-            : statut === "archive"
-              ? "Aucun voyage archivé."
-              : "Aucun voyage. Crée ton premier voyage ✈️"}
-        </div>
-      ) : (
-        visibleTrips.map((t) => {
-          const open = openId === t.id;
-          const sub = subTabOf(t.id);
-          return (
-            <div key={t.id} className="card">
-              <div className="flex items-center gap-3">
-                <div
-                  onClick={() => handleHeaderClick(t)}
-                  title="Double-clic pour modifier"
-                  className="group/trip min-w-0 flex-1 cursor-pointer"
-                >
-                  <div className="flex items-center gap-1">
-                    <span className="truncate font-semibold">✈️ {t.name}</span>
-                    <button
-                      type="button"
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        setModal({ trip: t });
-                      }}
-                      title="Modifier"
-                      className="hidden shrink-0 text-slate-400 opacity-0 transition hover:text-brand-600 group-hover/trip:opacity-100 md:inline-block"
-                    >
-                      ✎
-                    </button>
-                  </div>
-                  {(period(t) || t.budget != null) && (
-                    <div className="text-xs text-slate-400">
-                      {period(t)}
-                      {period(t) && t.budget != null ? " · " : ""}
-                      {t.budget != null && `Budget ${eur0(t.budget)}`}
-                    </div>
-                  )}
-                </div>
-                {open && (
-                  <>
-                    <button
-                      onClick={() => setSubTab(t.id, "valise")}
-                      title="Affaires à prendre"
-                      aria-label="Affaires à prendre"
-                      className={sub === "valise" ? "text-brand-600" : "text-slate-400 hover:text-brand-600"}
-                    >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-                        <rect x="3" y="7" width="18" height="14" rx="2" />
-                        <path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
-                        <path d="M3 13h18" />
-                      </svg>
-                    </button>
-                    <button
-                      onClick={() => setSubTab(t.id, "agenda")}
-                      title="Planning"
-                      aria-label="Planning"
-                      className={sub === "agenda" ? "text-brand-600" : "text-slate-400 hover:text-brand-600"}
-                    >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-                        <rect x="3" y="4" width="18" height="18" rx="2" />
-                        <line x1="16" y1="2" x2="16" y2="6" />
-                        <line x1="8" y1="2" x2="8" y2="6" />
-                        <line x1="3" y1="10" x2="21" y2="10" />
-                      </svg>
-                    </button>
-                    <button
-                      onClick={() => setSubTab(t.id, "argent")}
-                      title="Dépenses"
-                      aria-label="Dépenses"
-                      className={sub === "argent" ? "text-brand-600" : "text-slate-400 hover:text-brand-600"}
-                    >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-                        <rect x="2" y="6" width="20" height="12" rx="2" />
-                        <circle cx="12" cy="12" r="2.5" />
-                        <path d="M6 12h.01M18 12h.01" />
-                      </svg>
-                    </button>
-                  </>
-                )}
-                <button onClick={() => setOpenId(open ? null : t.id)} className="text-slate-400">
-                  {open ? "▾" : "▸"}
-                </button>
-              </div>
-              {open &&
-                (sub === "argent" ? (
-                  <TripExpenses trip={t} />
-                ) : sub === "valise" ? (
-                  <TripPacking tripId={t.id} />
-                ) : (
-                  <TripTimeline tripId={t.id} />
-                ))}
-            </div>
-          );
-        })
-      )}
 
       {modal && (
         <TripModal
@@ -455,88 +250,157 @@ export default function Vacances() {
           }
         />
       )}
+    </>
+  );
+}
 
-      {/* Étape (transport / logement / activité) créée depuis le bouton flottant :
-          elle est rattachée au voyage cible, pas à une timeline ouverte. */}
-      {itemModal && targetTrip && (
-        <ItemModal
-          tripId={targetTrip.id}
-          type={itemModal.type}
-          item={null}
-          onClose={() => setItemModal(null)}
-          onSaved={() => {
-            setItemModal(null);
-            qc.invalidateQueries({ queryKey: ["trip-items", targetTrip.id] });
-            // On montre le résultat : voyage déplié sur son planning (et vue « Prévu »).
-            if (statut === "archive") navigate("/vacances/prevu");
-            setSubTab(targetTrip.id, "agenda");
-            setOpenId(targetTrip.id);
-          }}
-        />
-      )}
+/**
+ * Carte d'état d'un voyage : où il en est (préparatifs, budget, prochaine
+ * étape) et une seule porte d'entrée — « Ouvrir ». Les compteurs sont
+ * l'intérêt de la carte : sans eux elle ne dirait que ce que dit son titre.
+ */
+function TripStateCard({
+  trip: t,
+  onOpen,
+  onEdit,
+}: {
+  trip: Trip;
+  onOpen: () => void;
+  onEdit: () => void;
+}) {
+  const { data: packing } = useQuery({
+    queryKey: ["trip-packing", t.id],
+    queryFn: () => api.get<TripPackingItem[]>(`/api/trips/${t.id}/packing`),
+  });
+  const { data: expenses } = useQuery({
+    queryKey: ["trip-expenses", t.id],
+    queryFn: () => api.get<TripExpense[]>(`/api/trips/${t.id}/expenses`),
+  });
+  const { data: items } = useQuery({
+    queryKey: ["trip-items", t.id],
+    queryFn: () => api.get<TripItem[]>(`/api/trips/${t.id}/items`),
+  });
 
-      {/* Bouton flottant de création (mobile uniquement) : déplie les types à créer. */}
-      {fabOpen && <div className="fixed inset-0 z-20 md:hidden" onClick={() => setFabOpen(false)} />}
-      <div className="fixed bottom-6 right-6 z-30 flex flex-col items-end gap-2 md:hidden">
-        {fabOpen && (
-          <>
-            <FabOption
-              icon="✈️"
-              label="Voyage"
-              onClick={() => {
-                setFabOpen(false);
-                setModal({ trip: null });
-              }}
-            />
-            {ITEM_TYPES.map((o) => (
-              <FabOption
-                key={o.type}
-                icon={o.icon}
-                label={o.label}
-                hint={targetTrip ? `Dans « ${targetTrip.name} »` : "Aucun voyage en cours ou à venir"}
-                disabled={!targetTrip}
-                onClick={() => {
-                  setFabOpen(false);
-                  setItemModal({ type: o.type });
-                }}
-              />
-            ))}
-          </>
-        )}
-        <button
-          type="button"
-          onClick={() => setFabOpen((o) => !o)}
-          aria-expanded={fabOpen}
-          aria-label={fabOpen ? "Fermer" : "Créer"}
-          className="btn-primary flex h-14 w-14 items-center justify-center rounded-full p-0 shadow-lg"
+  const packed = (packing ?? []).filter((i) => i.checked).length;
+  const nPacking = (packing ?? []).length;
+  const spent = (expenses ?? []).reduce((s, e) => s + e.amount, 0);
+  const countdown = tripCountdown(t);
+  const length = tripLength(t);
+  // Première étape à venir : ce qu'on a besoin de savoir avant de partir.
+  const nextItem = (items ?? [])
+    .filter((i) => i.startAt)
+    .sort((a, b) => a.startAt!.localeCompare(b.startAt!))[0];
+  const nothingYet = nPacking === 0 && (items ?? []).length === 0 && (expenses ?? []).length === 0;
+
+  const bar = (done: number, total: number, color: string) => (
+    <span className="mt-1.5 block h-1.5 overflow-hidden rounded-full bg-surface-2">
+      <span
+        className={`block h-full rounded-full ${color}`}
+        style={{ width: `${total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0}%` }}
+      />
+    </span>
+  );
+
+  return (
+    <div className="card">
+      <div className="flex items-start gap-3">
+        <span
+          aria-hidden="true"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-xl leading-none"
         >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            className={`h-6 w-6 transition-transform ${fabOpen ? "rotate-45" : ""}`}
-            aria-hidden="true"
-          >
-            <path d="M12 5v14M5 12h14" />
-          </svg>
+          {t.emoji || "\u2708\ufe0f"}
+        </span>
+        <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="text-xl font-bold">{t.name}</span>
+            {countdown && (
+              <span className="rounded-full bg-surface-2 px-2 py-0.5 text-2xs font-semibold text-ink-2">
+                {countdown}
+              </span>
+            )}
+          </span>
+          <span className="mt-0.5 block text-sm text-slate-400">
+            {[tripPeriod(t), length ? `${length} jours` : null].filter(Boolean).join(" · ")}
+          </span>
         </button>
+        <OverflowMenu
+          label={`Actions sur ${t.name}`}
+          items={[{ label: "Modifier le voyage", onClick: onEdit }]}
+        />
       </div>
+
+      {nothingYet ? (
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-hairline pt-3">
+          <span className="text-sm text-slate-400">Rien de préparé pour l'instant</span>
+          <button type="button" onClick={onOpen} className="btn shrink-0">
+            Commencer
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="mt-3 border-t border-hairline pt-3">
+            {nPacking > 0 && (
+              <div className="mb-3">
+                <div className="flex items-baseline justify-between gap-2 text-sm">
+                  <span>Affaires à prendre</span>
+                  <span className="font-semibold tabular-nums">
+                    {packed} / {nPacking}
+                  </span>
+                </div>
+                {bar(packed, nPacking, "bg-brand-600")}
+              </div>
+            )}
+            {t.budget != null && t.budget > 0 && (
+              <div>
+                <div className="flex items-baseline justify-between gap-2 text-sm">
+                  <span>Budget</span>
+                  <span className="font-semibold tabular-nums">
+                    {eur0(spent)} / {eur0(t.budget)}
+                  </span>
+                </div>
+                {bar(spent, t.budget, spent > t.budget ? "bg-danger" : "bg-info")}
+              </div>
+            )}
+          </div>
+
+          {nextItem && (
+            <div className="mt-3 flex items-center gap-3 rounded-xl bg-surface-2 p-3">
+              <span aria-hidden="true" className="text-xl leading-none">
+                {itemIcon(nextItem)}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-semibold">{nextItem.title}</span>
+                <span className="block truncate text-xs text-slate-400">
+                  première étape · {fmtDT(nextItem.startAt)}
+                </span>
+              </span>
+            </div>
+          )}
+
+          <button type="button" onClick={onOpen} className="btn-primary mt-3 w-full">
+            Ouvrir
+          </button>
+        </>
+      )}
     </div>
   );
 }
 
 /* ---------------- Affaires à prendre (onglet valise) ---------------- */
 
+/**
+ * Affaires à prendre. Une todo groupée par catégorie, filtrable par personne :
+ * ce qu'on regarde en faisant les valises, c'est « qu'est-ce qu'il reste pour
+ * Gaël », pas la liste entière.
+ */
 function TripPacking({ tripId }: { tripId: string }) {
   const qc = useQueryClient();
   const me = useMe();
-  const [label, setLabel] = useState("");
-  const [category, setCategory] = useState<PackingCategory>("vetements");
+  const [adding, setAdding] = useState(false);
   const [person, setPerson] = useState<PackingPerson>("famille");
   const packingPersons = usePackingPersons();
   const personIds = packingPersons.map((p) => p.id);
+
   const { data: items } = useQuery({
     queryKey: ["trip-packing", tripId],
     queryFn: () => api.get<TripPackingItem[]>(`/api/trips/${tripId}/packing`),
@@ -544,10 +408,10 @@ function TripPacking({ tripId }: { tripId: string }) {
   const invalidate = () => qc.invalidateQueries({ queryKey: ["trip-packing", tripId] });
 
   const add = useMutation({
-    mutationFn: (v: string) =>
-      api.post(`/api/trips/${tripId}/packing`, { label: v, category, person }),
+    mutationFn: (v: { label: string; category: PackingCategory; person: PackingPerson }) =>
+      api.post(`/api/trips/${tripId}/packing`, v),
     onSuccess: () => {
-      setLabel("");
+      setAdding(false);
       invalidate();
     },
   });
@@ -556,9 +420,9 @@ function TripPacking({ tripId }: { tripId: string }) {
       api.patch(`/api/trips/packing/${it.id}`, { checked: !it.checked }),
     onSuccess: invalidate,
   });
-  const setPerson_ = useMutation({
-    mutationFn: ({ id, person }: { id: string; person: PackingPerson }) =>
-      api.patch(`/api/trips/packing/${id}`, { person }),
+  const setPersonOf = useMutation({
+    mutationFn: (v: { id: string; person: PackingPerson }) =>
+      api.patch(`/api/trips/packing/${v.id}`, { person: v.person }),
     onSuccess: invalidate,
   });
   const remove = useMutation({
@@ -573,101 +437,199 @@ function TripPacking({ tripId }: { tripId: string }) {
   const list = items ?? [];
   const done = list.filter((i) => i.checked).length;
   const hasDefault = (me.defaultPacking ?? []).length > 0;
-  // Tri catégorie → personne → ordre d'ajout, puis regroupement par catégorie.
+  // Le filtre garde ce qui concerne la personne **et** ce qui concerne tout le
+  // monde : une brosse à dents « Famille » est aussi l'affaire de Gaël.
+  const shown = list.filter(
+    (i) => person === "famille" || i.person === person || i.person === "famille",
+  );
   const groups = PACKING_CATEGORIES.map((cat) => ({
     cat,
-    items: list.filter((i) => i.category === cat).sort((a, b) => comparePackingItems(a, b, personIds)),
+    items: shown
+      .filter((i) => i.category === cat)
+      .sort((a, b) => comparePackingItems(a, b, personIds)),
   })).filter((g) => g.items.length > 0);
 
+  const labelOf = (id: string) => packingPersons.find((p) => p.id === id)?.label ?? id;
+
+  if (list.length === 0) {
+    return (
+      <>
+        <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+          <p>Rien à prendre pour l'instant.</p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => setAdding(true)} className="btn-primary">
+              Ajouter la première
+            </button>
+            {hasDefault && (
+              <button
+                type="button"
+                onClick={() => fromDefault.mutate()}
+                disabled={fromDefault.isPending}
+                className="btn"
+              >
+                Partir de ma liste par défaut
+              </button>
+            )}
+          </div>
+        </div>
+        {adding && (
+          <PackingAddModal
+            persons={packingPersons}
+            onClose={() => setAdding(false)}
+            onSubmit={(v) => add.mutate(v)}
+          />
+        )}
+      </>
+    );
+  }
+
   return (
-    <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <div className="text-sm font-semibold">🧳 Affaires à prendre</div>
-        {list.length > 0 && (
-          <span className="text-xs text-slate-400">
-            {done}/{list.length}
+    <>
+      {/* Où en sont les valises : un chiffre, ce qu'il reste, une jauge. */}
+      <div className="card">
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-base font-semibold">
+            {done} affaire{done > 1 ? "s" : ""} sur {list.length} préparée
+            {done > 1 ? "s" : ""}
           </span>
-        )}
-        {hasDefault && (
-          <button
-            onClick={() => fromDefault.mutate()}
-            disabled={fromDefault.isPending}
-            title="Ajouter les affaires de la liste par défaut (Réglages → Activités)"
-            className="ml-auto text-xs text-slate-400 transition hover:text-brand-600 disabled:opacity-50"
-          >
-            + Liste par défaut
-          </button>
-        )}
+          <span className="shrink-0 text-sm text-slate-400">reste {list.length - done}</span>
+        </div>
+        <span className="mt-2 block h-1.5 overflow-hidden rounded-full bg-surface-2">
+          <span
+            className="block h-full rounded-full bg-brand-600"
+            style={{ width: `${Math.round((done / list.length) * 100)}%` }}
+          />
+        </span>
       </div>
 
-      {list.length === 0 ? (
-        <div className="text-sm text-slate-400">
-          Rien à prendre pour l'instant.
-          {hasDefault
-            ? " Ajoute une affaire, ou pars de ta liste par défaut."
-            : " Tu peux définir une liste par défaut dans Réglages → Activités."}
+      <FilterChips
+        value={person}
+        onChange={setPerson}
+        items={packingPersons.map((p) => ({
+          value: p.id,
+          label: p.id === "famille" ? "Tout" : p.label,
+          icon: p.id === "famille" ? undefined : <PersonAvatar id={p.id} className="h-5 w-5 text-2xs" />,
+        }))}
+      />
+
+      {groups.length === 0 ? (
+        <div className="card text-sm text-slate-400">
+          Rien à préparer pour {labelOf(person)}.
         </div>
       ) : (
-        // Une catégorie par colonne : 3 colonnes sur grand écran, 2 en tablette, 1 sur mobile.
-        <div className="grid gap-x-6 gap-y-5 md:grid-cols-2 md:gap-y-7 lg:grid-cols-3">
-          {groups.map((g) => (
-            <div key={g.cat}>
-              <div className="mb-1.5 flex items-center gap-1.5 text-base font-semibold text-slate-600 dark:text-slate-300">
-                <span aria-hidden="true">{PACKING_CATEGORY_META[g.cat].icon}</span>
-                {PACKING_CATEGORY_META[g.cat].label}
-                <span className="text-xs font-normal text-slate-400">
-                  {g.items.filter((i) => i.checked).length}/{g.items.length}
-                </span>
-              </div>
-              <ul className="space-y-1">
-                {g.items.map((it) => (
-                  <li key={it.id} className="group flex items-center gap-2">
-                    <Checkbox checked={it.checked} onChange={() => toggle.mutate(it)} />
-                    <PersonPicker
-                      value={it.person}
-                      onChange={(person) => setPerson_.mutate({ id: it.id, person })}
-                      className={`h-5 w-5 text-[10px] ${it.checked ? "opacity-50" : ""}`}
-                    />
-                    <span
-                      className={`min-w-0 flex-1 truncate text-sm ${
-                        it.checked ? "text-slate-400 line-through" : ""
-                      }`}
-                    >
-                      {it.label}
-                    </span>
-                    <button
-                      onClick={() => remove.mutate(it.id)}
-                      title="Retirer"
-                      aria-label={`Retirer ${it.label}`}
-                      className="shrink-0 px-1 text-slate-300 transition hover:text-red-500 md:opacity-0 md:group-hover:opacity-100"
-                    >
-                      ✕
-                    </button>
-                  </li>
-                ))}
-              </ul>
+        groups.map((g) => (
+          <div key={g.cat} className="flex flex-col gap-2">
+            <div className="flex items-baseline gap-2">
+              <span className="eyebrow">{PACKING_CATEGORY_META[g.cat].label}</span>
+              <span className="text-xs text-slate-400">
+                {g.items.filter((i) => i.checked).length}/{g.items.length}
+              </span>
             </div>
-          ))}
-        </div>
+            <div className="card">
+              {g.items.map((it, i) => (
+                <div
+                  key={it.id}
+                  className={`flex min-h-[52px] items-center gap-3 ${
+                    i === g.items.length - 1 ? "" : "border-b border-hairline"
+                  }`}
+                >
+                  <Checkbox size="lg" checked={it.checked} onChange={() => toggle.mutate(it)} />
+                  <button
+                    type="button"
+                    onClick={() => toggle.mutate(it)}
+                    className={`min-w-0 flex-1 py-2 text-left text-base ${
+                      it.checked ? "text-slate-400 line-through" : ""
+                    }`}
+                  >
+                    {it.label}
+                  </button>
+                  {/* La pastille dit pour qui, et permet d'en changer. */}
+                  <PersonPicker
+                    value={it.person}
+                    onChange={(p) => setPersonOf.mutate({ id: it.id, person: p })}
+                    showName
+                    className={`h-5 w-5 text-2xs ${it.checked ? "opacity-50" : ""}`}
+                  />
+                  <OverflowMenu
+                    label={`Actions sur ${it.label}`}
+                    items={[
+                      { label: "Retirer de la liste", danger: true, onClick: () => remove.mutate(it.id) },
+                    ]}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        ))
       )}
 
+      {hasDefault && (
+        <button
+          type="button"
+          onClick={() => fromDefault.mutate()}
+          disabled={fromDefault.isPending}
+          className="px-1 text-left text-xs text-slate-400 underline"
+        >
+          Ajouter les affaires de ma liste par défaut
+        </button>
+      )}
+
+      <MobileActionBar label="Ajouter une affaire" onClick={() => setAdding(true)} />
+      <div className="hidden justify-end md:flex">
+        <button type="button" onClick={() => setAdding(true)} className="btn-primary">
+          + Ajouter une affaire
+        </button>
+      </div>
+
+      {adding && (
+        <PackingAddModal
+          persons={packingPersons}
+          onClose={() => setAdding(false)}
+          onSubmit={(v) => add.mutate(v)}
+        />
+      )}
+    </>
+  );
+}
+
+/** Ajout d'une affaire : le libellé, sa catégorie, pour qui. */
+function PackingAddModal({
+  persons,
+  onClose,
+  onSubmit,
+}: {
+  persons: { id: string; label: string }[];
+  onClose: () => void;
+  onSubmit: (v: { label: string; category: PackingCategory; person: PackingPerson }) => void;
+}) {
+  const [label, setLabel] = useState("");
+  const [category, setCategory] = useState<PackingCategory>("vetements");
+  const [person, setPerson] = useState<PackingPerson>("famille");
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center"
+      onClick={onClose}
+    >
       <form
+        onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => {
           e.preventDefault();
-          if (label.trim()) add.mutate(label.trim());
+          const v = label.trim();
+          if (!v) return;
+          onSubmit({ label: v, category, person });
         }}
-        className="mt-3 flex flex-wrap items-center gap-2"
+        className="card w-full max-w-sm space-y-3"
       >
+        <div className="font-semibold">Ajouter une affaire</div>
         <Input
-          placeholder="Ajouter une affaire…"
+          autoFocus
           value={label}
           onChange={(e) => setLabel(e.target.value)}
-          className="min-w-[10rem] flex-1"
+          placeholder="Crème solaire, chargeur…"
         />
         <Select
           value={category}
           onChange={(v) => setCategory(v as PackingCategory)}
-          className="w-[10.5rem]"
           options={PACKING_CATEGORIES.map((cat) => ({
             value: cat,
             label: `${PACKING_CATEGORY_META[cat].icon} ${PACKING_CATEGORY_META[cat].label}`,
@@ -676,159 +638,26 @@ function TripPacking({ tripId }: { tripId: string }) {
         <Select
           value={person}
           onChange={(v) => setPerson(v as PackingPerson)}
-          className="w-[8.5rem]"
-          options={packingPersons.map((p) => ({
+          options={persons.map((p) => ({
             value: p.id,
             label: p.label,
-            icon: <PersonAvatar id={p.id} className="h-5 w-5 text-[10px]" />,
+            icon: <PersonAvatar id={p.id} className="h-5 w-5 text-2xs" />,
           }))}
         />
-        <button className="btn-primary shrink-0" disabled={add.isPending || !label.trim()}>
-          Ajouter
-        </button>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="btn-ghost">
+            Annuler
+          </button>
+          <button type="submit" className="btn-primary" disabled={!label.trim()}>
+            Ajouter
+          </button>
+        </div>
       </form>
     </div>
   );
 }
 
 // Ligne de dépense : crayon (ordinateur) + double-clic (mobile) pour éditer.
-function TripExpenseRow({
-  e,
-  onEdit,
-  onRemove,
-}: {
-  e: TripExpense;
-  onEdit: () => void;
-  onRemove: () => void;
-}) {
-  const cats = useExpenseCategories();
-  const cm = categoryMeta(cats, e.category);
-  const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const onClick = () => {
-    if (clickTimer.current) {
-      clearTimeout(clickTimer.current);
-      clickTimer.current = null;
-      onEdit(); // double-clic
-      return;
-    }
-    clickTimer.current = setTimeout(() => {
-      clickTimer.current = null;
-    }, 250);
-  };
-  return (
-    <div
-      onClick={onClick}
-      className="group/exp flex cursor-pointer items-center gap-2 rounded-lg bg-[color:var(--paper)] px-2 py-1.5 text-sm dark:bg-slate-800"
-    >
-      <MemberAvatar id={e.paidBy} className="h-6 w-6 text-xs" />
-      {cm && (
-        <span title={cm.name} aria-hidden="true">
-          {cm.icon}
-        </span>
-      )}
-      <span className="flex min-w-0 flex-1 items-center gap-1">
-        <span className="truncate">{e.label}</span>
-        <button
-          type="button"
-          onClick={(ev) => {
-            ev.stopPropagation();
-            onEdit();
-          }}
-          title="Modifier"
-          className="hidden shrink-0 text-slate-400 opacity-0 transition hover:text-brand-600 group-hover/exp:opacity-100 md:inline-block"
-        >
-          ✎
-        </button>
-      </span>
-      <span className="shrink-0 font-medium tabular-nums">{eur(Math.abs(e.amount))}</span>
-      <button
-        type="button"
-        onClick={(ev) => {
-          ev.stopPropagation();
-          onRemove();
-        }}
-        title="Supprimer"
-        className="shrink-0 text-slate-300 opacity-100 transition hover:text-red-500 md:opacity-0 md:group-hover/exp:opacity-100"
-      >
-        ✕
-      </button>
-    </div>
-  );
-}
-
-// Icône entonnoir (bouton « Filtres » mobile).
-function FunnelIcon({ className = "h-4 w-4" }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
-      <path d="M3 4h18l-7 8v6l-4 2v-8L3 4z" />
-    </svg>
-  );
-}
-
-// Icône calendrier (déclencheur du filtre de dates).
-function CalendarIcon({ className = "h-4 w-4" }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
-      <rect x="3" y="4" width="18" height="18" rx="2" />
-      <path d="M16 2v4M8 2v4M3 10h18" />
-    </svg>
-  );
-}
-
-// Champ « plage de dates » : bouton qui ouvre un popover avec un calendrier de
-// sélection début → fin (react-day-picker via DateRangeCalendar).
-function DateRangeField({
-  from,
-  to,
-  onChange,
-  className = "",
-}: {
-  from: string;
-  to: string;
-  onChange: (from: string, to: string) => void;
-  className?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const label =
-    from && to
-      ? `${dateFr(from)} → ${dateFr(to)}`
-      : from
-        ? `Depuis ${dateFr(from)}`
-        : to
-          ? `Jusqu'au ${dateFr(to)}`
-          : "Dates";
-  return (
-    <div className={`relative ${className}`}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-left text-sm text-slate-900 outline-none transition hover:border-brand-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-      >
-        <span className={`truncate ${from || to ? "" : "text-slate-400"}`}>{label}</span>
-        <CalendarIcon className="h-4 w-4 shrink-0 text-slate-400" />
-      </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-[60]" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-[70] mt-1 w-[min(92vw,320px)] rounded-xl border border-slate-200 bg-white p-3 shadow-xl dark:border-slate-700 dark:bg-slate-900">
-            <div className="flex justify-center">
-              <DateRangeCalendar months={1} bare start={from} end={to} onChange={onChange} />
-            </div>
-            <div className="mt-2 flex justify-between">
-              <button type="button" onClick={() => onChange("", "")} className="btn-ghost text-xs">
-                Effacer
-              </button>
-              <button type="button" onClick={() => setOpen(false)} className="btn-primary text-sm">
-                Appliquer
-              </button>
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
 // Sous-onglet « Argent » d'un voyage : dépenses sur place, par jour, + totaux.
 function TripExpenses({ trip }: { trip: Trip }) {
   const qc = useQueryClient();
@@ -836,23 +665,6 @@ function TripExpenses({ trip }: { trip: Trip }) {
   const members = me.household.members;
   const cats = useExpenseCategories();
   const [modal, setModal] = useState<{ item: TripExpense | null } | null>(null);
-
-  // Filtres (personne / catégorie / montant / plage de dates). Repliés sur mobile.
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [fPerson, setFPerson] = useState("");
-  const [fCategory, setFCategory] = useState("");
-  const [fMin, setFMin] = useState("");
-  const [fMax, setFMax] = useState("");
-  const [fFrom, setFFrom] = useState("");
-  const [fTo, setFTo] = useState("");
-  const resetFilters = () => {
-    setFPerson("");
-    setFCategory("");
-    setFMin("");
-    setFMax("");
-    setFFrom("");
-    setFTo("");
-  };
 
   const { data } = useQuery({
     queryKey: ["trip-expenses", trip.id],
@@ -883,27 +695,7 @@ function TripExpenses({ trip }: { trip: Trip }) {
   const expenses = data ?? [];
   const sum = (rows: TripExpense[]) => rows.reduce((s, e) => s + Math.abs(e.amount), 0);
 
-  // Application des filtres. La liste et la répartition (par personne / catégorie,
-  // avec %) portent sur le jeu FILTRÉ ; les KPIs de budget sur le jeu COMPLET.
-  const min = fMin.trim() ? Math.round(parseFloat(fMin) * 100) : null;
-  const max = fMax.trim() ? Math.round(parseFloat(fMax) * 100) : null;
-  const filtered = expenses.filter((e) => {
-    if (fPerson && e.paidBy !== fPerson) return false;
-    if (fCategory && (e.category ?? "divers") !== fCategory) return false;
-    const abs = Math.abs(e.amount);
-    if (min != null && !isNaN(min) && abs < min) return false;
-    if (max != null && !isNaN(max) && abs > max) return false;
-    if (fFrom && e.date < fFrom) return false;
-    if (fTo && e.date > fTo) return false;
-    return true;
-  });
-  const hasFilters =
-    fPerson !== "" ||
-    fCategory !== "" ||
-    fMin.trim() !== "" ||
-    fMax.trim() !== "" ||
-    fFrom !== "" ||
-    fTo !== "";
+  const filtered = expenses;
 
   const byDate = new Map<string, TripExpense[]>();
   for (const e of filtered) {
@@ -916,16 +708,6 @@ function TripExpenses({ trip }: { trip: Trip }) {
   const total = totalA + totalB;
   const fullTotal = sum(expenses);
   const pct = (amt: number) => (total > 0 ? Math.round((amt / total) * 100) : 0);
-
-  // Totaux par catégorie (sans catégorie = divers), triés par montant décroissant.
-  const byCategory = new Map<string, number>();
-  for (const e of filtered) {
-    const key = e.category ?? "divers";
-    byCategory.set(key, (byCategory.get(key) ?? 0) + Math.abs(e.amount));
-  }
-  const categoryRows = [...byCategory.entries()]
-    .filter(([, amt]) => amt > 0)
-    .sort((a, b) => b[1] - a[1]);
 
   // Budget : restant + par jour sur le reste du voyage (sur le total complet).
   const budget = trip.budget;
@@ -949,208 +731,179 @@ function TripExpenses({ trip }: { trip: Trip }) {
     : new Set(expenses.map((e) => e.date)).size;
   const avgPerDay = daysElapsed > 0 ? Math.round(fullTotal / daysElapsed) : null;
 
+  // Catégorie d'une dépense, avec un repli lisible quand elle n'en a pas.
+  const catMeta = (key: string | null) =>
+    categoryMeta(cats, key) ?? { name: "Divers", icon: "🏷️" };
+
   return (
-    <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div className="text-sm font-semibold">Dépenses sur place</div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setModal({ item: null })} className="btn-primary text-xs">
-            + Dépense
-          </button>
-        </div>
-      </div>
-
-      <div className="mb-3 grid grid-cols-2 gap-2">
-        <Indicator label="Total dépensé" value={fullTotal} money />
-        <Indicator
-          label="Dépensé / jour"
-          value={avgPerDay != null ? avgPerDay : "—"}
-          money={avgPerDay != null}
-        />
-        <Indicator
-          label="Restant"
-          value={remaining != null ? remaining : "—"}
-          money={remaining != null}
-          tone={remaining == null ? "default" : remaining < 0 ? "red" : "green"}
-        />
-        <Indicator
-          label={perDay != null ? `Restant / jour (${remainingDays} j)` : "Restant / jour"}
-          value={perDay != null ? perDay : "—"}
-          money={perDay != null}
-          tone={perDay != null && perDay < 0 ? "red" : "default"}
-        />
-      </div>
-      {budget == null && (
-        <p className="mb-3 text-xs text-slate-400">
-          Définis un budget dans l'édition du voyage (✎) pour suivre le restant.
-        </p>
-      )}
-
-      {/* Filtres : inline sur ordinateur, repliés derrière un bouton sur mobile */}
-      {expenses.length > 0 && (
-        <div className="mb-3 flex flex-col gap-2">
-          <button
-            onClick={() => setFiltersOpen((o) => !o)}
-            className={`flex w-max items-center gap-1.5 rounded-xl border px-3 py-2 text-sm md:hidden ${
-              hasFilters
-                ? "border-brand-500 text-brand-600 ring-1 ring-brand-500"
-                : "border-slate-300 text-slate-500 dark:border-slate-700"
-            }`}
-            aria-label="Filtres"
-          >
-            <FunnelIcon />
-            Filtres{hasFilters ? ` (${filtered.length})` : ""}
-          </button>
-
+    <>
+      {/* Le chiffre qui décide : ce qu'il reste. Le reste du bloc l'explique. */}
+      {budget != null && budget > 0 ? (
+        <div className="card">
+          <div className="text-sm text-ink-2">Restant sur {eur0(budget)}</div>
           <div
-            className={`${filtersOpen ? "grid" : "hidden"} grid-cols-2 gap-2 sm:grid-cols-3 md:flex md:flex-nowrap md:items-center`}
+            className={`mt-1 text-3xl font-bold tabular-nums ${
+              (remaining ?? 0) < 0 ? "text-danger" : ""
+            }`}
           >
-            <Select
-              value={fPerson}
-              onChange={setFPerson}
-              className="md:w-40"
-              options={[
-                { value: "", label: "Toutes personnes" },
-                { value: "a", label: members.a.name, icon: <MemberAvatar id="a" className="h-5 w-5 text-[10px]" /> },
-                { value: "b", label: members.b.name, icon: <MemberAvatar id="b" className="h-5 w-5 text-[10px]" /> },
-              ]}
-            />
-            <Select
-              value={fCategory}
-              onChange={setFCategory}
-              className="md:w-48"
-              options={[
-                { value: "", label: "Toutes catégories" },
-                ...cats
-                  .filter((c) => !c.hidden)
-                  .map((c) => ({ value: c.key, label: `${c.icon} ${c.name}` })),
-                { value: "divers", label: "Sans catégorie" },
-              ]}
-            />
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={fMin}
-              onChange={(e) => setFMin(e.target.value)}
-              placeholder="Min €"
-              className="input tabular-nums md:w-24"
-            />
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={fMax}
-              onChange={(e) => setFMax(e.target.value)}
-              placeholder="Max €"
-              className="input tabular-nums md:w-24"
-            />
-            <DateRangeField
-              from={fFrom}
-              to={fTo}
-              onChange={(a, b) => {
-                setFFrom(a);
-                setFTo(b);
-              }}
-              className="col-span-2 sm:col-span-1 md:w-56"
-            />
+            {eur0(remaining ?? 0)}
           </div>
-
-          {hasFilters && (
-            <button onClick={resetFilters} className="btn-ghost w-max text-xs">
-              Réinitialiser
-            </button>
-          )}
+          <span className="mt-3 block h-1.5 overflow-hidden rounded-full bg-surface-2">
+            <span
+              className={`block h-full rounded-full ${fullTotal > budget ? "bg-danger" : "bg-brand-600"}`}
+              style={{ width: `${Math.min(100, Math.round((fullTotal / budget) * 100))}%` }}
+            />
+          </span>
+          <div className="mt-3 grid grid-cols-3 gap-2 border-t border-hairline pt-3 text-sm">
+            <div>
+              <div className="text-xs text-slate-400">Dépensé</div>
+              <div className="mt-0.5 font-semibold tabular-nums">{eur0(fullTotal)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400">Par jour</div>
+              <div className="mt-0.5 font-semibold tabular-nums">
+                {avgPerDay != null ? eur0(avgPerDay) : "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400">Reste / jour</div>
+              <div
+                className={`mt-0.5 font-semibold tabular-nums ${
+                  perDay != null && perDay >= 0 ? "text-brand-600" : "text-danger"
+                }`}
+              >
+                {perDay != null ? eur0(perDay) : "—"}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="card">
+          <div className="text-sm text-ink-2">Dépensé</div>
+          <div className="mt-1 text-3xl font-bold tabular-nums">{eur0(fullTotal)}</div>
+          <p className="mt-2 text-xs text-slate-400">
+            Aucun budget défini pour ce voyage — ajoute-le dans « Modifier le voyage » pour suivre
+            ce qu'il reste.
+          </p>
         </div>
       )}
 
       {expenses.length === 0 ? (
-        <div className="text-sm text-slate-400">Aucune dépense pour l'instant.</div>
-      ) : filtered.length === 0 ? (
-        <div className="text-sm text-slate-400">Aucune dépense ne correspond aux filtres.</div>
+        <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+          <p>Aucune dépense enregistrée.</p>
+          <button type="button" onClick={() => setModal({ item: null })} className="btn-primary">
+            Ajouter la première
+          </button>
+        </div>
       ) : (
-        <div className="space-y-4">
+        <>
+          {/* Une section par jour, du plus récent au plus ancien. */}
           {days.map((d) => {
-            const items = byDate.get(d)!;
+            const rows = byDate.get(d)!;
             return (
-              <div key={d}>
-                <div className="mb-1 flex items-baseline justify-between gap-2">
-                  <span className="text-sm font-semibold capitalize text-slate-500">{dateFr(d)}</span>
-                  <span className="text-lg font-bold tabular-nums">{eur(sum(items))}</span>
+              <div key={d} className="flex flex-col gap-2">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="eyebrow">
+                    {new Date(`${d}T00:00:00`).toLocaleDateString("fr-FR", {
+                      weekday: "long",
+                      day: "numeric",
+                      month: "long",
+                    })}
+                  </span>
+                  <span className="text-xs font-semibold tabular-nums text-slate-400">
+                    {eur(sum(rows))}
+                  </span>
                 </div>
-                <div className="space-y-1">
-                  {items.map((e) => (
-                    <TripExpenseRow
-                      key={e.id}
-                      e={e}
-                      onEdit={() => setModal({ item: e })}
-                      onRemove={() => remove.mutate(e.id)}
-                    />
-                  ))}
+                <div className="card">
+                  {rows.map((e, i) => {
+                    const m = catMeta(e.category);
+                    return (
+                      <div
+                        key={e.id}
+                        className={`flex min-h-[56px] items-center gap-3 ${
+                          i === rows.length - 1 ? "" : "border-b border-hairline"
+                        }`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-lg leading-none"
+                        >
+                          {m.icon}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setModal({ item: e })}
+                          className="min-w-0 flex-1 py-2 text-left"
+                        >
+                          {/* Pas de `truncate` : un libellé de dépense est court
+                              mais doit se lire en entier, quitte à passer sur
+                              deux lignes. */}
+                          <span className="block text-base font-semibold leading-snug">
+                            {e.label}
+                          </span>
+                          <span className="block text-xs text-slate-400">
+                            {m.name} · payé par {members[e.paidBy as "a" | "b"]?.name ?? e.paidBy}
+                          </span>
+                        </button>
+                        <span className="shrink-0 text-base font-semibold tabular-nums">
+                          {eur(Math.abs(e.amount))}
+                        </span>
+                        <OverflowMenu
+                          label={`Actions sur ${e.label}`}
+                          items={[
+                            { label: "Modifier", onClick: () => setModal({ item: e }) },
+                            {
+                              label: "Supprimer",
+                              danger: true,
+                              onClick: () => {
+                                if (confirm(`Supprimer « ${e.label} » ?`)) remove.mutate(e.id);
+                              },
+                            },
+                          ]}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             );
           })}
-        </div>
-      )}
 
-      {/* Total global (du jeu filtré si un filtre est actif) */}
-      <div className="mt-4 border-t border-slate-100 pt-3 dark:border-slate-800">
-        <div className="flex items-center justify-between text-xl font-bold">
-          <span>{hasFilters ? "Total (filtré)" : "Total"}</span>
-          <span className="tabular-nums">{eur(total)}</span>
-        </div>
-      </div>
-
-      {/* Par personne (montant + % du total) */}
-      <div className="mt-3 space-y-1 border-t border-slate-100 pt-3 text-sm dark:border-slate-800">
-        <div className="mb-1 flex items-center justify-between text-xs text-slate-400">
-          <span>Par personne</span>
-          <span className="w-12 text-right">%</span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="flex items-center gap-2">
-            <MemberAvatar id="a" className="h-5 w-5 text-[10px]" /> {members.a.name}
-          </span>
-          <span className="flex items-center gap-3 tabular-nums">
-            <span>{eur(totalA)}</span>
-            <span className="w-12 text-right text-slate-400">{pct(totalA)} %</span>
-          </span>
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="flex items-center gap-2">
-            <MemberAvatar id="b" className="h-5 w-5 text-[10px]" /> {members.b.name}
-          </span>
-          <span className="flex items-center gap-3 tabular-nums">
-            <span>{eur(totalB)}</span>
-            <span className="w-12 text-right text-slate-400">{pct(totalB)} %</span>
-          </span>
-        </div>
-      </div>
-
-      {categoryRows.length > 0 && (
-        <div className="mt-3 space-y-1 border-t border-slate-100 pt-3 text-sm dark:border-slate-800">
-          <div className="mb-1 flex items-center justify-between text-xs text-slate-400">
-            <span>Par catégorie</span>
-            <span className="w-12 text-right">%</span>
+          {/* Qui a avancé quoi : l'équilibre du voyage, en une carte. */}
+          <div className="card mt-1">
+            <div className="eyebrow">Qui a payé quoi</div>
+            <div className="mt-2 flex flex-col gap-2.5">
+              {(["a", "b"] as const).map((m) => {
+                const amt = m === "a" ? totalA : totalB;
+                return (
+                  <div key={m} className="flex items-center gap-3">
+                    <MemberAvatar id={m} className="h-7 w-7 shrink-0 text-2xs" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-2 text-sm">
+                        <span>{members[m].name}</span>
+                        <span className="font-semibold tabular-nums">{eur(amt)}</span>
+                      </div>
+                      <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-surface-2">
+                        <span
+                          className="block h-full rounded-full bg-brand-600"
+                          style={{ width: `${pct(amt)}%` }}
+                        />
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-          {categoryRows.map(([k, amt]) => {
-            const cm = categoryMeta(cats, k);
-            return (
-              <div key={k} className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-2">
-                  <span aria-hidden="true">{cm?.icon}</span>
-                  {cm?.name}
-                </span>
-                <span className="flex items-center gap-3 tabular-nums">
-                  <span>{eur(amt)}</span>
-                  <span className="w-12 text-right text-slate-400">{pct(amt)} %</span>
-                </span>
-              </div>
-            );
-          })}
-        </div>
+        </>
       )}
+
+      <MobileActionBar label="Nouvelle dépense" onClick={() => setModal({ item: null })} />
+      <div className="hidden justify-end md:flex">
+        <button type="button" onClick={() => setModal({ item: null })} className="btn-primary">
+          + Nouvelle dépense
+        </button>
+      </div>
 
       {modal && (
         <ExpenseFormModal
@@ -1158,31 +911,36 @@ function TripExpenses({ trip }: { trip: Trip }) {
           initial={
             modal.item
               ? {
-                  paidBy: modal.item.paidBy,
                   label: modal.item.label,
-                  amount: Math.abs(modal.item.amount) / 100,
+                  amount: Math.abs(modal.item.amount),
                   date: modal.item.date,
+                  paidBy: modal.item.paidBy as "a" | "b",
                 }
               : undefined
           }
+          initialCategory={modal.item ? modal.item.category : undefined}
+          categories={cats}
           splitA={me.household.defaultSplitA}
           splitB={me.household.defaultSplitB}
-          categories={cats.filter((c) => !c.hidden)}
-          initialCategory={modal.item ? modal.item.category : undefined}
           pending={create.isPending || update.isPending}
           onClose={() => setModal(null)}
-          onSave={(v) => (modal.item ? update.mutate({ id: modal.item.id, v }) : create.mutate(v))}
+          onSave={(v: ExpenseFormValues) =>
+            modal.item ? update.mutate({ id: modal.item.id, v }) : create.mutate(v)
+          }
         />
       )}
-    </div>
+    </>
   );
 }
 
-function TripTimeline({ tripId }: { tripId: string }) {
+function TripTimeline({ trip }: { trip: Trip }) {
+  const tripId = trip.id;
   const qc = useQueryClient();
   const toast = useToast();
   const me = useMe();
   const [modal, setModal] = useState<{ type: TripItemType; item: TripItem | null } | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [filter, setFilter] = useState<TripItemType | "tout">("tout");
   const { data: items } = useQuery({
     queryKey: ["trip-items", tripId],
     queryFn: () => api.get<TripItem[]>(`/api/trips/${tripId}/items`),
@@ -1242,21 +1000,38 @@ function TripTimeline({ tripId }: { tripId: string }) {
     return time(a.startAt).localeCompare(time(b.startAt));
   });
 
+  // Filtre par type d'étape, et jours du voyage (y compris ceux sans rien) :
+  // une journée libre est une information, pas un trou dans la liste.
+  const shown = filter === "tout" ? sorted : sorted.filter((it) => it.type === filter);
+  const dayList: string[] = [];
+  if (trip.startDate) {
+    const d = new Date(`${trip.startDate.slice(0, 10)}T00:00:00`);
+    const last = new Date(`${(trip.endDate ?? trip.startDate).slice(0, 10)}T00:00:00`);
+    while (d <= last && dayList.length < 120) {
+      dayList.push(d.toLocaleDateString("sv-SE"));
+      d.setDate(d.getDate() + 1);
+    }
+  }
+  // Étapes sans date, ou hors des bornes du voyage : elles ne doivent pas
+  // disparaître parce que les dates du voyage ont changé.
+  const loose = shown.filter((it) => !day(it.startAt) || !dayList.includes(day(it.startAt)));
+
   return (
-    <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <button onClick={() => setModal({ type: "transport", item: null })} className="btn-ghost text-xs">
-          🚆<span className="hidden md:inline"> Transport</span>
-        </button>
-        <button onClick={() => setModal({ type: "lodging", item: null })} className="btn-ghost text-xs">
-          🏠<span className="hidden md:inline"> Logement</span>
-        </button>
-        <button onClick={() => setModal({ type: "activity", item: null })} className="btn-ghost text-xs">
-          🎯<span className="hidden md:inline"> Activité</span>
-        </button>
-        {/* span porteuse du tooltip : un bouton désactivé ne déclenche pas le title natif. */}
+    <>
+      <div className="flex items-center gap-2">
+        <FilterChips
+          value={filter}
+          onChange={(v) => setFilter(v as TripItemType | "tout")}
+          className="min-w-0 flex-1"
+          items={[
+            { value: "tout", label: "Tout" },
+            { value: "transport", label: "Transport" },
+            { value: "lodging", label: "Logement" },
+            { value: "activity", label: "Activités" },
+          ]}
+        />
         <span
-          className="ml-auto hidden md:inline-block"
+          className="hidden shrink-0 md:inline-block"
           title={
             me.hasAnthropicKey
               ? "Analyse tes emails pour ajouter transports, logements et activités"
@@ -1266,36 +1041,128 @@ function TripTimeline({ tripId }: { tripId: string }) {
           <button
             onClick={() => autofill.mutate()}
             disabled={autofill.isPending || !me.hasAnthropicKey}
-            className="btn-primary text-xs disabled:pointer-events-none disabled:opacity-40"
+            className="btn text-xs disabled:pointer-events-none disabled:opacity-40"
           >
-            {autofill.isPending ? "Analyse des emails…" : "✨ Remplir depuis mes emails"}
+            {autofill.isPending ? "Analyse…" : "Remplir depuis mes emails"}
           </button>
         </span>
       </div>
 
-      {sorted.length === 0 ? (
-        <div className="text-sm text-slate-400">Timeline vide — ajoute une étape.</div>
+      {dayList.length === 0 && shown.length === 0 ? (
+        <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+          <p>Aucune étape pour l'instant.</p>
+          <button
+            type="button"
+            onClick={() => setModal({ type: "transport", item: null })}
+            className="btn-primary"
+          >
+            Ajouter la première
+          </button>
+        </div>
       ) : (
-        <ol className="relative space-y-3 border-l-2 border-slate-200 pl-5 dark:border-slate-700">
-          {sorted.map((it, i) => {
-            const curDay = day(it.startAt);
-            const prevDay = i > 0 ? day(sorted[i - 1].startAt) : null;
-            const newDay = curDay !== "" && curDay !== prevDay;
+        <ol className="relative ml-1 flex flex-col gap-4 border-l border-line pl-5">
+          {dayList.map((ymd, i) => {
+            const rows = shown.filter((it) =>
+              it.type === "lodging"
+                ? day(it.startAt) <= ymd && (!it.endAt || ymd <= day(it.endAt)) && day(it.startAt) === ymd
+                : day(it.startAt) === ymd,
+            );
+            const d = new Date(`${ymd}T00:00:00`);
+            const isToday = ymd === new Date().toLocaleDateString("sv-SE");
             return (
-              <Fragment key={it.id}>
-                {newDay && <DaySeparator day={curDay} />}
-                <TimelineRow
-                  item={it}
-                  onEdit={() => setModal({ type: it.type, item: it })}
-                  onRemove={() => {
-                    if (confirm("Supprimer cette étape ?")) remove.mutate(it.id);
-                  }}
-                  onChanged={invalidate}
+              <li key={ymd} className="relative list-none">
+                <span
+                  className={`absolute -left-[1.6rem] top-1.5 h-3 w-3 rounded-full border-2 border-[color:var(--paper)] ${
+                    isToday ? "bg-brand-600" : rows.length > 0 ? "bg-ink-3" : "bg-line"
+                  }`}
+                  aria-hidden="true"
                 />
-              </Fragment>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-sm font-semibold capitalize">
+                    {d.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" })}
+                  </span>
+                  <span className="text-xs text-slate-400">jour {i + 1}</span>
+                </div>
+                {rows.length === 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setModal({ type: "activity", item: null })}
+                    className="mt-2 flex w-full items-center gap-3 rounded-2xl border border-dashed border-line px-4 py-3 text-left"
+                  >
+                    <span className="text-lg leading-none text-brand-600" aria-hidden="true">
+                      +
+                    </span>
+                    <span>
+                      <span className="block text-sm font-medium">Journée libre</span>
+                      <span className="block text-xs text-slate-400">ajouter une activité</span>
+                    </span>
+                  </button>
+                ) : (
+                  <ol className="mt-2 flex flex-col gap-2">
+                    {rows.map((it) => (
+                      <TimelineRow
+                        key={it.id}
+                        item={it}
+                        onEdit={() => setModal({ type: it.type, item: it })}
+                        onRemove={() => {
+                          if (confirm("Supprimer cette étape ?")) remove.mutate(it.id);
+                        }}
+                        onChanged={invalidate}
+                      />
+                    ))}
+                  </ol>
+                )}
+              </li>
             );
           })}
+
+          {loose.length > 0 && (
+            <li className="relative list-none">
+              <div className="eyebrow">Hors des dates du voyage</div>
+              <ol className="mt-2 flex flex-col gap-2">
+                {loose.map((it) => (
+                  <TimelineRow
+                    key={it.id}
+                    item={it}
+                    onEdit={() => setModal({ type: it.type, item: it })}
+                    onRemove={() => {
+                      if (confirm("Supprimer cette étape ?")) remove.mutate(it.id);
+                    }}
+                    onChanged={invalidate}
+                  />
+                ))}
+              </ol>
+            </li>
+          )}
         </ol>
+      )}
+
+      <MobileActionBar label="Ajouter une étape" onClick={() => setAddOpen(true)} />
+      <div className="hidden flex-wrap justify-end gap-2 md:flex">
+        {ITEM_TYPES.map((o) => (
+          <button
+            key={o.type}
+            type="button"
+            onClick={() => setModal({ type: o.type, item: null })}
+            className="btn"
+          >
+            + {o.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Quel type d'étape : la question se pose avant le formulaire. */}
+      {addOpen && (
+        <ActionSheet
+          title="Ajouter une étape"
+          subtitle={trip.name}
+          items={ITEM_TYPES.map((o) => ({
+            label: o.label,
+            icon: <span className="text-lg leading-none">{o.icon}</span>,
+            onClick: () => setModal({ type: o.type, item: null }),
+          }))}
+          onClose={() => setAddOpen(false)}
+        />
       )}
 
       {modal && (
@@ -1306,11 +1173,12 @@ function TripTimeline({ tripId }: { tripId: string }) {
           onClose={() => setModal(null)}
           onSaved={() => {
             setModal(null);
+            setAddOpen(false);
             invalidate();
           }}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -1332,24 +1200,6 @@ function PaperclipIcon() {
 }
 
 // Séparateur léger entre les jours de la timeline (petit repère + libellé + filet).
-function DaySeparator({ day }: { day: string }) {
-  const d = new Date(`${day}T00:00:00`);
-  const label = isNaN(d.getTime())
-    ? day
-    : d.toLocaleDateString("fr-FR", { weekday: "long", day: "2-digit", month: "long" });
-  return (
-    <li className="relative list-none select-none">
-      <span className="absolute -left-[1.5rem] top-1/2 h-2 w-2 -translate-y-1/2 rounded-full bg-slate-300 dark:bg-slate-600" />
-      <div className="flex items-center gap-3">
-        <span className="text-xs font-medium capitalize tracking-wide text-slate-400 dark:text-slate-500">
-          {label}
-        </span>
-        <span className="h-px flex-1 bg-slate-100 dark:bg-slate-800" />
-      </div>
-    </li>
-  );
-}
-
 function TimelineRow({
   item,
   onEdit,
@@ -1914,5 +1764,99 @@ function ModalActions({ onClose, pending }: { onClose: () => void; pending: bool
         {pending ? "Enregistrement…" : "Enregistrer"}
       </button>
     </div>
+  );
+}
+
+/* ---------------- Sous-page : un voyage ---------------- */
+
+/**
+ * Un voyage ouvert. La barre du haut porte le retour vers l'index, la période
+ * et le décompte ; les trois onglets (Affaires · Planning · Coûts) répondent
+ * chacun à une question distincte du voyage.
+ */
+function TripDetail({
+  trip: t,
+  tab,
+  backTo,
+}: {
+  trip?: Trip;
+  tab: TripTab;
+  backTo: string;
+}) {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [modal, setModal] = useState(false);
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api.del(`/api/trips/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["trips"] });
+      navigate(backTo, { replace: true });
+    },
+  });
+  const archive = useMutation({
+    mutationFn: (v: { id: string; archived: boolean }) =>
+      api.patch(`/api/trips/${v.id}`, { archived: v.archived }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["trips"] }),
+  });
+
+  const countdown = t ? tripCountdown(t) : null;
+  const period = t ? tripPeriod(t) : "";
+  // Hooks déclarés avant tout retour anticipé.
+  usePageHeader(
+    t?.name ?? "Voyage",
+    [period, countdown].filter(Boolean).join(" · ") || undefined,
+    t?.emoji ?? "✈️",
+  );
+  usePageChrome(backTo, [
+    { label: "Modifier le voyage", onClick: () => setModal(true) },
+    ...(t
+      ? [
+          {
+            label: t.archived ? "Sortir des archives" : "Archiver le voyage",
+            onClick: () => archive.mutate({ id: t.id, archived: !t.archived }),
+          },
+          {
+            label: "Supprimer le voyage",
+            danger: true,
+            onClick: () => {
+              if (confirm(`Supprimer le voyage « ${t.name} » ?`)) remove.mutate(t.id);
+            },
+          },
+        ]
+      : []),
+  ]);
+
+  if (!t) {
+    return (
+      <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+        <p>Ce voyage n'existe plus.</p>
+        <Link to={backTo} className="btn-primary">
+          Revenir aux voyages
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {tab === "affaires" && <TripPacking tripId={t.id} />}
+      {tab === "planning" && <TripTimeline trip={t} />}
+      {tab === "couts" && <TripExpenses trip={t} />}
+
+      {modal && (
+        <TripModal
+          trip={t}
+          onClose={() => setModal(false)}
+          onSaved={() => {
+            setModal(false);
+            qc.invalidateQueries({ queryKey: ["trips"] });
+          }}
+          onDelete={() => {
+            if (confirm(`Supprimer le voyage « ${t.name} » ?`)) remove.mutate(t.id);
+          }}
+        />
+      )}
+    </>
   );
 }

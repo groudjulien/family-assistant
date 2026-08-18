@@ -2,32 +2,112 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ------------------------------------------------------------------ */
+/* Tokens de couleur — source de vérité de la palette                  */
+/*                                                                     */
+/* Chaque token est un triplet « R G B » pour que Tailwind puisse lui  */
+/* appliquer une opacité (`bg-surface/80`). Les noms sont exposés en   */
+/* utilitaires Tailwind dans tailwind.config.js (brand, surface, ink,  */
+/* line, danger, warning, info…). Ne jamais coder une couleur d'UI en  */
+/* dur : elle vit ici.                                                 */
+/* ------------------------------------------------------------------ */
+
 :root {
   color-scheme: light;
-  --paper: #f4f1ea;
-  --primary: rgb(91, 138, 78);
+
+  /* Vert = action */
+  --brand-50: 234 242 237;
+  --brand-100: 215 231 221;
+  --brand-200: 185 214 196;
+  --brand-300: 143 187 161;
+  --brand-400: 78 147 102;
+  --brand-500: 60 127 82;
+  --brand-600: 47 111 71; /* #2F6F47 */
+  --brand-700: 31 82 49;
+  --brand-800: 22 61 38;
+  --brand-900: 14 42 25;
+
+  /* Surfaces & encres */
+  --c-bg: 245 244 240; /* #F5F4F0 */
+  --c-surface: 255 255 255;
+  --c-surface-2: 241 239 234; /* #F1EFEA */
+  --c-ink: 22 32 43; /* #16202B */
+  --c-ink-2: 91 101 112; /* #5B6570 */
+  --c-ink-3: 124 135 148; /* #7C8794 */
+  --c-line: 226 231 236;
+  --c-hairline: 236 234 228;
+  --c-on-brand: 255 255 255;
+
+  /* Neutres suivant le thème (cf. tailwind.config.js) — 5,9:1 et 7,9:1 ici. */
+  --c-slate-400: 91 101 112; /* #5B6570 */
+  --c-slate-500: 74 83 94; /* #4A535E */
+
+  /* Sémantique */
+  --c-danger: 179 38 30; /* #B3261E */
+  --c-danger-soft: 253 234 234;
+  --c-warning: 138 100 22; /* #8A6416 */
+  --c-warning-soft: 251 241 218;
+  --c-info: 42 93 168; /* #2A5DA8 */
+  --c-info-soft: 232 240 251;
+
+  /* Alias historiques */
+  --paper: rgb(var(--c-bg));
+  --primary: rgb(var(--brand-600));
   --rdp-font-family: inherit;
 }
 
 .dark {
   color-scheme: dark;
-  --paper: #0b1220;
-  --rdp-accent-background-color: #1e293b;
+
+  /* La rampe s'inverse : 700 est plus clair que 600 (hover = éclaircir). */
+  --brand-50: 15 31 22;
+  --brand-100: 22 48 31;
+  --brand-200: 29 65 40;
+  --brand-300: 42 95 58;
+  --brand-400: 79 158 102;
+  --brand-500: 85 170 109;
+  --brand-600: 95 181 116; /* #5FB574 */
+  --brand-700: 127 214 147; /* #7FD693 */
+  --brand-800: 163 228 176;
+  --brand-900: 201 240 210;
+
+  --c-bg: 11 18 25; /* #0B1219 */
+  --c-surface: 19 30 42; /* #131E2A */
+  --c-surface-2: 27 40 54; /* #1B2836 */
+  --c-ink: 242 245 248; /* #F2F5F8 */
+  --c-ink-2: 167 180 194; /* #A7B4C2 */
+  --c-ink-3: 123 136 150; /* #7B8896 */
+  --c-line: 34 48 63; /* #22303F */
+  --c-hairline: 26 36 49;
+  --c-on-brand: 8 18 11; /* #08120B */
+
+  /* 8,5:1 et 5,5:1 sur le fond sombre. */
+  --c-slate-400: 167 180 194; /* #A7B4C2 */
+  --c-slate-500: 142 155 169; /* #8E9BA9 */
+
+  --c-danger: 240 138 130; /* #F08A82 */
+  --c-danger-soft: 43 27 27;
+  --c-warning: 227 179 65; /* #E3B341 */
+  --c-warning-soft: 44 36 19;
+  --c-info: 138 180 248; /* #8AB4F8 */
+  --c-info-soft: 23 35 47;
+
+  --rdp-accent-background-color: rgb(var(--c-surface-2));
 }
 /* react-day-picker déclare toutes ses variables sur `.rdp-root` : une surcharge
    sur un ancêtre (`:root`, style inline) est donc ignorée — tout se règle ici. */
 .rdp-root {
   font-size: 0.85rem;
-  --rdp-accent-color: rgb(91, 138, 78);
-  --rdp-accent-background-color: #eef3ec;
+  --rdp-accent-color: rgb(var(--brand-600));
+  --rdp-accent-background-color: rgb(var(--brand-50));
   /* Cellules compactes : un mois tient dans la largeur d'une modale mobile. */
   --rdp-day-width: 36px;
   --rdp-day-height: 36px;
   --rdp-day_button-width: 34px;
   --rdp-day_button-height: 34px;
-  /* Bande de période : fond vert clair + texte foncé (lisible en clair ET sombre) */
-  --rdp-range_middle-background-color: #dce8d8;
-  --rdp-range_middle-color: #1e293b;
+  /* Bande de période : aplat vert discret + encre du thème */
+  --rdp-range_middle-background-color: rgb(var(--brand-100));
+  --rdp-range_middle-color: rgb(var(--c-ink));
 }
 /* Jour sélectionné : en gras mais SANS grossir (react-day-picker met font-size: large par défaut) */
 .rdp-selected {
@@ -44,13 +124,18 @@ body,
 }
 
 body {
-  @apply text-slate-900 antialiased dark:text-slate-100;
+  @apply text-ink antialiased;
   background: var(--paper);
   margin: 0;
+  /* Chiffres à chasse fixe : sans ça, « 25 000,00 € » et « −858,30 € »
+     ne s'alignent jamais en colonne (règle 3 du design system). */
+  font-variant-numeric: tabular-nums;
 }
 
-.card {
-  @apply rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900;
+/* `.s-card` est l'alias historique du thème Sport : même carte, un seul style. */
+.card,
+.s-card {
+  @apply rounded-2xl border border-line bg-surface p-4 shadow-sm;
 }
 
 /* Dans @layer components pour que les utilitaires (hidden, md:hidden, rounded-full,
@@ -61,15 +146,15 @@ body {
     @apply inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-medium transition;
   }
   .btn-primary {
-    @apply btn bg-brand-600 text-white hover:bg-brand-700;
+    @apply btn bg-brand-600 text-on-brand hover:bg-brand-700;
   }
   .btn-ghost {
-    @apply btn border border-[#e2dccd] bg-white text-slate-700 hover:bg-[#f1ede4] dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800;
+    @apply btn border border-line bg-surface text-ink hover:bg-surface-2;
   }
 }
 
 .input {
-  @apply w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900;
+  @apply w-full rounded-xl border border-line bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-brand-500;
 }
 
 /* ------------------------------------------------------------------ */
@@ -99,94 +184,75 @@ body {
   }
 }
 
-/* Onglets de sous-menu (style "Bien être") */
-.subtabs {
+/* Onglets de sous-menu. `.s-tabs` / `.s-tab` sont les alias du thème Sport.
+   Défilement horizontal plutôt que retour à la ligne : la rangée garde la même
+   hauteur quel que soit le nombre d'onglets, et le débordement se voit. */
+.subtabs,
+.s-tabs {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 4px;
-  border-bottom: 1px solid #d9d3c4;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid rgb(var(--c-line));
 }
-.subtab {
-  font-family: "JetBrains Mono", monospace;
-  font-size: 12px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 10px 16px;
+.subtabs::-webkit-scrollbar,
+.s-tabs::-webkit-scrollbar {
+  display: none;
+}
+.subtab,
+.s-tab {
+  /* Sans-serif, casse normale : un onglet est un nom de page, pas une étiquette
+     technique. Les majuscules monospace restent réservées aux `.eyebrow`. */
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+  /* 44 px de haut : cible tactile (règle 6). */
+  min-height: 44px;
+  padding: 10px 12px;
   cursor: pointer;
-  color: #7a7770;
+  color: rgb(var(--c-ink-2));
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
   transition: color 0.15s, border-color 0.15s;
 }
-.subtab:hover {
-  color: #1a1a18;
+.subtab:hover,
+.subtab.active,
+.s-tab:hover,
+.s-tab.active {
+  color: rgb(var(--c-ink));
 }
-.subtab.active {
-  color: #1a1a18;
-  border-bottom-color: var(--primary);
-}
-.dark .subtabs {
-  border-bottom-color: #334155;
-}
-.dark .subtab:hover,
-.dark .subtab.active {
-  color: #f1f5f9;
+.subtab.active,
+.s-tab.active {
+  font-weight: 600;
+  color: rgb(var(--brand-600));
+  border-bottom-color: rgb(var(--brand-600));
 }
 
-/* ---------------- Thème Sport — aligné sur le design standard de l'app ---------------- */
-/* Les variables mappent la palette slate/brand standard pour rester cohérent avec .card. */
-.sport-theme {
-  --paper-2: #f1f5f9; /* slate-100 — puces / boutons +/- */
-  --pink: #0f172a; /* slate-900 — texte principal */
-  --pmuted: #64748b; /* slate-500 — texte discret */
-  --pline: #e2e8f0; /* slate-200 — bordures */
-  --pcard: #ffffff; /* fond des cartes */
-  --pgreen: #5b8a4e;
-  --pwarn: #d4a843;
-  --pfail: #b8453a;
-  --pviolet: #7a4ca8;
-  color: var(--pink);
+/* Étiquette en majuscules qui titre un groupe (menu, section de liste). */
+.eyebrow {
+  @apply text-2xs font-semibold uppercase leading-none tracking-[0.12em] text-ink-3;
 }
-.dark .sport-theme {
-  --paper-2: #1e293b; /* slate-800 */
-  --pink: #f1f5f9; /* slate-100 */
-  --pmuted: #94a3b8; /* slate-400 */
-  --pline: #1e293b; /* slate-800 — comme .card en dark */
-  --pcard: #0f172a; /* slate-900 — comme .card en dark */
+
+/* ---------------- Thème Sport — alias sur les tokens du design system ---------------- */
+/* Ne déclare plus de couleur : chaque variable pointe sur un token global.
+   Le mode sombre est donc géré une seule fois, dans `.dark` plus haut. */
+.sport-theme {
+  --paper-2: rgb(var(--c-surface-2)); /* puces / boutons +/- */
+  --pink: rgb(var(--c-ink)); /* texte principal */
+  --pmuted: rgb(var(--c-ink-2)); /* texte discret */
+  --pline: rgb(var(--c-line)); /* bordures */
+  --pcard: rgb(var(--c-surface)); /* fond des cartes */
+  --pgreen: rgb(var(--brand-600));
+  --pwarn: rgb(var(--c-warning));
+  --pfail: rgb(var(--c-danger));
+  --pviolet: rgb(var(--c-info));
+  color: var(--pink);
 }
 .sport-theme .mono {
   font-family: "JetBrains Mono", monospace;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-}
-.s-card {
-  @apply rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900;
-}
-.s-tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--pline);
-  flex-wrap: wrap;
-}
-.s-tab {
-  font-family: "JetBrains Mono", monospace;
-  font-size: 12px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 10px 16px;
-  cursor: pointer;
-  color: var(--pmuted);
-  border: none;
-  background: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-}
-.s-tab:hover {
-  color: var(--pink);
-}
-.s-tab.active {
-  color: var(--pink);
-  border-bottom-color: var(--pgreen);
 }

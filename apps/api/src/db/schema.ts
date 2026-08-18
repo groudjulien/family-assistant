@@ -24,8 +24,10 @@ export const household = sqliteTable("household", {
   defaultPacking: text("default_packing"), // JSON ["Passeport", …] injecté à la création d'un voyage
   excludedIngredients: text("excluded_ingredients"), // JSON string[] — jamais dans les idées repas
   defaultAccountId: text("default_account_id"), // compte proposé par défaut (transactions)
+  shoppingCategories: text("shopping_categories"), // JSON [{ key, name }] (null = défauts)
   defaultMenuOrder: text("default_menu_order"), // JSON string[] — ordre des menus par défaut (wizard)
   defaultMenuHidden: text("default_menu_hidden"), // JSON string[] — menus masqués par défaut (wizard)
+  electricityPriceKwh: real("electricity_price_kwh"), // prix TTC du kWh en euros (0.2516) ; null = pas d'estimation
   createdAt: text("created_at").notNull(),
 });
 
@@ -48,6 +50,7 @@ export const user = sqliteTable("user", {
   member: text("member").notNull(), // 'a' | 'b'
   menuOrder: text("menu_order"), // JSON array des clés de menu (ordre personnalisé)
   menuHidden: text("menu_hidden"), // JSON array des clés de menu masquées
+  menuGroups: text("menu_groups"), // JSON { "<clé sep:…>": "<nom du groupe>" }
   widgetPrefs: text("widget_prefs"), // JSON { order: string[]; hidden: string[] } widgets accueil
   createdAt: text("created_at").notNull(),
 });
@@ -220,6 +223,9 @@ export const savingsContribution = sqliteTable("savings_contribution", {
   amountA: integer("amount_a").notNull().default(0),
   amountB: integer("amount_b").notNull().default(0),
   planned: integer("planned").notNull().default(0),
+  // Versement effectué par membre : un mois peut être à moitié versé.
+  realizedA: integer("realized_a").notNull().default(0),
+  realizedB: integer("realized_b").notNull().default(0),
 });
 
 export const weddingPayment = sqliteTable("wedding_payment", {
@@ -326,6 +332,17 @@ export const wellnessLog = sqliteTable("wellness_log", {
   sessions: text("sessions").notNull().default("[]"), // JSON séances réalisées (snapshot)
 });
 
+/**
+ * Journée déclarée terminée. Une saisie à zéro est supprimée par l'API (« non
+ * saisi » ≠ « zéro »), la clôture ne peut donc pas s'écrire dans `wellness_log`.
+ */
+export const wellnessDayClose = sqliteTable("wellness_day_close", {
+  id: text("id").primaryKey(),
+  householdId: text("household_id").notNull(),
+  member: text("member").notNull(),
+  date: text("date").notNull(), // YYYY-MM-DD
+});
+
 /* ---- Bien-être : ancien modèle figé (conservé comme sauvegarde) ---- */
 
 export const sportConfig = sqliteTable("sport_config", {
@@ -367,6 +384,7 @@ export const shoppingItem = sqliteTable("shopping_item", {
   householdId: text("household_id").notNull(),
   name: text("name").notNull(),
   quantity: integer("quantity").notNull().default(1),
+  category: text("category"), // clé de rayon (null = affiché dans « autre »)
   createdAt: text("created_at").notNull(),
 });
 
@@ -418,6 +436,9 @@ export const mealPlan = sqliteTable("meal_plan", {
   id: text("id").primaryKey(),
   householdId: text("household_id").notNull().unique(),
   recipeIds: text("recipe_ids").notNull().default("[]"), // JSON string[] ordonné
+  // Repas déjà cuisinés : JSON { "<recipeId>": "<date ISO>" }. Ils restent dans
+  // le menu (section « Faits ») et ne sont plus repiochés à la régénération.
+  cooked: text("cooked"),
   count: integer("count").notNull().default(5),
   maxPrepMinutes: integer("max_prep_minutes"),
   maxTotalMinutes: integer("max_total_minutes"),
@@ -474,6 +495,9 @@ export const filmFavorite = sqliteTable("film_favorite", {
   imageUrl: text("image_url"),
   providers: text("providers"), // CSV des plateformes
   year: text("year"),
+  runtime: integer("runtime"), // durée en minutes
+  ageLimit: text("age_limit"), // certification FR : U, 10, 12, 16, 18
+  availability: text("availability"), // subscription | vod | unknown
   createdAt: text("created_at").notNull(),
 });
 
@@ -486,6 +510,9 @@ export const filmSeen = sqliteTable("film_seen", {
   imageUrl: text("image_url"),
   providers: text("providers"), // JSON [{name, logo}]
   year: text("year"),
+  runtime: integer("runtime"), // durée en minutes
+  ageLimit: text("age_limit"), // certification FR : U, 10, 12, 16, 18
+  availability: text("availability"), // subscription | vod | unknown
   createdAt: text("created_at").notNull(),
 });
 
@@ -498,6 +525,9 @@ export const filmHidden = sqliteTable("film_hidden", {
   imageUrl: text("image_url"),
   providers: text("providers"),
   year: text("year"),
+  runtime: integer("runtime"), // durée en minutes
+  ageLimit: text("age_limit"), // certification FR : U, 10, 12, 16, 18
+  availability: text("availability"), // subscription | vod | unknown
   createdAt: text("created_at").notNull(),
 });
 
@@ -561,6 +591,7 @@ export const trip = sqliteTable("trip", {
   id: text("id").primaryKey(),
   householdId: text("household_id").notNull(),
   name: text("name").notNull(),
+  emoji: text("emoji"), // drapeau ou pictogramme du voyage (contenu, pas action)
   startDate: text("start_date"),
   endDate: text("end_date"),
   budget: integer("budget"), // budget total du voyage en centimes (null = non défini)
@@ -640,8 +671,13 @@ export const customList = sqliteTable("custom_list", {
   scope: text("scope").notNull(), // shared | personal
   ownerId: text("owner_id"), // user.id quand scope = personal, null si partagée
   name: text("name").notNull(),
+  emoji: text("emoji"), // emoji de contenu affiché en tête de liste
   position: integer("position").notNull().default(0),
   createdAt: text("created_at").notNull(),
+  // Dernière modification de la liste *ou* d'un de ses éléments : c'est ce que
+  // lit le pied de la sous-page (« Modifiée par Noëlle il y a 2 h »).
+  updatedAt: text("updated_at"),
+  updatedBy: text("updated_by"), // slot membre 'a' | 'b'
 });
 
 export const customListItem = sqliteTable("custom_list_item", {
@@ -651,6 +687,20 @@ export const customListItem = sqliteTable("custom_list_item", {
   done: integer("done").notNull().default(0),
   position: integer("position").notNull().default(0),
   createdAt: text("created_at").notNull(),
+});
+
+/**
+ * Virements de début de mois déjà faits. Une ligne = une case cochée ; rien en
+ * base = reste à virer. La `key` vient du front (`<membre>:<compte>`) : elle
+ * n'a de sens que pour lui, le serveur ne fait que la conserver par mois.
+ */
+export const transferCheck = sqliteTable("transfer_check", {
+  id: text("id").primaryKey(),
+  householdId: text("household_id").notNull(),
+  month: text("month").notNull(), // YYYY-MM
+  key: text("key").notNull(),
+  doneAt: text("done_at").notNull(),
+  doneBy: text("done_by").notNull(), // slot membre 'a' | 'b'
 });
 
 export const session = sqliteTable("session", {

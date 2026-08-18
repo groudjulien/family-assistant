@@ -15,6 +15,7 @@ import {
   updateMobiliteKeysSchema,
   updateTmdbKeySchema,
   updateExpenseCategoriesSchema,
+  updateShoppingCategoriesSchema,
   updateDefaultPackingSchema,
   updateDefaultAccountSchema,
   updateMembersConfigSchema,
@@ -377,6 +378,7 @@ router.patch("/menu-order", async (c) => {
     .set({
       menuOrder: JSON.stringify(body.order),
       ...(body.hidden !== undefined && { menuHidden: JSON.stringify(body.hidden) }),
+      ...(body.groups !== undefined && { menuGroups: JSON.stringify(body.groups) }),
     })
     .where(eq(user.id, c.get("user").id));
   return c.json({ ok: true });
@@ -401,6 +403,18 @@ router.patch("/expense-categories", async (c) => {
     .get("db")
     .update(household)
     .set({ expenseCategories: JSON.stringify(body.categories) })
+    .where(eq(household.id, c.get("household").id));
+  return c.json({ ok: true });
+});
+
+/* ---------------- Rayons de la liste de courses (par foyer) ---------------- */
+
+router.patch("/shopping-categories", async (c) => {
+  const body = await parseBody(c, updateShoppingCategoriesSchema);
+  await c
+    .get("db")
+    .update(household)
+    .set({ shoppingCategories: JSON.stringify(body.categories) })
     .where(eq(household.id, c.get("household").id));
   return c.json({ ok: true });
 });

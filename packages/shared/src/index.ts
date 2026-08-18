@@ -208,6 +208,17 @@ export type HouseholdConfig = z.infer<typeof householdConfigSchema>;
 export const FILM_AUDIENCE = ["enfants", "adultes"] as const;
 export type FilmAudience = (typeof FILM_AUDIENCE)[number];
 
+/**
+ * Où le film se regarde, du point de vue du foyer :
+ * - `subscription` — inclus dans un abonnement activé dans les Réglages ;
+ * - `vod` — hors abonnement, mais proposé à la demande en France (location,
+ *   achat, ou plateforme gratuite / financée par la pub) ;
+ * - `unknown` — TMDB ne connaît aucune offre FR (pas encore sorti, sorti
+ *   seulement en salle, ou jamais distribué ici).
+ */
+export const FILM_AVAILABILITY = ["subscription", "vod", "unknown"] as const;
+export type FilmAvailability = (typeof FILM_AVAILABILITY)[number];
+
 export const createFilmFavoriteSchema = z.object({
   externalId: z.string().min(1),
   audience: z.enum(FILM_AUDIENCE),
@@ -216,6 +227,10 @@ export const createFilmFavoriteSchema = z.object({
   imageUrl: z.string().nullish(),
   providers: z.string().nullish(),
   year: z.string().nullish(),
+  /** Durée en minutes et certification FR, figées à l'instant du marquage. */
+  runtime: z.number().int().nullish(),
+  ageLimit: z.string().nullish(),
+  availability: z.enum(FILM_AVAILABILITY).nullish(),
 });
 
 export const createFilmSeenSchema = z.object({
@@ -225,6 +240,10 @@ export const createFilmSeenSchema = z.object({
   imageUrl: z.string().nullish(),
   providers: z.string().nullish(),
   year: z.string().nullish(),
+  /** Durée en minutes et certification FR, figées à l'instant du marquage. */
+  runtime: z.number().int().nullish(),
+  ageLimit: z.string().nullish(),
+  availability: z.enum(FILM_AVAILABILITY).nullish(),
 });
 
 export const createActivityFavoriteSchema = z.object({
@@ -261,6 +280,8 @@ export const TRANSPORT_META: Record<TransportMode, { icon: string; label: string
 export const tripSchema = z.object({
   id: z.string(),
   name: z.string(),
+  /** Drapeau ou pictogramme du voyage (null = avion par défaut). */
+  emoji: z.string().nullable(),
   startDate: z.string().nullable(),
   endDate: z.string().nullable(),
   budget: z.number().int().nullable(),
@@ -270,6 +291,7 @@ export type Trip = z.infer<typeof tripSchema>;
 
 export const createTripSchema = z.object({
   name: z.string().min(1),
+  emoji: z.string().trim().max(8).nullish(),
   startDate: z.string().nullish(),
   endDate: z.string().nullish(),
   budget: z.number().int().nullish(),
@@ -417,6 +439,33 @@ export const updateExpenseCategoriesSchema = z.object({
   categories: z.array(expenseCategorySchema),
 });
 
+/**
+ * Rayons de la liste de courses. Configurables par foyer (Réglages → Courses) ;
+ * cette liste est le défaut et sert de repli quand rien n'est configuré.
+ * La clé `autre` accueille tout produit inconnu du catalogue — ne pas la retirer.
+ */
+export const DEFAULT_SHOPPING_CATEGORIES = [
+  { key: "frais", name: "Frais" },
+  { key: "surgele", name: "Surgelé" },
+  { key: "epicerie", name: "Épicerie" },
+  { key: "boissons", name: "Boissons" },
+  { key: "entretien", name: "Entretien" },
+  { key: "autre", name: "Autre" },
+];
+
+/** Rayon d'accueil des produits sans rayon connu. */
+export const FALLBACK_SHOPPING_CATEGORY = "autre";
+
+export const shoppingCategorySchema = z.object({
+  key: z.string().min(1),
+  name: z.string().min(1),
+});
+export type ShoppingCategory = z.infer<typeof shoppingCategorySchema>;
+
+export const updateShoppingCategoriesSchema = z.object({
+  categories: z.array(shoppingCategorySchema),
+});
+
 // Dépenses sur place d'un voyage (mêmes champs qu'une dépense d'équilibrage).
 export const tripExpenseSchema = z.object({
   id: z.string(),
@@ -493,6 +542,8 @@ export const meSchema = z.object({
   member: z.enum(MEMBERS),
   menuOrder: z.array(z.string()).nullable(),
   menuHidden: z.array(z.string()).nullable(),
+  /** Nom de chaque groupe de menu, indexé par sa clé `sep:<id>` dans `menuOrder`. */
+  menuGroups: z.record(z.string()).nullable(),
   widgetPrefs: z
     .object({ order: z.array(z.string()), hidden: z.array(z.string()) })
     .nullable(),
@@ -502,6 +553,8 @@ export const meSchema = z.object({
   hasPrimJeton: z.boolean(),
   hasTmdbKey: z.boolean(),
   expenseCategories: z.array(expenseCategorySchema).nullable(),
+  /** Rayons de la liste de courses ; null = `DEFAULT_SHOPPING_CATEGORIES`. */
+  shoppingCategories: z.array(shoppingCategorySchema).nullable(),
   /** Liste d'affaires injectée à la création d'un voyage (null = aucune). */
   defaultPacking: z.array(defaultPackingItemSchema).nullable(),
   household: z.object({
@@ -517,6 +570,8 @@ export const meSchema = z.object({
     extraPersons: z.array(extraPersonSchema),
     /** Jours du mariage retenus (1 à 3) et leurs libellés. */
     weddingDays: z.array(weddingDaySchema),
+    /** Date du mariage : le compte à rebours en tête de la section la lit. */
+    weddingTargetDate: z.string(),
   }),
 });
 export type Me = z.infer<typeof meSchema>;
@@ -645,6 +700,8 @@ export type SetupComplete = z.infer<typeof setupCompleteSchema>;
 export const updateMenuOrderSchema = z.object({
   order: z.array(z.string().min(1)),
   hidden: z.array(z.string().min(1)).optional(),
+  /** Nom des groupes, indexé par clé de séparateur (`sep:<id>`). */
+  groups: z.record(z.string().trim().max(40)).optional(),
 });
 
 export const updateWidgetPrefsSchema = z.object({
@@ -727,6 +784,15 @@ export const bankTransactionSchema = z.object({
   merchantAddress: z.string().nullable(), // adresse du vendeur (best-effort)
 });
 export type BankTransaction = z.infer<typeof bankTransactionSchema>;
+
+/**
+ * Classement manuel d'une opération (« Sans catégorie · toucher pour classer »).
+ * `null` la renvoie sans catégorie. Le choix de l'utilisateur fait foi :
+ * l'opération est marquée enrichie pour que Claude ne la reclasse pas.
+ */
+export const setBankTransactionCategorySchema = z.object({
+  category: z.string().min(1).nullable(),
+});
 
 /* ------------------------------------------------------------------ */
 /* Tasks (with subtasks + drag & drop ordering)                        */
@@ -1016,6 +1082,13 @@ export const savingsContributionSchema = z.object({
   amountA: z.number().int(),
   amountB: z.number().int(),
   planned: z.boolean(),
+  /**
+   * Versement effectué, **par membre** : sur un même mois l'un peut avoir versé
+   * et l'autre non. `planned` reste la vue mois entier (faux dès que les deux
+   * ont versé), pour ne pas casser les écrans qui la lisent déjà.
+   */
+  realizedA: z.boolean(),
+  realizedB: z.boolean(),
 });
 export type SavingsContribution = z.infer<typeof savingsContributionSchema>;
 
@@ -1024,6 +1097,8 @@ export const createSavingsContributionSchema = z.object({
   amountA: z.number().int().default(0),
   amountB: z.number().int().default(0),
   planned: z.boolean().default(false),
+  realizedA: z.boolean().default(false),
+  realizedB: z.boolean().default(false),
 });
 
 export const weddingPaymentSchema = z.object({
@@ -1094,7 +1169,7 @@ export const INVITATION_STATUS_META: Record<InvitationStatus, { label: string }>
   to_send: { label: "À envoyer" },
   sent: { label: "Envoyé" },
   opened: { label: "Ouvert" },
-  filled: { label: "Rempli" },
+  filled: { label: "Répondu" },
 };
 
 export const weddingGuestSchema = z.object({
@@ -1161,16 +1236,21 @@ export const shoppingItemSchema = z.object({
   id: z.string(),
   name: z.string(),
   quantity: z.number().int(),
+  /** Clé de rayon ; null pour les articles antérieurs aux rayons. */
+  category: z.string().nullable(),
   createdAt: z.string(),
 });
 export type ShoppingItem = z.infer<typeof shoppingItemSchema>;
 
 export const createShoppingItemSchema = z.object({
   name: z.string().min(1),
+  /** Absent = rayon déduit du catalogue (`categoryFor`). */
+  category: z.string().min(1).nullish(),
 });
 
 export const updateShoppingItemSchema = z.object({
-  quantity: z.number().int().min(0),
+  quantity: z.number().int().min(0).optional(),
+  category: z.string().min(1).optional(),
 });
 
 export const addShoppingItemsSchema = z.object({
@@ -1211,17 +1291,34 @@ export const customListSchema = z.object({
   id: z.string(),
   scope: z.enum(LIST_SCOPES),
   name: z.string(),
+  /** Emoji de contenu affiché en tête de liste (null = pastille neutre). */
+  emoji: z.string().nullable(),
+  /** Dernière modification de la liste ou d'un de ses éléments (ISO), null si jamais touchée. */
+  updatedAt: z.string().nullable(),
+  /** Slot du membre auteur de la dernière modification (`a` | `b`). */
+  updatedBy: z.string().nullable(),
   items: z.array(customListItemSchema),
 });
 export type CustomList = z.infer<typeof customListSchema>;
 
+/** Emoji proposés à la création d'une liste (le champ reste libre). */
+export const LIST_EMOJIS = [
+  "📝", "🛒", "🧳", "🎁", "🍲", "🔧", "🏠", "🌱",
+  "🎬", "📚", "💡", "🎉", "🚗", "🐾", "💊", "👕",
+] as const;
+
+/** Un seul emoji (ou rien) : on borne à 8 UTF-16 pour couvrir les séquences ZWJ. */
+const emojiField = z.string().trim().max(8).nullable().optional();
+
 export const createCustomListSchema = z.object({
   scope: z.enum(LIST_SCOPES),
   name: z.string().trim().min(1).max(80),
+  emoji: emojiField,
 });
 
 export const updateCustomListSchema = z.object({
-  name: z.string().trim().min(1).max(80),
+  name: z.string().trim().min(1).max(80).optional(),
+  emoji: emojiField,
 });
 
 export const createCustomListItemSchema = z.object({
@@ -1361,6 +1458,21 @@ export const generateMealPlanSchema = z.object({
 });
 
 export const replaceMealPlanRecipeSchema = z.object({
+  recipeId: z.string().min(1),
+  /** Recette de remplacement choisie à la main (sinon tirage varié). */
+  withRecipeId: z.string().min(1).nullish(),
+});
+
+/** Une seule recette du menu : la retirer, la remonter, la cocher. */
+export const mealPlanRecipeSchema = z.object({ recipeId: z.string().min(1) });
+
+export const setMealCookedSchema = z.object({
+  recipeId: z.string().min(1),
+  done: z.boolean(),
+});
+
+/** Ajoute une recette au menu de la semaine (« Cuisiner ce soir »). */
+export const addMealPlanRecipeSchema = z.object({
   recipeId: z.string().min(1),
 });
 
@@ -1545,6 +1657,20 @@ export const upsertWellnessLogSchema = z.object({
   sessions: z.array(wellnessLoggedSessionSchema).default([]),
 });
 
+/**
+ * Journal d'un membre : les saisies, plus les journées déclarées terminées.
+ * La clôture voyage avec les logs — c'est la même donnée de journal, et la
+ * fusionner évite une troisième requête sur l'écran du quotidien.
+ */
+export type WellnessJournal = {
+  logs: WellnessLog[];
+  /** Journées clôturées (YYYY-MM-DD). */
+  closedDates: string[];
+};
+
+/** « Clôturer la journée » / rouvrir une journée close. */
+export const setWellnessDayClosedSchema = z.object({ closed: z.boolean() });
+
 /** Configuration complète du module bien-être d'un membre. */
 export type WellnessConfig = {
   goals: WellnessGoal[];
@@ -1565,11 +1691,29 @@ export const utilityReadingSchema = z.object({
 });
 export type UtilityReading = z.infer<typeof utilityReadingSchema>;
 
+/**
+ * Réponse de `GET /api/utilities` : les relevés bruts et le tarif du foyer.
+ * Les agrégats (totaux par année, variations) se calculent côté front — ils
+ * dépendent de la vue affichée, pas de la base.
+ */
+export interface UtilityData {
+  utility: string;
+  /** Prix TTC du kWh en euros (ex. 0.2516) ; null = coût non estimé. */
+  pricePerKwh: number | null;
+  /** Triés du plus récent au plus ancien. */
+  readings: UtilityReading[];
+}
+
 export const upsertUtilityReadingSchema = z.object({
   utility: z.string().default("electricity"),
-  year: z.number().int(),
+  year: z.number().int().min(1970).max(2999),
   month: z.number().int().min(1).max(12),
-  kwh: z.number().int(),
+  kwh: z.number().int().min(0),
+});
+
+/** Tarif du foyer (config foyer) : `null` efface le prix et masque les coûts. */
+export const updateUtilityPriceSchema = z.object({
+  pricePerKwh: z.number().min(0).max(10).nullable(),
 });
 
 /* ------------------------------------------------------------------ */
@@ -1670,6 +1814,88 @@ export const dashboardSchema = z.object({
 export type Dashboard = z.infer<typeof dashboardSchema>;
 
 /* ------------------------------------------------------------------ */
+/* Indicateurs de navigation (pastilles en bout de menu)               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Compteurs affichés au bout des menus. Propres à l'utilisateur connecté :
+ * « mes tâches », « mon compte principal ». `null` = rien à afficher.
+ */
+export const navBadgesSchema = z.object({
+  /** Tâches à faire qui me sont attribuées ou qui ne le sont à personne. */
+  tasks: z.number().int(),
+  /** Articles restant à acheter sur la liste de courses. */
+  courses: z.number().int(),
+  /** Reste à vivre du compte principal du membre connecté (fin de mois), en centimes. */
+  moneyCents: z.number().int().nullable(),
+  /** Jours restants avant le mariage (0 = jour J). Null si non configuré ou passé. */
+  weddingDays: z.number().int().nullable(),
+});
+export type NavBadges = z.infer<typeof navBadgesSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Sommaire de la section Argent (hub mobile)                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Un chiffre par onglet de la section Argent, calculé en une requête.
+ *
+ * Endpoint dédié (`GET /api/money/summary`) et **pas** un ajout à `/api/badges` :
+ * celui-ci est sur le chemin critique de toutes les pages, alors que ce
+ * sommaire n'est chargé que par l'accueil de la section.
+ */
+export const moneySummarySchema = z.object({
+  /** Mois de référence, `YYYY-MM`. */
+  month: z.string(),
+  /**
+   * Répartition du disponible du mois. Les trois parts s'additionnent au
+   * disponible : soldes actuels + crédits attendus d'ici la fin du mois.
+   */
+  split: z.object({
+    /** Débits récurrents restants (charges fixes). */
+    chargesCents: z.number().int(),
+    /** Autres débits attendus : dépenses prévues, échéances mariage. */
+    variablesCents: z.number().int(),
+    /** Ce qui reste après tout ça — le « reste à vivre » du foyer. */
+    freeCents: z.number().int(),
+  }),
+  depenses: z.object({ count: z.number().int(), monthlyCents: z.number().int() }),
+  tresorerie: z.object({ balanceCents: z.number().int(), accounts: z.number().int() }),
+  equilibrage: balanceSchema,
+  prevue: z.object({ count: z.number().int(), totalCents: z.number().int() }),
+  /** Dernier relevé électricité connu (null si aucun). */
+  electricite: z
+    .object({ year: z.number().int(), month: z.number().int(), kwh: z.number() })
+    .nullable(),
+  comptes: z.object({ count: z.number().int(), names: z.array(z.string()) }),
+});
+export type MoneySummary = z.infer<typeof moneySummarySchema>;
+
+/* ------------------------------------------------------------------ */
+/* Virements de début de mois — la to-do, pas le calcul                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Un virement coché. La clé est calculée par le front à partir du membre et du
+ * compte destinataire (`a:<accountId>`) : le serveur ne fait que la stocker,
+ * il n'a pas à rejouer la logique de répartition pour la valider.
+ */
+export const transferCheckSchema = z.object({
+  key: z.string(),
+  doneAt: z.string(),
+  /** Slot du membre qui a coché (`a` | `b`). */
+  doneBy: z.string(),
+});
+export type TransferCheck = z.infer<typeof transferCheckSchema>;
+
+export const setTransferChecksSchema = z.object({
+  /** Mois des virements, `YYYY-MM`. */
+  month: z.string().regex(/^\d{4}-\d{2}$/),
+  keys: z.array(z.string().trim().min(1).max(120)).min(1).max(50),
+  done: z.boolean(),
+});
+
+/* ------------------------------------------------------------------ */
 /* WishList                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -1739,3 +1965,11 @@ export const eurosToCents = (euros: number): number => Math.round(euros * 100);
 export const centsToEuros = (cents: number): number => cents / 100;
 export const formatEuros = (cents: number): string =>
   new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" }).format(cents / 100);
+
+/* ------------------------------------------------------------------ */
+/* Catalogue produits (liste de courses)                               */
+/* ------------------------------------------------------------------ */
+
+// Réexporté ici pour que l'API comme le front consomment le même catalogue :
+// c'est lui qui donne l'emoji et le rayon par défaut d'un article.
+export * from "./groceries";

@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { eq, and, asc, desc } from "drizzle-orm";
-import { createFilmFavoriteSchema, createFilmSeenSchema } from "@gfa/shared";
+import { createFilmFavoriteSchema, createFilmSeenSchema, type FilmAvailability } from "@gfa/shared";
 import { filmFavorite, filmSeen, filmHidden, streamingProvider } from "../db/schema";
 import { parseBody } from "../lib/validate";
 import { resolveTmdbKey } from "../lib/apiKeys";
@@ -27,27 +27,88 @@ interface Provider {
   logo: string | null;
 }
 
-// On filtre par id de plateforme (aligné sur le filtre `with_watch_providers` de
-// discover, lui aussi par id) et non par nom : les noms TMDB varient (« Disney+ »
-// vs « Disney Plus », variantes « with Ads »…) et faisaient rejeter des films dispo.
-async function providersFor(id: number, key: string, allowedIds: Set<number>): Promise<Provider[]> {
+/** Ce qu'une carte de film a besoin de dire au-delà du titre et de l'affiche. */
+interface MovieMeta {
+  providers: Provider[];
+  /** Durée en minutes. */
+  runtime: number | null;
+  /** Certification FR (« U », « 10 », « 12 », « 16 », « 18 »). */
+  ageLimit: string | null;
+  /**
+   * Le film est proposé en France hors abonnement du foyer : location, achat,
+   * ou plateforme gratuite / financée par la pub. Faux = TMDB ne connaît
+   * aucune offre FR (pas encore sorti, en salle, ou jamais distribué ici).
+   */
+  onDemand: boolean;
+}
+
+/** Ordre d'affichage d'une recherche : le plus facile à regarder en premier. */
+function rank(a: FilmAvailability): number {
+  return a === "subscription" ? 0 : a === "vod" ? 1 : 2;
+}
+
+/** Ce que la carte doit dire du film : plateforme du foyer, VOD, ou rien. */
+function availabilityOf(meta: MovieMeta): FilmAvailability {
+  if (meta.providers.length > 0) return "subscription";
+  return meta.onDemand ? "vod" : "unknown";
+}
+
+/**
+ * Plateformes, durée et limite d'âge d'un film — en **une** requête.
+ *
+ * `append_to_response` greffe `watch/providers` et `release_dates` sur la fiche :
+ * on obtient la durée et la certification pour le même coût réseau qu'avant, où
+ * l'on n'allait chercher que les plateformes.
+ *
+ * On filtre les plateformes par id (aligné sur le filtre `with_watch_providers`
+ * de discover) et non par nom : les noms TMDB varient (« Disney+ » vs « Disney
+ * Plus », variantes « with Ads »…) et faisaient rejeter des films dispo.
+ */
+async function movieMetaFor(id: number, key: string, allowedIds: Set<number>): Promise<MovieMeta> {
+  const empty: MovieMeta = { providers: [], runtime: null, ageLimit: null, onDemand: false };
   try {
-    const res = await fetch(`${TMDB}/movie/${id}/watch/providers?api_key=${key}`);
-    if (!res.ok) return [];
+    const res = await fetch(
+      `${TMDB}/movie/${id}?api_key=${key}&language=fr-FR&append_to_response=watch/providers,release_dates`,
+    );
+    if (!res.ok) return empty;
     const data = (await res.json()) as {
-      results?: {
-        FR?: { flatrate?: { provider_id: number; provider_name: string; logo_path?: string | null }[] };
+      runtime?: number | null;
+      "watch/providers"?: {
+        results?: {
+          FR?: {
+            flatrate?: { provider_id: number; provider_name: string; logo_path?: string | null }[];
+            rent?: unknown[];
+            buy?: unknown[];
+            free?: unknown[];
+            ads?: unknown[];
+          };
+        };
+      };
+      release_dates?: {
+        results?: { iso_3166_1: string; release_dates?: { certification?: string }[] }[];
       };
     };
-    const flat = data.results?.FR?.flatrate ?? [];
-    return flat
-      .filter((p) => allowedIds.has(p.provider_id))
-      .map((p) => ({
-        name: p.provider_name,
-        logo: p.logo_path ? `https://image.tmdb.org/t/p/w92${p.logo_path}` : null,
-      }));
+    const frOffers = data["watch/providers"]?.results?.FR;
+    const flat = frOffers?.flatrate ?? [];
+    const fr = data.release_dates?.results?.find((r) => r.iso_3166_1 === "FR");
+    const cert = fr?.release_dates?.map((d) => d.certification).find((v) => v && v.trim());
+    return {
+      providers: flat
+        .filter((p) => allowedIds.has(p.provider_id))
+        .map((p) => ({
+          name: p.provider_name,
+          logo: p.logo_path ? `https://image.tmdb.org/t/p/w92${p.logo_path}` : null,
+        })),
+      runtime: data.runtime ?? null,
+      ageLimit: cert?.trim() || null,
+      // `flatrate` complet mais hors abonnement du foyer compte aussi : le film
+      // est bien regardable en France, juste pas avec les abonnements d'ici.
+      onDemand: [frOffers?.rent, frOffers?.buy, frOffers?.free, frOffers?.ads, frOffers?.flatrate].some(
+        (list) => (list?.length ?? 0) > 0,
+      ),
+    };
   } catch {
-    return [];
+    return empty;
   }
 }
 
@@ -121,6 +182,14 @@ films.get("/", async (c) => {
     // Nouveautés d'abord : on propose les films les plus récents en tête (date de
     // sortie décroissante ; date manquante reléguée en fin).
     collected.sort((a, b) => (b.release_date ?? "").localeCompare(a.release_date ?? ""));
+
+    // « Proposer d'autres films » : on avance dans le vivier plutôt que de
+    // renvoyer la même page. L'`offset` boucle sur la taille du vivier, donc il
+    // y a toujours quelque chose à montrer, et le tri reste déterministe.
+    const offset = Math.max(0, Number(c.req.query("offset") ?? 0) || 0);
+    const start = collected.length > 0 ? offset % collected.length : 0;
+    const pool = [...collected.slice(start), ...collected.slice(0, start)];
+
     const out: {
       id: string;
       title: string;
@@ -128,18 +197,24 @@ films.get("/", async (c) => {
       imageUrl: string | null;
       providers: Provider[];
       year: string | null;
+      runtime: number | null;
+      ageLimit: string | null;
+      availability: FilmAvailability;
     }[] = [];
-    for (const m of collected) {
+    for (const m of pool) {
       if (out.length >= TARGET) break;
-      const provs = await providersFor(m.id, key, allowedIds);
-      if (provs.length === 0) continue;
+      const meta = await movieMetaFor(m.id, key, allowedIds);
+      if (meta.providers.length === 0) continue;
       out.push({
         id: String(m.id),
         title: m.title,
         description: m.overview ?? "",
         imageUrl: m.poster_path ? `https://image.tmdb.org/t/p/w500${m.poster_path}` : null,
-        providers: provs,
+        providers: meta.providers,
         year: m.release_date ? m.release_date.slice(0, 4) : null,
+        runtime: meta.runtime,
+        ageLimit: meta.ageLimit,
+        availability: "subscription", // les propositions ne sortent que du catalogue abonné
       });
     }
     return c.json({ films: out });
@@ -225,9 +300,14 @@ films.get("/details/:id", async (c) => {
 /* ---------------- Recherche par nom ---------------- */
 
 /**
- * Recherche TMDB par titre, restreinte aux plateformes activées du foyer.
- * Contrairement aux propositions (`GET /`), on ne filtre pas par genre et on
- * n'exclut pas les films déjà vus / masqués : la recherche est explicite.
+ * Recherche TMDB par titre. Contrairement aux propositions (`GET /`), on ne
+ * filtre pas par genre et on n'exclut pas les films déjà vus / masqués : la
+ * recherche est explicite.
+ *
+ * On ne restreint pas non plus aux plateformes du foyer : un film cherché par
+ * son nom doit être trouvé même s'il n'est sur aucun abonnement — il ressort
+ * alors avec `providers: []`, que le front étiquette « VOD ». Les films
+ * disponibles sur un abonnement du foyer restent en tête de liste.
  */
 films.get("/search", async (c) => {
   const key = await resolveTmdbKey(c.get("household"), c.env);
@@ -235,6 +315,7 @@ films.get("/search", async (c) => {
   const q = (c.req.query("q") ?? "").trim();
   if (q.length < 2) return c.json({ films: [] });
 
+  // Sans plateforme activée la recherche fonctionne quand même : tout sort en VOD.
   const provRows = await c
     .get("db")
     .select()
@@ -243,7 +324,6 @@ films.get("/search", async (c) => {
       and(eq(streamingProvider.householdId, c.get("household").id), eq(streamingProvider.enabled, 1)),
     )
     .orderBy(asc(streamingProvider.position));
-  if (provRows.length === 0) return c.json({ films: [], error: "no_provider" });
   const allowedIds = new Set(provRows.map((p) => p.tmdbId));
 
   try {
@@ -255,20 +335,26 @@ films.get("/search", async (c) => {
     const data = (await res.json()) as { results?: TmdbMovie[] };
     // TMDB trie déjà par pertinence ; on borne les candidats pour tenir la latence
     // (un appel « watch/providers » par film).
-    const candidates = (data.results ?? []).filter((m) => m.poster_path).slice(0, 20);
-    const withProviders = await Promise.all(
-      candidates.map(async (m) => ({ m, provs: await providersFor(m.id, key, allowedIds) })),
+    const candidates = (data.results ?? []).slice(0, 20);
+    const withMeta = await Promise.all(
+      candidates.map(async (m) => ({ m, meta: await movieMetaFor(m.id, key, allowedIds) })),
     );
     return c.json({
-      films: withProviders
-        .filter(({ provs }) => provs.length > 0) // dispo sur au moins une plateforme du foyer
-        .map(({ m, provs }) => ({
+      films: withMeta
+        // Regardable tout de suite d'abord (abonnement du foyer), puis à la
+        // demande, puis introuvable. Le tri est stable, donc la pertinence TMDB
+        // départage à l'intérieur d'un même groupe.
+        .sort((a, b) => rank(availabilityOf(a.meta)) - rank(availabilityOf(b.meta)))
+        .map(({ m, meta }) => ({
           id: String(m.id),
           title: m.title,
           description: m.overview ?? "",
           imageUrl: m.poster_path ? `https://image.tmdb.org/t/p/w500${m.poster_path}` : null,
-          providers: provs,
+          providers: meta.providers,
           year: m.release_date ? m.release_date.slice(0, 4) : null,
+          runtime: meta.runtime,
+          ageLimit: meta.ageLimit,
+          availability: availabilityOf(meta),
         })),
     });
   } catch (e) {
@@ -296,6 +382,9 @@ films.get("/favorites", async (c) => {
       imageUrl: r.imageUrl,
       providers: parseProviders(r.providers),
       year: r.year,
+      runtime: r.runtime ?? null,
+      ageLimit: r.ageLimit ?? null,
+      availability: r.availability ?? null,
     })),
   });
 });
@@ -326,6 +415,9 @@ films.post("/favorites", async (c) => {
     imageUrl: body.imageUrl ?? null,
     providers: body.providers ?? null,
     year: body.year ?? null,
+    runtime: body.runtime ?? null,
+    ageLimit: body.ageLimit ?? null,
+    availability: body.availability ?? null,
     createdAt: nowIso(),
   });
   return c.json({ ok: true, id }, 201);
@@ -362,6 +454,9 @@ films.get("/hidden", async (c) => {
       imageUrl: r.imageUrl,
       providers: parseProviders(r.providers),
       year: r.year,
+      runtime: r.runtime ?? null,
+      ageLimit: r.ageLimit ?? null,
+      availability: r.availability ?? null,
       audience: r.audience,
       hiddenAt: r.createdAt,
     })),
@@ -391,6 +486,9 @@ films.post("/hidden", async (c) => {
     imageUrl: body.imageUrl ?? null,
     providers: body.providers ?? null,
     year: body.year ?? null,
+    runtime: body.runtime ?? null,
+    ageLimit: body.ageLimit ?? null,
+    availability: body.availability ?? null,
     createdAt: nowIso(),
   });
   return c.json({ ok: true, id }, 201);
@@ -427,6 +525,9 @@ films.get("/seen", async (c) => {
       imageUrl: r.imageUrl,
       providers: parseProviders(r.providers),
       year: r.year,
+      runtime: r.runtime ?? null,
+      ageLimit: r.ageLimit ?? null,
+      availability: r.availability ?? null,
       audience: r.audience,
       seenAt: r.createdAt,
     })),
@@ -457,6 +558,9 @@ films.post("/seen", async (c) => {
     imageUrl: body.imageUrl ?? null,
     providers: body.providers ?? null,
     year: body.year ?? null,
+    runtime: body.runtime ?? null,
+    ageLimit: body.ageLimit ?? null,
+    availability: body.availability ?? null,
     createdAt: nowIso(),
   });
   return c.json({ ok: true, id }, 201);
