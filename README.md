@@ -35,12 +35,15 @@ qui agissent sur le foyer) · Mariage (budget, plan d'épargne, invités) ·
 Bien-être (objectifs personnalisables par membre : compteurs journaliers /
 hebdomadaires / mensuels, cases à cocher, séances de sport) · Réglages.
 
-<img width="2226" height="1642" alt="image" src="https://github.com/user-attachments/assets/0d4fe23a-a16d-4144-9342-8639574092cd" />
-<img width="2156" height="1438" alt="image" src="https://github.com/user-attachments/assets/38e8dff8-a3c1-4a90-9118-59954d424f26" />
-<img width="2170" height="540" alt="image" src="https://github.com/user-attachments/assets/1dd4722e-0742-4a31-8df5-e2406019c6cb" />
-<img width="2110" height="1300" alt="image" src="https://github.com/user-attachments/assets/a9bb0caa-d6e7-4adf-9a11-6007808c6af5" />
-<img width="2174" height="1142" alt="image" src="https://github.com/user-attachments/assets/a706f3da-697f-40a9-ae1d-9544f50ca58a" />
-<img width="2156" height="1468" alt="image" src="https://github.com/user-attachments/assets/ecd24f53-a447-4d94-8102-29f432ed00ba" />
+<img width="231" height="484" alt="image" src="https://github.com/user-attachments/assets/be00f5e5-44cf-4885-b564-5361ee72db84" />
+<img width="230" height="480" alt="image" src="https://github.com/user-attachments/assets/bd686a8f-bfb9-46b9-aa15-4c4183564bec" />
+<img width="230" height="480" alt="image" src="https://github.com/user-attachments/assets/be3a354d-f250-4547-9c11-5fd185283a0e" />
+<img width="229" height="480" alt="image" src="https://github.com/user-attachments/assets/509e8f7a-8f98-4147-ac0f-41c30f5fdd18" />
+<img width="231" height="485" alt="image" src="https://github.com/user-attachments/assets/e7dabe7c-bcc8-4881-b353-d9eb037b1762" />
+<img width="230" height="482" alt="image" src="https://github.com/user-attachments/assets/778d5f05-9393-4ba6-adba-f9f0f610adc0" />
+<img width="229" height="478" alt="image" src="https://github.com/user-attachments/assets/41c56188-f6ad-4ab6-8310-1aca36b270c6" />
+<img width="230" height="480" alt="image" src="https://github.com/user-attachments/assets/1772f9ea-c295-4e9c-8a36-c43690860bdb" />
+<img width="230" height="480" alt="image" src="https://github.com/user-attachments/assets/3d1f9c7e-c164-4e00-aa65-8b6ded7e3b25" />
 
 
 ## Stack & coût
