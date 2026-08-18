@@ -30,26 +30,11 @@ hide the ones you don't want, reorder the rest, group them under your own
 headings. See [Make it yours](#make-it-yours) below. Menu labels are given in
 French, as they appear in the app.
 
-<img width="231" height="484" alt="image" src="https://github.com/user-attachments/assets/be00f5e5-44cf-4885-b564-5361ee72db84" />
-<img width="230" height="480" alt="image" src="https://github.com/user-attachments/assets/bd686a8f-bfb9-46b9-aa15-4c4183564bec" />
-<img width="230" height="480" alt="image" src="https://github.com/user-attachments/assets/be3a354d-f250-4547-9c11-5fd185283a0e" />
-<img width="229" height="480" alt="image" src="https://github.com/user-attachments/assets/509e8f7a-8f98-4147-ac0f-41c30f5fdd18" />
-<img width="231" height="485" alt="image" src="https://github.com/user-attachments/assets/e7dabe7c-bcc8-4881-b353-d9eb037b1762" />
-<img width="230" height="482" alt="image" src="https://github.com/user-attachments/assets/778d5f05-9393-4ba6-adba-f9f0f610adc0" />
-<img width="229" height="478" alt="image" src="https://github.com/user-attachments/assets/41c56188-f6ad-4ab6-8310-1aca36b270c6" />
-<img width="230" height="480" alt="image" src="https://github.com/user-attachments/assets/1772f9ea-c295-4e9c-8a36-c43690860bdb" />
-<img width="230" height="480" alt="image" src="https://github.com/user-attachments/assets/3d1f9c7e-c164-4e00-aa65-8b6ded7e3b25" />
-
-
-## Stack & coût
-
-<table><tr><td width="55%">
+### Home *(Accueil)*
 
 A wall of widgets, each member choosing which ones they see and in which order:
 transit, weather, the day's agenda, open tasks, the next trip, the wedding
 countdown, the shopping list, who owes whom, and the next F1 race with its news.
-
-</td><td width="45%"><img src="docs/screenshots/accueil.png" alt="Accueil"></td></tr></table>
 
 ### Tasks *(Tâches)*
 
@@ -59,20 +44,14 @@ countdown, the shopping list, who owes whom, and the next F1 race with its news.
 - Reordering by drag & drop, plus ↑/↓ arrows for touch.
 - Filters: everything, mine, done.
 
-</td><td width="45%"><img src="docs/screenshots/taches.png" alt="Tâches"></td></tr></table>
+</td><td width="45%"><img src="https://github.com/user-attachments/assets/be00f5e5-44cf-4885-b564-5361ee72db84" width="230" alt="Tâches"></td></tr></table>
 
 ### Calendar *(Agenda)*
-
-<table><tr><td width="55%">
 
 - Google Calendar, read **and** write, across several calendars.
 - Today, week and month views.
 
-</td><td width="45%"><img src="docs/screenshots/agenda.png" alt="Agenda"></td></tr></table>
-
 ### Meals *(Repas)*
-
-<table><tr><td width="55%">
 
 - Recipes: photo (stored in R2), ingredients, steps, cook time, course type,
   meat/starch tags.
@@ -82,18 +61,12 @@ countdown, the shopping list, who owes whom, and the next F1 race with its news.
   ≤ 15 min…), minus the ingredients you've blacklisted.
 - One tap sends a recipe's ingredients to the shopping list.
 
-</td><td width="45%"><img src="docs/screenshots/repas.png" alt="Repas"></td></tr></table>
-
 ### Shopping *(Courses)*
-
-<table><tr><td width="55%">
 
 - Shared list with quantities, grouped by aisle.
 - The aisle is resolved server-side from a shared product catalogue, so every
   path in (typing, a recipe, an import) lands in the right one.
 - Aisles are configurable, and their order is **your** store's order.
-
-</td><td width="45%"><img src="docs/screenshots/courses.png" alt="Courses"></td></tr></table>
 
 ### Money *(Argent)*
 
@@ -110,7 +83,10 @@ Six tabs, plus a numbered summary as the mobile home of the section.
 - **Bank accounts** — balances (manual, or synced via LunchFlow), transactions,
   bank-statement import.
 
-</td><td width="45%"><img src="docs/screenshots/argent.png" alt="Argent"></td></tr></table>
+</td><td width="45%"><img src="https://github.com/user-attachments/assets/bd686a8f-bfb9-46b9-aa15-4c4183564bec" width="230" alt="Argent"></td></tr></table>
+
+<img src="https://github.com/user-attachments/assets/509e8f7a-8f98-4147-ac0f-41c30f5fdd18" width="30%" alt="Argent — trésorerie">
+<img src="https://github.com/user-attachments/assets/778d5f05-9393-4ba6-adba-f9f0f610adc0" width="30%" alt="Argent — opérations">
 
 ### Wedding *(Mariage)*
 
@@ -123,7 +99,9 @@ Six tabs, plus a numbered summary as the mobile home of the section.
   or invoices attached (R2).
 - **Savings** — a month-by-month plan, per member, against the target.
 
-</td><td width="45%"><img src="docs/screenshots/mariage.png" alt="Mariage"></td></tr></table>
+</td><td width="45%"><img src="https://github.com/user-attachments/assets/3d1f9c7e-c164-4e00-aa65-8b6ded7e3b25" width="230" alt="Mariage"></td></tr></table>
+
+<img src="https://github.com/user-attachments/assets/1772f9ea-c295-4e9c-8a36-c43690860bdb" width="30%" alt="Mariage — prestataires">
 
 ### Wellness *(Bien-être)*
 
@@ -136,30 +114,22 @@ Its own space per member, and four tabs.
 - Workout log with the day's activities.
 - Today's view and statistics over time.
 
-</td><td width="45%"><img src="docs/screenshots/bienetre.png" alt="Bien-être"></td></tr></table>
+</td><td width="45%"><img src="https://github.com/user-attachments/assets/41c56188-f6ad-4ab6-8310-1aca36b270c6" width="230" alt="Bien-être"></td></tr></table>
 
 ### Activities *(Activités)*
-
-<table><tr><td width="55%">
 
 - Outing suggestions over the next 30 days, with date and venue, for **the
   cities you follow** — OpenAgenda, plus your own RSS agenda feeds for the towns
   it doesn't cover.
 - Three lists: shortlisted, suggestions, history (what you've ruled out).
 
-</td><td width="45%"><img src="docs/screenshots/activites.png" alt="Activités"></td></tr></table>
-
 ### Films
-
-<table><tr><td width="55%">
 
 - TMDB search: poster, synopsis, runtime, age rating.
 - Suggestions restricted to **the streaming services you actually pay for**,
   with a deep link into the right one (Netflix, Disney+, Prime Video, Canal+,
   Apple TV, Max, Paramount+, OCS, Crunchyroll, arte.tv).
 - Three lists: to watch, suggestions, history.
-
-</td><td width="45%"><img src="docs/screenshots/films.png" alt="Films"></td></tr></table>
 
 ### Trips *(Vacances)*
 
@@ -171,7 +141,7 @@ Its own space per member, and four tabs.
   pre-filled from your own default list.
 - Tickets and documents attached (R2). Past trips get archived.
 
-</td><td width="45%"><img src="docs/screenshots/vacances.png" alt="Vacances"></td></tr></table>
+</td><td width="45%"><img src="https://github.com/user-attachments/assets/e7dabe7c-bcc8-4881-b353-d9eb037b1762" width="230" alt="Vacances"></td></tr></table>
 
 ### Lists *(Listes)*
 
@@ -180,17 +150,13 @@ Its own space per member, and four tabs.
 - Personal lists and shared lists, each with its own emoji and drag & drop.
 - A wishlist filterable by who it's for.
 
-</td><td width="45%"><img src="docs/screenshots/listes.png" alt="Listes"></td></tr></table>
+</td><td width="45%"><img src="https://github.com/user-attachments/assets/be3a354d-f250-4547-9c11-5fd185283a0e" width="230" alt="Listes"></td></tr></table>
 
 ### Chat
-
-<table><tr><td width="55%">
 
 - Claude, with tools that **read and write** household data: tasks, shopping
   list, recipes, trips, wedding todos and guests, money settings.
 - Optional web search.
-
-</td><td width="45%"><img src="docs/screenshots/chat.png" alt="Chat"></td></tr></table>
 
 ## Make it yours
 
@@ -198,8 +164,6 @@ Two households don't want the same app. Almost nothing here is hard-coded —
 what follows is configured from **Settings**, not from the source.
 
 ### The menu is yours
-
-<table><tr><td width="55%">
 
 - **Hide what you don't use.** Every entry can be switched off; the bespoke
   modules (Wedding, Wellness, Île-de-France transit, Electricity) start off.
@@ -212,11 +176,7 @@ what follows is configured from **Settings**, not from the source.
 The home widgets follow the same rule: each member picks which ones show and in
 what order.
 
-</td><td width="45%"><img src="docs/screenshots/reglages-menus.png" alt="Réglages — menus"></td></tr></table>
-
 ### Your cities, your tastes
-
-<table><tr><td width="55%">
 
 - **Weather cities** — as many as you want, in your own order (Paris by
   default).
@@ -233,8 +193,6 @@ what order.
 - **Household members** — names, colours, avatars, plus extra people without an
   account (children) who still appear in packing lists.
 - **Appearance** — light or dark.
-
-</td><td width="45%"><img src="docs/screenshots/reglages-villes.png" alt="Réglages — villes et goûts"></td></tr></table>
 
 ### Settings *(Réglages)*
 
