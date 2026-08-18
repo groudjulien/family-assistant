@@ -1,39 +1,34 @@
 # Family Assistant
 
-Assistant personnel **auto-hébergé pour un foyer de deux adultes (avec ou sans enfants)**
-pour gérer l'intégralité de la maison : tâches partagées, agenda Google, dépenses et équilibrage des comptes,
-trésorerie prévisionnelle, recettes & liste de courses, voyages, et un chat Claude qui
-agit sur vos données.
+A **self-hosted personal assistant for a two-person household**: shared tasks,
+Google Calendar, expenses and account settling, cash-flow forecasting, recipes &
+shopping list, trips, and a Claude chat that acts on your own data.
 
-Ce projet a d'abord été construit **pour mon propre foyer**, puis rendu
-installable et personnalisable. Prenez-le comme une **première brique à
-casser** plutôt qu'un produit fini : dupliquez-le, donnez-le à
-[Claude Code](https://claude.com/claude-code) et re-personnalisez-le pour vos
-propres usages — supprimez les modules qui ne vous parlent pas, ajoutez les
-vôtres. Le [CLAUDE.md](CLAUDE.md) documente les conventions du code précisément
-pour rendre cette réappropriation facile.
+This project was first built **for my own household**, then made installable and
+customisable. Treat it as a **starting point to break apart** rather than a
+finished product: fork it, hand it to
+[Claude Code](https://claude.com/claude-code) and re-tailor it to your own
+habits — drop the modules that mean nothing to you, add your own.
+[CLAUDE.md](CLAUDE.md) documents the code conventions precisely so that
+re-appropriation stays easy.
 
-> **À savoir avant de cloner**
-> - L'interface est **en français** (le code est en anglais).
-> - Le modèle est volontairement **un couple** : deux membres aux droits égaux
->   (+ personnes supplémentaires sans compte, ex. enfants). Pas de rôles, pas
->   d'admin, pas de N-membres.
-> - **Single-tenant** : un déploiement = un foyer. Il n'y a pas de cloisonnement
->   multi-comptes côté serveur — n'invitez que des personnes de confiance.
-> - Certains modules sont très « sur mesure » (Mariage, Bien-être, Transports
->   Île-de-France, Électricité) : ils sont **désactivés par défaut** et
->   activables dans le wizard ou les Réglages.
+> **Before you clone**
+> - The interface is **in French** (the code is in English).
+> - The model is deliberately **a couple**: two members with equal rights
+>   (+ extra people without an account, e.g. children). No roles, no admin, no
+>   N-members.
+> - **Single-tenant**: one deployment = one household. There is no multi-account
+>   isolation server-side — only invite people you trust.
+> - A few modules are very much **bespoke** (Wedding, Wellness, Île-de-France
+>   transit, Electricity): they are **off by default** and can be enabled in the
+>   wizard or in Settings.
 
 ## Modules
 
-Accueil (widgets configurables) · Tâches (sous-tâches, priorités, drag & drop) ·
-Agenda (Google Calendar, lecture/écriture) · Repas (recettes, import par IA,
-idées repas, liste de courses) · Argent (dépenses partagées & équilibrage,
-trésorerie prévisionnelle, dépenses prévues, comptes bancaires) · Activités
-(sorties, films, voyages avec valise et dépenses) · Chat (Claude, avec outils
-qui agissent sur le foyer) · Mariage (budget, plan d'épargne, invités) ·
-Bien-être (objectifs personnalisables par membre : compteurs journaliers /
-hebdomadaires / mensuels, cases à cocher, séances de sport) · Réglages.
+Thirteen modules — Home, then twelve menus — and all of them **à la carte**:
+hide the ones you don't want, reorder the rest, group them under your own
+headings. See [Make it yours](#make-it-yours) below. Menu labels are given in
+French, as they appear in the app.
 
 <img width="231" height="484" alt="image" src="https://github.com/user-attachments/assets/be00f5e5-44cf-4885-b564-5361ee72db84" />
 <img width="230" height="480" alt="image" src="https://github.com/user-attachments/assets/bd686a8f-bfb9-46b9-aa15-4c4183564bec" />
@@ -48,97 +43,298 @@ hebdomadaires / mensuels, cases à cocher, séances de sport) · Réglages.
 
 ## Stack & coût
 
-| Couche | Techno | Hébergement |
-|---|---|---|
-| Front | Vite + React 18 + TypeScript + Tailwind + TanStack Query | Cloudflare **Pages** |
-| API | Hono (TypeScript) | Cloudflare **Workers** |
-| Base | SQLite via Drizzle ORM | Cloudflare **D1** |
-| Fichiers | Billets de voyage, photos de recettes | Cloudflare **R2** |
-| Auth | Google OAuth + allowlist + cookie de session | — |
+<table><tr><td width="55%">
 
-Tout tient dans le **free tier Cloudflare** pour un usage à deux (~0 €/mois).
-Seul le chat Claude consomme des crédits API Anthropic (optionnel, quelques
-euros par mois).
+A wall of widgets, each member choosing which ones they see and in which order:
+transit, weather, the day's agenda, open tasks, the next trip, the wedding
+countdown, the shopping list, who owes whom, and the next F1 race with its news.
+
+</td><td width="45%"><img src="docs/screenshots/accueil.png" alt="Accueil"></td></tr></table>
+
+### Tasks *(Tâches)*
+
+<table><tr><td width="55%">
+
+- Subtasks, four priority levels, due date, assignee.
+- Reordering by drag & drop, plus ↑/↓ arrows for touch.
+- Filters: everything, mine, done.
+
+</td><td width="45%"><img src="docs/screenshots/taches.png" alt="Tâches"></td></tr></table>
+
+### Calendar *(Agenda)*
+
+<table><tr><td width="55%">
+
+- Google Calendar, read **and** write, across several calendars.
+- Today, week and month views.
+
+</td><td width="45%"><img src="docs/screenshots/agenda.png" alt="Agenda"></td></tr></table>
+
+### Meals *(Repas)*
+
+<table><tr><td width="55%">
+
+- Recipes: photo (stored in R2), ingredients, steps, cook time, course type,
+  meat/starch tags.
+- AI import: drop a recipe URL — an Instagram or TikTok post works too — or
+  paste the text, and Claude fills the recipe in. Bulk import from JSON.
+- Weekly menu and a "meal ideas" pool with filters (course, meat, starch,
+  ≤ 15 min…), minus the ingredients you've blacklisted.
+- One tap sends a recipe's ingredients to the shopping list.
+
+</td><td width="45%"><img src="docs/screenshots/repas.png" alt="Repas"></td></tr></table>
+
+### Shopping *(Courses)*
+
+<table><tr><td width="55%">
+
+- Shared list with quantities, grouped by aisle.
+- The aisle is resolved server-side from a shared product catalogue, so every
+  path in (typing, a recipe, an import) lands in the right one.
+- Aisles are configurable, and their order is **your** store's order.
+
+</td><td width="45%"><img src="docs/screenshots/courses.png" alt="Courses"></td></tr></table>
+
+### Money *(Argent)*
+
+<table><tr><td width="55%">
+
+Six tabs, plus a numbered summary as the mobile home of the section.
+
+- **Expenses** — recurring charges and the household's monthly total.
+- **Cash flow** — forecast balance per account, planned transfers, and what's
+  left to live on.
+- **Settling** — shared expenses with a split key, and who owes whom.
+- **Planned** — one-off expenses to come.
+- **Electricity** — meter readings, consumption and cost per month/year.
+- **Bank accounts** — balances (manual, or synced via LunchFlow), transactions,
+  bank-statement import.
+
+</td><td width="45%"><img src="docs/screenshots/argent.png" alt="Argent"></td></tr></table>
+
+### Wedding *(Mariage)*
+
+<table><tr><td width="55%">
+
+- **Guests** — one row per guest household (a couple, a family): presence day by
+  day, invitation tracking, addresses, `.xlsx` export.
+- **Todo** — tasks with an owner and a due date, grouped by urgency.
+- **Vendors** — budget items grouped by category, payment schedule, and quotes
+  or invoices attached (R2).
+- **Savings** — a month-by-month plan, per member, against the target.
+
+</td><td width="45%"><img src="docs/screenshots/mariage.png" alt="Mariage"></td></tr></table>
+
+### Wellness *(Bien-être)*
+
+<table><tr><td width="55%">
+
+Its own space per member, and four tabs.
+
+- Customisable goals: daily, weekly or monthly counters, or plain checkboxes —
+  each member defines their own.
+- Workout log with the day's activities.
+- Today's view and statistics over time.
+
+</td><td width="45%"><img src="docs/screenshots/bienetre.png" alt="Bien-être"></td></tr></table>
+
+### Activities *(Activités)*
+
+<table><tr><td width="55%">
+
+- Outing suggestions over the next 30 days, with date and venue, for **the
+  cities you follow** — OpenAgenda, plus your own RSS agenda feeds for the towns
+  it doesn't cover.
+- Three lists: shortlisted, suggestions, history (what you've ruled out).
+
+</td><td width="45%"><img src="docs/screenshots/activites.png" alt="Activités"></td></tr></table>
+
+### Films
+
+<table><tr><td width="55%">
+
+- TMDB search: poster, synopsis, runtime, age rating.
+- Suggestions restricted to **the streaming services you actually pay for**,
+  with a deep link into the right one (Netflix, Disney+, Prime Video, Canal+,
+  Apple TV, Max, Paramount+, OCS, Crunchyroll, arte.tv).
+- Three lists: to watch, suggestions, history.
+
+</td><td width="45%"><img src="docs/screenshots/films.png" alt="Films"></td></tr></table>
+
+### Trips *(Vacances)*
+
+<table><tr><td width="55%">
+
+- One trip = an itinerary (transport, lodging, activities), a packing list and a
+  budget.
+- The packing list is per person, including people without an account, and is
+  pre-filled from your own default list.
+- Tickets and documents attached (R2). Past trips get archived.
+
+</td><td width="45%"><img src="docs/screenshots/vacances.png" alt="Vacances"></td></tr></table>
+
+### Lists *(Listes)*
+
+<table><tr><td width="55%">
+
+- Personal lists and shared lists, each with its own emoji and drag & drop.
+- A wishlist filterable by who it's for.
+
+</td><td width="45%"><img src="docs/screenshots/listes.png" alt="Listes"></td></tr></table>
+
+### Chat
+
+<table><tr><td width="55%">
+
+- Claude, with tools that **read and write** household data: tasks, shopping
+  list, recipes, trips, wedding todos and guests, money settings.
+- Optional web search.
+
+</td><td width="45%"><img src="docs/screenshots/chat.png" alt="Chat"></td></tr></table>
+
+## Make it yours
+
+Two households don't want the same app. Almost nothing here is hard-coded —
+what follows is configured from **Settings**, not from the source.
+
+### The menu is yours
+
+<table><tr><td width="55%">
+
+- **Hide what you don't use.** Every entry can be switched off; the bespoke
+  modules (Wedding, Wellness, Île-de-France transit, Electricity) start off.
+- **Order them** by drag & drop, or with ↑/↓ arrows on touch.
+- **Group them** under headings you name yourself — "Every day", "Money",
+  "Later".
+- All three are **per member**: you and your partner can have completely
+  different menus over the same data.
+
+The home widgets follow the same rule: each member picks which ones show and in
+what order.
+
+</td><td width="45%"><img src="docs/screenshots/reglages-menus.png" alt="Réglages — menus"></td></tr></table>
+
+### Your cities, your tastes
+
+<table><tr><td width="55%">
+
+- **Weather cities** — as many as you want, in your own order (Paris by
+  default).
+- **Activity cities** — the towns whose listings you want to see, plus extra
+  RSS agenda feeds for the ones OpenAgenda doesn't cover.
+- **Transit** — your lines and your two stations (Île-de-France).
+- **Streaming services** — tick only the ones you subscribe to; film
+  suggestions follow.
+- **Blacklisted ingredients** — meal ideas stop suggesting what you won't eat.
+- **Shopping aisles** — rename them and put them in the order of your own
+  supermarket.
+- **Expense categories**, **default packing list**, **split key** between the
+  two members.
+- **Household members** — names, colours, avatars, plus extra people without an
+  account (children) who still appear in packing lists.
+- **Appearance** — light or dark.
+
+</td><td width="45%"><img src="docs/screenshots/reglages-villes.png" alt="Réglages — villes et goûts"></td></tr></table>
+
+### Settings *(Réglages)*
+
+Seven tabs — General, Money, Home, Activities, Shopping, Meals, Parameters —
+holding everything above, plus the sign-in allowlist and the API keys.
+
+## Stack & cost
+
+| Layer | Tech | Hosting |
+|---|---|---|
+| Frontend | Vite + React 18 + TypeScript + Tailwind + TanStack Query | Cloudflare **Pages** |
+| API | Hono (TypeScript) | Cloudflare **Workers** |
+| Database | SQLite via Drizzle ORM | Cloudflare **D1** |
+| Files | Travel tickets, recipe photos | Cloudflare **R2** |
+| Auth | Google OAuth + allowlist + session cookie | — |
+
+Everything fits in the **Cloudflare free tier** for two people (~€0/month).
+Only the Claude chat consumes Anthropic API credits (optional, a few euros a
+month).
 
 ## Installation (~30 min)
 
-Prérequis : Node 20+, pnpm 9+, un compte [Cloudflare](https://dash.cloudflare.com/)
-(gratuit, avec R2 activé), un projet Google Cloud pour l'OAuth
-([guide pas-à-pas](docs/google-oauth.md)).
+Requirements: Node 20+, pnpm 9+, a [Cloudflare](https://dash.cloudflare.com/)
+account (free, with R2 enabled), and a Google Cloud project for OAuth
+([step-by-step guide](docs/google-oauth.md)).
 
 ```bash
-git clone <ce-repo> && cd family-assistant
+git clone <this-repo> && cd family-assistant
 pnpm install
 ./scripts/setup.sh
 ```
 
-Le script crée la base D1, le bucket R2, écrit `apps/api/wrangler.toml`, te
-guide pour l'OAuth Google, pose les secrets, déploie, puis affiche l'URL du
-**wizard web** (`/setup?token=…`) qui termine la configuration : membres du
-foyer, comptes bancaires, clés API (toutes skippables), modules, catégories de
-dépenses. À la fin, tu te connectes avec ton compte Google et c'est prêt.
+The script creates the D1 database and the R2 bucket, writes
+`apps/api/wrangler.toml`, walks you through Google OAuth, sets the secrets,
+deploys, then prints the URL of the **web wizard** (`/setup?token=…`) that
+finishes the configuration: household members, bank accounts, API keys (all
+skippable), modules, expense categories. At the end you sign in with your Google
+account and you're ready.
 
-### Clés API optionnelles
+### Optional API keys
 
-| Clé | Débloque | Sans elle |
+| Key | Unlocks | Without it |
 |---|---|---|
-| [Claude (Anthropic)](docs/api-keys.md#claude-anthropic) | Chat + générations IA (recettes, voyages) | Chat désactivé |
-| [LunchFlow](docs/api-keys.md#lunchflow) | Synchro automatique des soldes bancaires | Saisie manuelle des soldes |
-| [PRIM](docs/api-keys.md#prim-île-de-france-mobilités) | Transports (Île-de-France uniquement) | Widget masquable |
-| [TMDB](docs/api-keys.md#tmdb-the-movie-database) | Films & streaming | Onglet films vide |
+| [Claude (Anthropic)](docs/api-keys.md#claude-anthropic) | Chat + AI generation (recipes, trips) | Chat disabled |
+| [LunchFlow](docs/api-keys.md#lunchflow) | Automatic bank balance sync | Balances entered by hand |
+| [PRIM](docs/api-keys.md#prim-île-de-france-mobilités) | Transit (Île-de-France only) | Widget can be hidden |
+| [TMDB](docs/api-keys.md#tmdb-the-movie-database) | Films & streaming | Empty films tab |
 
-Chacune se configure dans le wizard ou plus tard dans Réglages → Paramètre
-(stockage chiffré en base) — détails dans [docs/api-keys.md](docs/api-keys.md).
+Each one is set in the wizard or later in Settings → Parameters (stored
+encrypted in the database) — details in [docs/api-keys.md](docs/api-keys.md).
 
 ## Structure
 
 ```
-apps/web         # front React                → @gfa/web
-apps/api         # Worker Hono + D1 + R2      → @gfa/api
-packages/shared  # schémas Zod + types        → @gfa/shared (source de vérité)
-scripts/setup.sh   # installation guidée d'une nouvelle instance
-scripts/deploy.sh  # déploiement (pnpm release)
-docs/              # OAuth Google, clés API, mise à jour
+apps/web         # React frontend            → @gfa/web
+apps/api         # Hono Worker + D1 + R2     → @gfa/api
+packages/shared  # Zod schemas + types       → @gfa/shared (source of truth)
+scripts/setup.sh   # guided install of a new instance
+scripts/deploy.sh  # deployment (pnpm release)
+docs/              # Google OAuth, API keys, updating
 ```
 
-## Développement local
+## Local development
 
 ```bash
-cp apps/api/.dev.vars.example apps/api/.dev.vars   # secrets de dev
-pnpm dev          # API (:8787) + front (:5173)
-pnpm typecheck    # types des 3 packages
+cp apps/api/.dev.vars.example apps/api/.dev.vars   # dev secrets
+pnpm dev          # API (:8787) + frontend (:5173)
+pnpm typecheck    # types across the 3 packages
 ```
 
-La base D1 locale se migre avec `pnpm db:migrate:local`. Le front lit
-`VITE_API_URL` (défaut `http://localhost:8787`) et `VITE_APP_NAME` (nom affiché,
-surchageable dans `apps/web/.env.local`).
+Migrate the local D1 database with `pnpm db:migrate:local`. The frontend reads
+`VITE_API_URL` (defaults to `http://localhost:8787`) and `VITE_APP_NAME` (the
+displayed name, overridable in `apps/web/.env.local`).
 
-## Secrets (référence)
+## Secrets (reference)
 
-Posés par `setup.sh`, ou manuellement avec `wrangler secret put` depuis `apps/api` :
+Set by `setup.sh`, or by hand with `wrangler secret put` from `apps/api`:
 
-| Secret | Rôle |
+| Secret | Role |
 |---|---|
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth Google ([guide](docs/google-oauth.md)) |
-| `SESSION_SECRET` | Signe les sessions + chiffre les clés API en base |
-| `SETUP_TOKEN` | Jeton du wizard `/setup` (inerte une fois le foyer créé) |
-| `ALLOWED_EMAILS` | Amorçage de l'allowlist (`a:email,b:email`) — ensuite gérée dans Réglages |
-| `ANTHROPIC_API_KEY`, `LUNCHFLOW_API_KEY`, `PRIM_IDF_MOBILITE_API`, `PRIM_JETON`, `TMDB_API_KEY` | Replis globaux des [clés optionnelles](docs/api-keys.md) |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth ([guide](docs/google-oauth.md)) |
+| `SESSION_SECRET` | Signs sessions + encrypts API keys in the database |
+| `SETUP_TOKEN` | Token for the `/setup` wizard (inert once the household exists) |
+| `ALLOWED_EMAILS` | Seeds the allowlist (`a:email,b:email`) — managed in Settings afterwards |
+| `ANTHROPIC_API_KEY`, `LUNCHFLOW_API_KEY`, `PRIM_IDF_MOBILITE_API`, `PRIM_JETON`, `TMDB_API_KEY` | Global fallbacks for the [optional keys](docs/api-keys.md) |
 
-## Mise à jour
+## Updating
 
 ```bash
 git pull && pnpm install && pnpm release
 ```
 
-Les migrations sont appliquées automatiquement — détails dans
+Migrations are applied automatically — details in
 [docs/update.md](docs/update.md).
 
-## Contribuer
+## Contributing
 
-Les issues et PRs sont bienvenues — voir [CONTRIBUTING.md](CONTRIBUTING.md).
-Conventions de code : [CLAUDE.md](CLAUDE.md) (le repo est pensé pour être
-travaillé avec Claude Code, mais rien ne l'impose).
+Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Code
+conventions: [CLAUDE.md](CLAUDE.md) (the repo is meant to be worked on with
+Claude Code, but nothing forces it).
 
 ## Licence
 
