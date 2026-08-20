@@ -13,6 +13,7 @@ import {
 } from "@headlessui/react";
 import { DayPicker, type MonthCaptionProps } from "react-day-picker";
 import { fr } from "react-day-picker/locale";
+import { IconClose, IconFilter } from "./icons";
 
 /* ------------------------------------------------------------------ */
 /* Select                                                              */
@@ -428,6 +429,160 @@ export function SearchField({
       />
       {trailing}
     </label>
+  );
+}
+
+/**
+ * Entonnoir posé dans la barre de recherche (`trailing`). Vert plein quand au
+ * moins un filtre est actif : sans ça, rien ne dit qu'une liste est tronquée
+ * par un filtre replié dans une modale.
+ */
+export function FilterButton({
+  active,
+  onClick,
+  label = "Filtres",
+}: {
+  active: boolean;
+  onClick: () => void;
+  label?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      aria-pressed={active}
+      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition ${
+        active ? "bg-brand-600 text-on-brand" : "text-ink-2 hover:bg-surface-2"
+      }`}
+    >
+      <IconFilter size={20} />
+    </button>
+  );
+}
+
+/**
+ * Modale « Filtres » derrière le `FilterButton` d'une barre de recherche.
+ *
+ * Alignée en haut sur mobile (la place du clavier), centrée sur ordinateur.
+ * Le pied porte le « Réinitialiser » (masqué s'il n'y a rien à remettre à zéro)
+ * et le compte de ce que les filtres laissent passer — sans lui, on ferme la
+ * modale sans savoir si on vient de tout exclure.
+ */
+export function FilterModal({
+  onClose,
+  onReset,
+  summary,
+  size = "md",
+  children,
+}: {
+  onClose: () => void;
+  /** Absent = aucun filtre actif : pas de lien « Réinitialiser ». */
+  onReset?: () => void;
+  /** Ce que les filtres donnent, ex. « 3 / 12 voyages ». */
+  summary?: ReactNode;
+  /**
+   * `lg` pour une modale dense (beaucoup de champs, une rangée de pastilles) :
+   * la largeur gagnée fait tenir plus de champs par ligne, donc moins de
+   * défilement. `md` reste la valeur pour deux ou trois champs.
+   */
+  size?: "md" | "lg";
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center"
+      onClick={onClose}
+    >
+      {/* Le défilement est DANS la carte : une modale plus haute que l'écran et
+          centrée par le conteneur aurait son haut inatteignable. */}
+      <div
+        className={`card max-h-[calc(100dvh-2rem)] w-full overflow-y-auto ${
+          size === "lg" ? "max-w-2xl" : "max-w-md"
+        }`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-lg font-bold">Filtres</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Fermer"
+            className="-mr-2 flex h-tap w-tap items-center justify-center text-slate-400 hover:text-ink"
+          >
+            <IconClose size={20} />
+          </button>
+        </div>
+        <div className="space-y-4">{children}</div>
+        <div className="mt-4 flex items-center justify-between gap-3 border-t border-hairline pt-3">
+          {onReset ? (
+            <button
+              type="button"
+              onClick={onReset}
+              className="text-xs text-slate-400 underline hover:text-ink"
+            >
+              Réinitialiser
+            </button>
+          ) : (
+            <span />
+          )}
+          {summary && (
+            <div className="whitespace-nowrap text-xs text-slate-400">{summary}</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Champ d'un bloc de filtre : son libellé au-dessus, son contrôle en dessous.
+ * `hint` sert aux bornes (« min », « max »).
+ */
+export function FilterField({
+  label,
+  children,
+}: {
+  label: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="block text-xs text-slate-400">{label}</span>
+      <span className="mt-1 block">{children}</span>
+    </label>
+  );
+}
+
+/**
+ * Pastille de filtre à bascule (multi-sélection) dans une `FilterModal` :
+ * un genre de film, un mode de transport. Plusieurs actives = « ou ».
+ */
+export function FilterToggle({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      // Même pastille que `FilterChips` (42 px, plein vert quand active) : un
+      // filtre ne change pas d'allure selon qu'il est dans une barre ou dans
+      // une modale.
+      className={`flex h-[42px] items-center gap-1.5 whitespace-nowrap rounded-full px-4 text-sm font-semibold transition ${
+        active
+          ? "bg-brand-600 text-on-brand"
+          : "border border-line bg-surface text-ink-2 hover:bg-surface-2"
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 

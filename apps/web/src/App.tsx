@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useParams } from "react-router-dom";
+import { Routes, Route, Navigate, useParams, useLocation } from "react-router-dom";
 import { useMeQuery, MeProvider } from "./auth";
 import Layout from "./components/Layout";
 import AppLoader from "./components/AppLoader";
@@ -30,6 +30,25 @@ function LegacyIdeasRedirect() {
 function LegacyToolsRedirect({ base }: { base: string }) {
   const { view } = useParams();
   return <Navigate to={`${base}/${view}`} replace />;
+}
+
+/**
+ * Chemin inconnu → on remonte d'**un** cran (`/settings/outils/films` →
+ * `/settings/outils`) au lieu de retomber sur l'accueil.
+ *
+ * Pourquoi : le dernier chemin visité de chaque section est mémorisé
+ * (`useLastPaths`, localStorage). Quand un sous-menu disparaît ou est renommé,
+ * la mémoire pointe sur une URL morte et le menu semblait cassé — un clic sur
+ * « Réglages » atterrissait sur l'accueil. En remontant, on retombe sur la page
+ * parente, qui réécrit aussitôt la mémoire de la section avec un chemin valide.
+ *
+ * La boucle se termine d'elle-même : chaque passage retire un segment, donc au
+ * pire on finit sur « / ». Pas de table de routes à maintenir en double.
+ */
+function ParentRedirect() {
+  const { pathname } = useLocation();
+  const parent = pathname.replace(/\/[^/]*$/, "");
+  return <Navigate to={parent && parent !== pathname ? parent : "/"} replace />;
 }
 
 export default function App() {
@@ -102,7 +121,8 @@ export default function App() {
           <Route path="/settings" element={<Settings />} />
           <Route path="/settings/:section" element={<Settings />} />
           <Route path="/login" element={<Navigate to="/" replace />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          {/* Dernier recours : la page parente, pas l'accueil (cf. ParentRedirect). */}
+          <Route path="*" element={<ParentRedirect />} />
         </Routes>
       </Layout>
     </MeProvider>

@@ -1,12 +1,18 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SheetItem } from "../components/ui";
 import {
   SubNav,
   FilterChips,
+  FilterButton,
+  FilterField,
+  FilterModal,
+  FilterToggle,
   SearchField,
-  MobileActionBar,
+  Select,
+  Input,
+  InlineLoader,
   ActionSheet,
 } from "../components/ui";
 import {
@@ -16,10 +22,20 @@ import {
   IconHeart,
   IconMore,
   IconPlay,
-  IconSparkle,
   IconUndo,
 } from "../components/icons";
 import type { FilmAvailability } from "@gfa/shared";
+import {
+  FILM_GENRES,
+  FR_CERTS,
+  FILM_MEDIA_TYPES,
+  FILM_MEDIA_LABEL,
+  filmGenreLabel,
+  filmMediaType,
+  type FilmMediaType,
+} from "@gfa/shared";
+import { Link } from "react-router-dom";
+import { useMe } from "../auth";
 import { useLastView } from "../lib/lastView";
 import { dateFrShort, monthFr } from "../lib/format";
 import { api } from "../lib/api";
@@ -29,6 +45,18 @@ import { usePageHeader, usePageTabs } from "../components/PageHeader";
 /* ---------------- Films disponibles sur nos abonnements ---------------- */
 
 type Audience = "enfants" | "adultes";
+/**
+ * Une page de propositions. `nextOffset` est le curseur à repasser pour la
+ * suite, `hasMore` dit si le vivier a encore du neuf (cf. `GET /api/films`).
+ */
+interface FilmsPage {
+  films: Film[];
+  /** Entrées du vivier déjà parcourues, à repasser pour obtenir la suite. */
+  nextOffset?: number;
+  hasMore?: boolean;
+  error?: string;
+}
+
 /** Sous-menus de /films (URL : /films/<vue>). */
 type FilmView = "a-voir" | "propositions" | "historique";
 /** Onglets de la page (partagés entre la barre mobile et le SubNav ordinateur). */
@@ -111,6 +139,8 @@ function vodSearchUrl(title: string): string {
 /** « 2025 · 1 h 43 · dès 10 ans » — seulement ce qu'on connaît. */
 function filmMeta(f: Film): string {
   const bits: string[] = [];
+  // « Série » d'abord : la durée affichée est celle d'un épisode, pas de l'œuvre.
+  if (filmMediaType(f.id) === "tv") bits.push("Série");
   if (f.year) bits.push(f.year);
   if (f.runtime) {
     const h = Math.floor(f.runtime / 60);
@@ -140,6 +170,10 @@ type HistoryFilm = Film & { kind: "vue" | "masque"; at: string; audience?: strin
 
 interface FilmDetails {
   id: string;
+  /** Film ou série : la fiche ne dit pas les mêmes choses. */
+  mediaType: FilmMediaType;
+  /** Séries : nombre de saisons (null pour un film). */
+  seasons: number | null;
   title: string;
   tagline: string | null;
   overview: string;
@@ -168,7 +202,8 @@ interface FilmDetails {
 function FilmDetailsModal({ id, onClose }: { id: string; onClose: () => void }) {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["film-details", id],
-    queryFn: () => api.get<FilmDetails>(`/api/films/details/${id}`),
+    // `encodeURIComponent` : l'identifiant d'une série porte un « : » (`tv:1234`).
+    queryFn: () => api.get<FilmDetails>(`/api/films/details/${encodeURIComponent(id)}`),
     staleTime: 60 * 60 * 1000,
     retry: false,
   });
@@ -234,7 +269,7 @@ function FilmDetailsModal({ id, onClose }: { id: string; onClose: () => void }) 
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 sm:p-5">
           {isLoading && <div className="text-sm text-slate-400">Chargement de la fiche…</div>}
           {isError && (
-            <div className="text-sm text-slate-400">Impossible de charger la fiche du film.</div>
+            <div className="text-sm text-slate-400">Impossible de charger la fiche.</div>
           )}
           {data && (
             <>
@@ -261,9 +296,27 @@ function FilmDetailsModal({ id, onClose }: { id: string; onClose: () => void }) 
                     </span>
                   </span>
                 )}
-                {data.runtime ? <span className="text-slate-500">{runtimeFr(data.runtime)}</span> : null}
+                {/* Une série se lit par saisons, et sa durée est celle d'un
+                    épisode : l'écrire « 0 h 45 » induirait en erreur. */}
+                {data.mediaType === "tv" && (
+                  <span className="text-slate-500">
+                    {data.seasons
+                      ? `Série · ${data.seasons} saison${data.seasons > 1 ? "s" : ""}`
+                      : "Série"}
+                  </span>
+                )}
+                {data.runtime ? (
+                  <span className="text-slate-500">
+                    {data.mediaType === "tv"
+                      ? `${data.runtime} min / épisode`
+                      : runtimeFr(data.runtime)}
+                  </span>
+                ) : null}
                 {data.directors.length > 0 && (
-                  <span className="text-slate-500">De {data.directors.join(", ")}</span>
+                  <span className="text-slate-500">
+                    {data.mediaType === "tv" ? "Créée par " : "De "}
+                    {data.directors.join(", ")}
+                  </span>
                 )}
               </div>
 
@@ -325,6 +378,59 @@ function FilmDetailsModal({ id, onClose }: { id: string; onClose: () => void }) 
   );
 }
 
+/** Clé de l'option « hors abonnement » du filtre « Où le voir » de À voir. */
+const VOD_KEY = "\u0000vod";
+
+/**
+ * Âge de la certification, en années. TMDB écrit « tous publics » de plusieurs
+ * façons selon les fiches (« TP », « U »), et sort parfois un âge absent de
+ * `FR_CERTS` (« 14 ») : on compare des nombres, pas des étiquettes.
+ * `null` = certification illisible.
+ */
+function certYears(cert: string): number | null {
+  if (/^(tp|u|tous)/i.test(cert)) return 0;
+  const n = Number(cert);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Un film de « À voir » passe-t-il les filtres ? Les bornes (durée, année,
+ * âge) laissent passer les valeurs **inconnues** : un film qu'on a retenu ne
+ * doit pas disparaître de sa propre liste parce que TMDB ignore sa durée.
+ */
+function matchesFavFilters(
+  f: Film,
+  q: string,
+  runtimeMin: string,
+  runtimeMax: string,
+  yearMin: string,
+  yearMax: string,
+  certMax: string,
+  where: string[],
+  media: FilmMediaType[],
+): boolean {
+  if (q && !f.title.toLowerCase().includes(q)) return false;
+  // Le type est porté par l'identifiant (`tv:1234`) : rien à stocker en plus.
+  if (!media.includes(filmMediaType(f.id))) return false;
+  // `f.runtime` à 0 = durée inconnue côté TMDB (comme dans `filmMeta`).
+  if (runtimeMin && f.runtime && f.runtime < Number(runtimeMin)) return false;
+  if (runtimeMax && f.runtime && f.runtime > Number(runtimeMax)) return false;
+  const year = f.year ? Number(f.year.slice(0, 4)) : null;
+  if (yearMin && year && year < Number(yearMin)) return false;
+  if (yearMax && year && year > Number(yearMax)) return false;
+  if (certMax && f.ageLimit) {
+    const own = certYears(f.ageLimit);
+    const max = certYears(certMax);
+    if (own != null && max != null && own > max) return false;
+  }
+  if (where.length > 0) {
+    const own = f.providers.map((p) => p.name);
+    const hit = own.length === 0 ? where.includes(VOD_KEY) : own.some((n) => where.includes(n));
+    if (!hit) return false;
+  }
+  return true;
+}
+
 export default function Films() {
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -341,20 +447,137 @@ export default function Films() {
   const [detailId, setDetailId] = useState<string | null>(null);
   // Film dont la feuille d'actions est ouverte.
   const [sheet, setSheet] = useState<Film | HistoryFilm | null>(null);
-  // Filtre public, partagé par « À voir » et « Propositions ».
-  const [audience, setAudience] = useState<Audience>("enfants");
+  // Réglages du foyer (Réglages → Films) : publics proposés, genres par défaut
+  // et sélection de départ du filtre Film / Série.
+  const filmConfig = useMe().household.filmConfig;
+  const audiences = filmConfig.audiences;
+  /**
+   * Filtre public, partagé par « À voir » et « Propositions ». Il part sur le
+   * premier public proposé : avec un seul public réglé, la rangée de choix
+   * disparaît et l'état ne doit pas rester sur celui qui n'est plus proposé.
+   */
+  const [audienceState, setAudience] = useState<Audience>(audiences[0]);
+  const audience: Audience = audiences.includes(audienceState) ? audienceState : audiences[0];
   const [history, setHistory] = useState<HistoryFilter>("tous");
   const [historySearch, setHistorySearch] = useState("");
 
-  // « Proposer d'autres films » avance dans le vivier plutôt que de recharger
-  // la même page ; l'API boucle quand on arrive au bout.
-  const [offset, setOffset] = useState(0);
-  const { data, isLoading, isFetching, isError } = useQuery({
-    queryKey: ["films", audience, offset],
-    queryFn: () =>
-      api.get<{ films: Film[]; error?: string }>(
-        `/api/films?audience=${audience}&offset=${offset}`,
+  /**
+   * Filtres des propositions. Ils partent avec la requête : c'est TMDB qui
+   * choisit dans tout le vivier, sinon filtrer les 15 films déjà tirés en
+   * laisserait deux à l'écran.
+   */
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [fRuntimeMin, setFRuntimeMin] = useState("");
+  const [fRuntimeMax, setFRuntimeMax] = useState("");
+  const [fYearMin, setFYearMin] = useState("");
+  const [fYearMax, setFYearMax] = useState("");
+  const [fNoteMin, setFNoteMin] = useState("");
+  const [fNoteMax, setFNoteMax] = useState("");
+  const [fCert, setFCert] = useState("");
+  const [fGenres, setFGenres] = useState<number[]>([]);
+  // Catalogues interrogés. Part sur le réglage du foyer ; jamais vide, sinon la
+  // requête n'aurait rien à interroger.
+  const [fMedia, setFMedia] = useState<FilmMediaType[]>(filmConfig.mediaTypes);
+
+  const filterQs = useMemo(() => {
+    const p = new URLSearchParams();
+    // Toujours envoyé : l'API doit interroger ce que la vue affiche, pas le
+    // réglage du foyer, dès que l'utilisateur a touché au filtre.
+    p.set("media", fMedia.join(","));
+    if (fRuntimeMin) p.set("runtimeMin", fRuntimeMin);
+    if (fRuntimeMax) p.set("runtimeMax", fRuntimeMax);
+    if (fYearMin) p.set("yearMin", fYearMin);
+    if (fYearMax) p.set("yearMax", fYearMax);
+    if (fNoteMin) p.set("noteMin", fNoteMin);
+    if (fNoteMax) p.set("noteMax", fNoteMax);
+    if (fCert) p.set("certMax", fCert);
+    if (fGenres.length > 0) p.set("genres", fGenres.join(","));
+    return p.toString();
+  }, [fRuntimeMin, fRuntimeMax, fYearMin, fYearMax, fNoteMin, fNoteMax, fCert, fGenres, fMedia]);
+  // `media` part toujours : il ne compte comme filtre que s'il s'écarte du réglage.
+  const hasFilters =
+    !!fRuntimeMin ||
+    !!fRuntimeMax ||
+    !!fYearMin ||
+    !!fYearMax ||
+    !!fNoteMin ||
+    !!fNoteMax ||
+    !!fCert ||
+    fGenres.length > 0 ||
+    fMedia.length !== filmConfig.mediaTypes.length ||
+    fMedia.some((m) => !filmConfig.mediaTypes.includes(m));
+  const resetFilters = () => {
+    setFRuntimeMin("");
+    setFRuntimeMax("");
+    setFYearMin("");
+    setFYearMax("");
+    setFNoteMin("");
+    setFNoteMax("");
+    setFCert("");
+    setFGenres([]);
+    setFMedia(filmConfig.mediaTypes);
+  };
+
+  /**
+   * Filtres de « À voir ». Contrairement à ceux des propositions, ils ne
+   * partent JAMAIS avec une requête : la liste est déjà en main et complète,
+   * on la réduit sur place. Chercher ici ne doit pas proposer de films hors de
+   * la liste — c'est le rôle de l'onglet Propositions.
+   */
+  const [favSearch, setFavSearch] = useState("");
+  const [favFiltersOpen, setFavFiltersOpen] = useState(false);
+  const [favRuntimeMin, setFavRuntimeMin] = useState("");
+  const [favRuntimeMax, setFavRuntimeMax] = useState("");
+  const [favYearMin, setFavYearMin] = useState("");
+  const [favYearMax, setFavYearMax] = useState("");
+  const [favCert, setFavCert] = useState("");
+  const [favWhere, setFavWhere] = useState<string[]>([]);
+  const [favMedia, setFavMedia] = useState<FilmMediaType[]>(filmConfig.mediaTypes);
+  const favHasFilters =
+    !!favRuntimeMin ||
+    !!favRuntimeMax ||
+    !!favYearMin ||
+    !!favYearMax ||
+    !!favCert ||
+    favWhere.length > 0 ||
+    // Ne compte que si la liste est bel et bien restreinte : avec les deux
+    // catalogues cochés, rien n'est filtré.
+    favMedia.length < FILM_MEDIA_TYPES.length;
+  const resetFavFilters = () => {
+    setFavRuntimeMin("");
+    setFavRuntimeMax("");
+    setFavYearMin("");
+    setFavYearMax("");
+    setFavCert("");
+    setFavWhere([]);
+    setFavMedia(filmConfig.mediaTypes);
+  };
+
+  /**
+   * Propositions en défilement infini : chaque page repart du curseur renvoyé
+   * par l'API (`nextOffset`, les entrées de vivier qu'elle a parcourues) et
+   * s'arrête quand elle dit qu'il n'y a plus rien (`hasMore`). Compter les
+   * films affichés ne suffirait pas : l'API en écarte en chemin.
+   *
+   * Changer un filtre change le vivier : la clé de requête le porte, donc
+   * TanStack Query repart naturellement de la première page.
+   */
+  const {
+    data,
+    isLoading,
+    isFetching,
+    isError,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ["films", audience, filterQs],
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) =>
+      api.get<FilmsPage>(
+        `/api/films?audience=${audience}&offset=${pageParam}${filterQs ? `&${filterQs}` : ""}`,
       ),
+    getNextPageParam: (last) => (last.hasMore ? last.nextOffset ?? null : null),
     staleTime: 30 * 60 * 1000,
     retry: false,
     enabled: view === "propositions",
@@ -451,6 +674,48 @@ export default function Films() {
   });
 
   const favorites = favData?.films ?? [];
+  // Options du filtre « Où le voir » : uniquement ce que la liste contient
+  // vraiment — un filtre qui ne peut rien donner n'a pas à être proposé.
+  const favWhereOptions = useMemo(() => {
+    const names = new Set<string>();
+    let hasVod = false;
+    for (const f of favorites) {
+      if (f.providers.length === 0) hasVod = true;
+      for (const p of f.providers) names.add(p.name);
+    }
+    const opts = [...names].sort((a, b) => a.localeCompare(b, "fr")).map((n) => ({ value: n, label: n }));
+    return hasVod ? [...opts, { value: VOD_KEY, label: "Hors abonnement" }] : opts;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [favData]);
+  const favQuery = favSearch.trim().toLowerCase();
+  const favoritesShown = useMemo(
+    () =>
+      favorites.filter((f) =>
+        matchesFavFilters(
+          f,
+          favQuery,
+          favRuntimeMin,
+          favRuntimeMax,
+          favYearMin,
+          favYearMax,
+          favCert,
+          favWhere,
+          favMedia,
+        ),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      favData,
+      favQuery,
+      favRuntimeMin,
+      favRuntimeMax,
+      favYearMin,
+      favYearMax,
+      favCert,
+      favWhere,
+      favMedia,
+    ],
+  );
   const historySeen = seenData?.films.length ?? 0;
   const historyHidden = hiddenData?.films.length ?? 0;
   // Le sur-titre dit ce que porte l'onglet ouvert, pas toujours la même chose.
@@ -698,7 +963,25 @@ export default function Films() {
     );
   };
 
-  const films = data?.films ?? [];
+  /**
+   * Toutes les pages chargées, à plat. Dédoublonné par identifiant : TMDB
+   * répète parfois une œuvre d'une page de `discover` à l'autre, et en
+   * défilement infini le doublon se verrait dans la même grille.
+   */
+  const films = useMemo(() => {
+    const seenIds = new Set<string>();
+    const rows: Film[] = [];
+    for (const page of data?.pages ?? []) {
+      for (const f of page.films) {
+        if (seenIds.has(f.id)) continue;
+        seenIds.add(f.id);
+        rows.push(f);
+      }
+    }
+    return rows;
+  }, [data]);
+  // L'erreur éventuelle (clé TMDB, plateformes) vient de la première page.
+  const filmsError = data?.pages[0]?.error;
   const searchResults = searchData?.films ?? [];
 
   // Historique = vus + masqués fusionnés, du plus récent au plus ancien.
@@ -733,19 +1016,118 @@ export default function Films() {
       });
   }
 
-  const audienceChips = (
-    <FilterChips
-      value={audience}
-      onChange={(v) => setAudience(v as Audience)}
-      items={[
-        { value: "enfants", label: "Enfants" },
-        { value: "adultes", label: "Adultes" },
-      ]}
-    />
+  /**
+   * Défilement infini : dès que la sentinelle posée sous la grille approche de
+   * l'écran (400 px avant), on demande la page suivante. Un seul appel à la
+   * fois — `isFetchingNextPage` garde la porte.
+   */
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = loadMoreRef.current;
+    if (!el || view !== "propositions" || searching || !hasNextPage) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && !isFetchingNextPage) fetchNextPage();
+      },
+      { rootMargin: "400px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [view, searching, hasNextPage, isFetchingNextPage, fetchNextPage, films.length]);
+
+  /**
+   * Rangée Film / Série d'une modale de filtres. Refuse de tout décocher : un
+   * filtre vide ne montrerait rien et ne dirait pas pourquoi.
+   */
+  const mediaToggles = (
+    value: FilmMediaType[],
+    onChange: (v: FilmMediaType[]) => void,
+    /** Sélection d'âge posée à droite, sur la même ligne (une rangée de gagnée). */
+    trailing?: ReactNode,
+  ) => (
+    <div className="flex flex-wrap items-end gap-3">
+      <div>
+        <div className="text-xs text-slate-400">Média</div>
+        <div className="mt-1.5 flex flex-wrap gap-2">
+          {FILM_MEDIA_TYPES.map((t) => (
+            <FilterToggle
+              key={t}
+              active={value.includes(t)}
+              onClick={() =>
+                onChange(
+                  value.includes(t)
+                    ? value.length > 1
+                      ? value.filter((x) => x !== t)
+                      : value
+                    : [...value, t],
+                )
+              }
+            >
+              {FILM_MEDIA_LABEL[t]}
+            </FilterToggle>
+          ))}
+        </div>
+      </div>
+      {/* `flex-1` : la sélection prend la place qui reste et ne passe à la ligne
+          que si l'écran ne peut vraiment pas les tenir côte à côte. */}
+      {trailing && <div className="ml-auto min-w-[10rem] flex-1 sm:max-w-xs">{trailing}</div>}
+    </div>
   );
 
+  /** Plafond d'âge — partagé par les deux modales de filtres. */
+  const certField = (value: string, onChange: (v: string) => void) => (
+    <FilterField label="Âge minimum du film (au plus)">
+      <Select
+        value={value}
+        onChange={onChange}
+        placeholder="Peu importe"
+        options={[
+          { value: "", label: "Peu importe" },
+          ...FR_CERTS.map((cert) => ({
+            value: cert,
+            label: cert === "U" ? "Tous publics" : `Dès ${cert} ans`,
+          })),
+        ]}
+      />
+    </FilterField>
+  );
+
+  /**
+   * Rangée Enfants / Adultes — absente quand le foyer n'en propose qu'un
+   * (Réglages → Films) : un filtre à une seule valeur ne filtre rien et prend
+   * une rangée à l'écran.
+   */
+  /**
+   * Ce que « sans choix » interroge vraiment : les genres réglés dans
+   * Réglages → Films, pour chaque public proposé. Écrit noir sur blanc plutôt
+   * que codé en dur — le réglage existe, la phrase doit le refléter.
+   */
+  const defaultGenresText = (() => {
+    const part = (a: Audience) => {
+      const labels = filmConfig.genres[a].map(filmGenreLabel).filter(Boolean);
+      return labels.length > 0 ? labels.join(", ").toLowerCase() : "tout le catalogue";
+    };
+    return audiences.length > 1
+      ? audiences.map((a) => `${part(a)} pour ${a === "enfants" ? "Enfants" : "Adultes"}`).join(" ; ")
+      : part(audiences[0]);
+  })();
+
+  const audienceChips =
+    audiences.length > 1 ? (
+      <FilterChips
+        value={audience}
+        onChange={(v) => setAudience(v as Audience)}
+        items={audiences.map((a) => ({
+          value: a,
+          label: a === "enfants" ? "Enfants" : "Adultes",
+        }))}
+      />
+    ) : null;
+
   return (
-    <div className="flex flex-col gap-3 pb-28 md:pb-0">
+    // Plus de barre d'action ancrée sur cette page : la marge basse n'a plus à
+    // lui réserver la place, juste à ne pas coller la dernière ligne au bord.
+    <div className="flex flex-col gap-3 pb-6 md:pb-0">
       {/* Onglets de premier niveau (pleine largeur), comme les autres pages */}
       <SubNav
         value={view}
@@ -756,6 +1138,18 @@ export default function Films() {
 
       {view === "a-voir" ? (
         <>
+          {/* Recherche et filtres portent sur la liste déjà retenue, rien
+              d'autre : aucun appel à TMDB depuis cet onglet. */}
+          {favorites.length > 0 && (
+            <SearchField
+              value={favSearch}
+              onChange={setFavSearch}
+              placeholder="Chercher dans À voir…"
+              trailing={
+                <FilterButton active={favHasFilters} onClick={() => setFavFiltersOpen(true)} />
+              }
+            />
+          )}
           {audienceChips}
           {favorites.length === 0 ? (
             <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
@@ -768,12 +1162,117 @@ export default function Films() {
                 Voir les propositions
               </button>
             </div>
+          ) : favoritesShown.length === 0 ? (
+            /* La liste n'est pas vide, ce sont les filtres qui ne laissent
+               rien passer : on le dit, et on donne de quoi les retirer. */
+            <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+              <p>
+                {favQuery
+                  ? `Aucun film « ${favSearch.trim()} » dans À voir.`
+                  : "Aucun film de À voir ne correspond à ces filtres."}
+              </p>
+              {/* Un état vide donne toujours de quoi en sortir : selon ce qui
+                  exclut tout, on retire les filtres ou on vide la recherche. */}
+              {favHasFilters ? (
+                <button type="button" onClick={resetFavFilters} className="btn">
+                  Retirer les filtres
+                </button>
+              ) : (
+                <button type="button" onClick={() => setFavSearch("")} className="btn">
+                  Vider la recherche
+                </button>
+              )}
+            </div>
           ) : (
             /* Même grille que les propositions : l'affiche reste ce qui fait
                choisir. Seule l'action change — ici on marque le film vu. */
             <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
-              {favorites.map((f) => card(f, "seen"))}
+              {favoritesShown.map((f) => card(f, "seen"))}
             </div>
+          )}
+
+          {favFiltersOpen && (
+            <FilterModal
+              onClose={() => setFavFiltersOpen(false)}
+              onReset={favHasFilters ? resetFavFilters : undefined}
+              summary={`${favoritesShown.length} / ${favorites.length} film${favorites.length > 1 ? "s" : ""}`}
+              size="lg"
+            >
+              {mediaToggles(favMedia, setFavMedia, certField(favCert, setFavCert))}
+              <div className="grid grid-cols-2 gap-3">
+                <FilterField label="Durée min. (min)">
+                  <Input
+                    type="number"
+                    min={0}
+                    step={5}
+                    inputMode="numeric"
+                    value={favRuntimeMin}
+                    onChange={(e) => setFavRuntimeMin(e.target.value)}
+                    placeholder="—"
+                  />
+                </FilterField>
+                <FilterField label="Durée max. (min)">
+                  <Input
+                    type="number"
+                    min={0}
+                    step={5}
+                    inputMode="numeric"
+                    value={favRuntimeMax}
+                    onChange={(e) => setFavRuntimeMax(e.target.value)}
+                    placeholder="—"
+                  />
+                </FilterField>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <FilterField label="Sortie après">
+                  <Input
+                    type="number"
+                    min={1900}
+                    max={2100}
+                    inputMode="numeric"
+                    value={favYearMin}
+                    onChange={(e) => setFavYearMin(e.target.value)}
+                    placeholder="1900"
+                  />
+                </FilterField>
+                <FilterField label="Sortie avant">
+                  <Input
+                    type="number"
+                    min={1900}
+                    max={2100}
+                    inputMode="numeric"
+                    value={favYearMax}
+                    onChange={(e) => setFavYearMax(e.target.value)}
+                    placeholder="2100"
+                  />
+                </FilterField>
+              </div>
+              {favWhereOptions.length > 1 && (
+                <div>
+                  <div className="text-xs text-slate-400">Où le voir</div>
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    {favWhereOptions.map((o) => (
+                      <FilterToggle
+                        key={o.value}
+                        active={favWhere.includes(o.value)}
+                        onClick={() =>
+                          setFavWhere(
+                            favWhere.includes(o.value)
+                              ? favWhere.filter((x) => x !== o.value)
+                              : [...favWhere, o.value],
+                          )
+                        }
+                      >
+                        {o.label}
+                      </FilterToggle>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* Pas de note ni de type ici : l'instantané enregistré quand on
+                  retient un film ne les porte pas — un filtre qui ne filtre
+                  rien vaut moins que son absence. */}
+            </FilterModal>
           )}
         </>
       ) : view === "historique" ? (
@@ -809,31 +1308,33 @@ export default function Films() {
         </>
       ) : (
         <>
-          {/* Recherche par titre parmi les plateformes activées du foyer */}
-          <SearchField value={search} onChange={setSearch} placeholder="Chercher un film…" />
-          <div className="flex items-center gap-2">
-            {audienceChips}
-            <button
-              type="button"
-              disabled={isFetching}
-              onClick={() => setOffset((o) => o + (films.length || 15))}
-              className="btn-primary ml-auto hidden shrink-0 whitespace-nowrap md:inline-flex"
-            >
-              Proposer d'autres films
-            </button>
-          </div>
+          {/* Recherche par titre parmi les plateformes activées du foyer. Les
+              filtres portent sur les propositions : chercher un titre précis,
+              c'est déjà choisir, donc l'entonnoir s'efface pendant la
+              recherche plutôt que de restreindre ses résultats en silence. */}
+          <SearchField
+            value={search}
+            onChange={setSearch}
+            placeholder="Chercher un film…"
+            trailing={
+              searching ? undefined : (
+                <FilterButton active={hasFilters} onClick={() => setFiltersOpen(true)} />
+              )
+            }
+          />
+          {audienceChips}
 
           {/* Ces avertissements portent sur les propositions : la recherche, elle,
               fonctionne sans plateforme activée (tout ressort en VOD). */}
           {isError && !searching && (
             <div className="card text-sm text-slate-400">Impossible de charger les films.</div>
           )}
-          {data?.error === "no_key" && (
+          {filmsError === "no_key" && (
             <div className="card text-sm text-amber-600">
               Clé TMDB manquante : ajoute le secret <code>TMDB_API_KEY</code> côté serveur.
             </div>
           )}
-          {data?.error === "no_provider" && !searching && (
+          {filmsError === "no_provider" && !searching && (
             <div className="card text-sm text-amber-600">
               Aucune plateforme activée. Active-les dans les Réglages.
             </div>
@@ -853,22 +1354,162 @@ export default function Films() {
           ) : isLoading ? (
             <PageLoader variant="activites" />
           ) : films.length === 0 ? (
-            <div className="card text-sm text-slate-400">Aucune proposition pour le moment.</div>
+            <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+              <p>
+                {hasFilters
+                  ? "Aucun film de vos plateformes ne correspond à ces filtres."
+                  : "Aucune proposition pour le moment."}
+              </p>
+              {hasFilters && (
+                <button type="button" onClick={resetFilters} className="btn">
+                  Retirer les filtres
+                </button>
+              )}
+            </div>
           ) : (
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">{films.map((f) => card(f))}</div>
+            <>
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
+                {films.map((f) => card(f))}
+              </div>
+              {/* Sentinelle : charge la suite avant d'atteindre le bas (cf.
+                  `rootMargin` de l'observateur), pour que le défilement ne
+                  s'arrête pas sur un vide. */}
+              <div ref={loadMoreRef} aria-hidden="true" className="h-px" />
+              {isFetchingNextPage ? (
+                <InlineLoader label="Encore des films…" className="justify-center py-2" />
+              ) : hasNextPage ? (
+                // Repli si l'observateur ne se déclenche pas (défilement dans un
+                // conteneur, navigateur récalcitrant) : l'action reste possible.
+                <button
+                  type="button"
+                  onClick={() => fetchNextPage()}
+                  className="btn mx-auto mt-1"
+                >
+                  Charger plus de films
+                </button>
+              ) : (
+                <p className="py-2 text-center text-xs text-slate-400">
+                  Fin des propositions pour ces filtres.
+                </p>
+              )}
+            </>
           )}
 
-          {/* Renouveler la sélection : l'action principale de l'onglet. */}
-          {!searching && (
-            <MobileActionBar
-              label="Proposer d'autres films"
-              icon={<IconSparkle size={20} />}
-              disabled={isFetching}
-              onClick={() => {
-                setOffset((o) => o + (films.length || 15));
-                window.scrollTo({ top: 0 });
-              }}
-            />
+          {filtersOpen && (
+            <FilterModal
+              onClose={() => setFiltersOpen(false)}
+              onReset={hasFilters ? resetFilters : undefined}
+              summary={isFetching ? "Recherche…" : `${films.length} film${films.length > 1 ? "s" : ""}`}
+              size="lg"
+            >
+              {mediaToggles(fMedia, setFMedia, certField(fCert, setFCert))}
+              <div className="grid grid-cols-2 gap-3">
+                <FilterField label="Durée min. (min)">
+                  <Input
+                    type="number"
+                    min={0}
+                    step={5}
+                    inputMode="numeric"
+                    value={fRuntimeMin}
+                    onChange={(e) => setFRuntimeMin(e.target.value)}
+                    placeholder="—"
+                  />
+                </FilterField>
+                <FilterField label="Durée max. (min)">
+                  <Input
+                    type="number"
+                    min={0}
+                    step={5}
+                    inputMode="numeric"
+                    value={fRuntimeMax}
+                    onChange={(e) => setFRuntimeMax(e.target.value)}
+                    placeholder="—"
+                  />
+                </FilterField>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <FilterField label="Sortie après">
+                  <Input
+                    type="number"
+                    min={1900}
+                    max={2100}
+                    inputMode="numeric"
+                    value={fYearMin}
+                    onChange={(e) => setFYearMin(e.target.value)}
+                    placeholder="1900"
+                  />
+                </FilterField>
+                <FilterField label="Sortie avant">
+                  <Input
+                    type="number"
+                    min={1900}
+                    max={2100}
+                    inputMode="numeric"
+                    value={fYearMax}
+                    onChange={(e) => setFYearMax(e.target.value)}
+                    placeholder="2100"
+                  />
+                </FilterField>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <FilterField label="Note min. / 10">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={10}
+                    step={0.5}
+                    inputMode="decimal"
+                    value={fNoteMin}
+                    onChange={(e) => setFNoteMin(e.target.value)}
+                    placeholder="—"
+                  />
+                </FilterField>
+                <FilterField label="Note max. / 10">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={10}
+                    step={0.5}
+                    inputMode="decimal"
+                    value={fNoteMax}
+                    onChange={(e) => setFNoteMax(e.target.value)}
+                    placeholder="—"
+                  />
+                </FilterField>
+              </div>
+              <div>
+                <div className="text-xs text-slate-400">Type</div>
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  {FILM_GENRES.map((g) => (
+                    <FilterToggle
+                      key={g.id}
+                      active={fGenres.includes(g.id)}
+                      onClick={() =>
+                        setFGenres(
+                          fGenres.includes(g.id)
+                            ? fGenres.filter((x) => x !== g.id)
+                            : [...fGenres, g.id],
+                        )
+                      }
+                    >
+                      {g.label}
+                    </FilterToggle>
+                  ))}
+                </div>
+                <p className="mt-1.5 text-xs text-slate-400">
+                  {fGenres.length > 0 ? (
+                    "Les types choisis remplacent ceux réglés par défaut."
+                  ) : (
+                    <>
+                      Sans choix : {defaultGenresText}.{" "}
+                      <Link to="/settings/films" className="underline hover:text-ink">
+                        Modifier dans les Réglages
+                      </Link>
+                    </>
+                  )}
+                </p>
+              </div>
+            </FilterModal>
           )}
         </>
       )}

@@ -540,7 +540,7 @@ export default function Setup() {
             <p className="text-xs text-slate-400">
               Chaque clé est optionnelle : sans elle, la fonctionnalité correspondante est
               simplement désactivée. Toutes sont stockées chiffrées et configurables plus tard
-              dans Réglages → Paramètre.
+              dans Réglages → Paramètres.
             </p>
             {API_KEY_DOCS.map((d) => (
               <div key={d.key} className="space-y-2 rounded-xl border border-slate-200 p-3 dark:border-slate-800">

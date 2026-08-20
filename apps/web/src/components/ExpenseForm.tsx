@@ -2,6 +2,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import type { ExpenseCategory } from "@gfa/shared";
 import { Select, Input, DateInput } from "./ui";
 import { MemberAvatar, usePersonMeta } from "./MemberAvatar";
+import { useMe } from "../auth";
 import { eurToCents, todayIso } from "../lib/format";
 
 // Valeurs calculées d'une dépense partagée (centimes signés, négatif = dépense).
@@ -48,12 +49,14 @@ export function ExpenseFormModal({
   onSave: (v: ExpenseFormValues) => void;
 }) {
   const personMeta = usePersonMeta();
+  // Nouvelle dépense : le payeur part sur le membre choisi dans Réglages → Argent.
+  const defaultPayer = useMe().household.defaultPayer;
   const defaultCategory =
     categories && categories.length
       ? categories.find((c) => c.key === "nourriture")?.key ?? categories[0].key
       : null;
   const [form, setForm] = useState({
-    paidBy: initial?.paidBy ?? ("a" as "a" | "b"),
+    paidBy: initial?.paidBy ?? defaultPayer,
     label: initial?.label ?? "",
     amount: initial?.amount ?? 0,
     date: initial?.date ?? todayIso(),

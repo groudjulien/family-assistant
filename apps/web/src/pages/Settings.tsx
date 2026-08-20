@@ -28,6 +28,8 @@ import type {
   DefaultPackingItem,
   PackingCategory,
   PackingPerson,
+  Member,
+  FilmConfig,
 } from "@gfa/shared";
 import {
   FR_CERTS,
@@ -39,11 +41,17 @@ import {
   PACKING_CATEGORIES,
   PACKING_CATEGORY_META,
   comparePackingItems,
+  streamingProviderLabel,
+  MEMBERS,
+  FILM_AUDIENCE,
+  FILM_GENRES,
+  FILM_MEDIA_TYPES,
+  FILM_MEDIA_LABEL,
 } from "@gfa/shared";
 import { PersonAvatar, PersonPicker, usePackingPersons, useMembers, MemberAvatar } from "../components/MemberAvatar";
 import { useMe } from "../auth";
 import { api } from "../lib/api";
-import { Select, SearchSelect, SubNav, Input } from "../components/ui";
+import { Select, SearchSelect, SubNav, Input, FilterToggle } from "../components/ui";
 import {
   NAV,
   ALWAYS_VISIBLE_NAV,
@@ -420,12 +428,6 @@ const CERT_LABEL: Record<string, string> = {
   "12": "12 ans et +",
   "16": "16 ans et +",
   "18": "18 ans et +",
-};
-const PROVIDER_LABEL: Record<string, string> = {
-  Netflix: "Netflix",
-  "Amazon Prime Video": "Amazon Prime",
-  "Disney Plus": "Disney+",
-  "Canal+": "Canal+",
 };
 
 // Icône « lien externe » (flèche sortant d'un cadre) pour rediriger vers la
@@ -1966,19 +1968,12 @@ function MembersConfigCard() {
   );
 }
 
-export default function Settings() {
-  const me = useMe();
-  const qc = useQueryClient();
-  const navigate = useNavigate();
-  const logout = async () => {
-    await api.post("/auth/logout");
-    await qc.invalidateQueries();
-    navigate("/login");
-  };
-  const [splitJ, setSplitJ] = useState(me.household.defaultSplitA);
-  const [theme, setThemeState] = useState<Theme>(getStoredTheme());
-  const [newCity, setNewCity] = useState("");
+/* ---------------- Réglages du menu Activités (Activités / Films / Vacances) ---------------- */
 
+// Villes suivies + flux RSS d'agendas (Activités → Activités).
+function ActivitesConfigCard() {
+  const qc = useQueryClient();
+  const [newCity, setNewCity] = useState("");
   const { data: cities } = useQuery({
     queryKey: ["cities"],
     queryFn: () => api.get<FollowedCity[]>("/api/household/cities"),
@@ -2020,6 +2015,366 @@ export default function Settings() {
     mutationFn: (id: string) => api.del(`/api/household/activity-feeds/${id}`),
     onSuccess: invalidateFeeds,
   });
+
+  return (
+    <div className="card">
+      <div className="text-sm font-semibold">🎲 Activités</div>
+      <p className="mb-3 mt-1 text-xs text-slate-400">
+        Villes suivies pour les activités (Activités → Activités).
+      </p>
+      <div className="mb-3 flex flex-wrap gap-2">
+        {(cities ?? []).map((c) => (
+          <span
+            key={c.id}
+            className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
+          >
+            {c.name}
+            <button
+              onClick={() => removeCity.mutate(c.id)}
+              className="text-slate-300 hover:text-red-500"
+              title="Retirer"
+            >
+              ✕
+            </button>
+          </span>
+        ))}
+        {(cities ?? []).length === 0 && (
+          <span className="text-sm text-slate-400">Aucune ville suivie.</span>
+        )}
+      </div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (newCity.trim()) addCity.mutate(newCity.trim());
+        }}
+        className="flex gap-2 sm:max-w-md"
+      >
+        <input
+          value={newCity}
+          onChange={(e) => setNewCity(e.target.value)}
+          placeholder="Ajouter une ville…"
+          className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+        />
+        <button
+          className="btn-primary shrink-0"
+          disabled={addCity.isPending || !newCity.trim()}
+        >
+          Ajouter
+        </button>
+      </form>
+
+      <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
+        <div className="text-sm font-semibold">Flux RSS d'agendas</div>
+        {/* `break-words` : l'URL d'exemple est un mot insécable qui poussait
+            la carte au-delà de l'écran sur mobile (scroll latéral). */}
+        <p className="mb-3 mt-1 break-words text-xs text-slate-400">
+          Pour les villes absentes d'OpenAgenda : ajoute le flux RSS des événements de leur
+          site (ex. <code className="break-all">https://www.ma-ville.fr/evenement/feed/</code>).
+        </p>
+        <div className="mb-3 space-y-1.5">
+          {(activityFeeds ?? []).map((f) => (
+            <div
+              key={f.id}
+              className="flex min-w-0 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800"
+            >
+              <span className="max-w-[40%] truncate font-medium">{f.name}</span>
+              <span className="min-w-0 flex-1 truncate text-xs text-slate-400">{f.url}</span>
+              <button
+                onClick={() => removeFeed.mutate(f.id)}
+                className="shrink-0 text-slate-300 hover:text-red-500"
+                title="Retirer"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+          {(activityFeeds ?? []).length === 0 && (
+            <span className="text-sm text-slate-400">Aucun flux suivi.</span>
+          )}
+        </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (newFeed.name.trim() && newFeed.url.trim()) addFeed.mutate(newFeed);
+          }}
+          className="flex flex-col gap-2 sm:flex-row"
+        >
+          <input
+            value={newFeed.name}
+            onChange={(e) => setNewFeed({ ...newFeed, name: e.target.value })}
+            placeholder="Ville"
+            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 sm:w-44"
+          />
+          <input
+            type="url"
+            value={newFeed.url}
+            onChange={(e) => setNewFeed({ ...newFeed, url: e.target.value })}
+            placeholder="URL du flux RSS…"
+            className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+          />
+          <button
+            className="btn-primary"
+            disabled={addFeed.isPending || !newFeed.name.trim() || !newFeed.url.trim()}
+          >
+            Ajouter
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Réglages Films du foyer : ce qu'on propose (film / série), à qui (publics) et
+ * dans quels genres. Ces valeurs sont l'état de départ des filtres des pages
+ * Films — les changer ne change pas ce qui est déjà retenu, seulement ce qu'on
+ * propose et ce que les filtres portent à l'ouverture.
+ *
+ * Une seule mutation pour tout l'objet : `mediaTypes` et `audiences` ne peuvent
+ * pas être vides (le schéma Zod l'impose), donc on ne laisse pas décocher le
+ * dernier — sinon la page n'aurait plus rien à proposer.
+ */
+function FilmDefaultsCard() {
+  const me = useMe();
+  const qc = useQueryClient();
+  const cfg = me.household.filmConfig;
+  const save = useMutation({
+    mutationFn: (next: FilmConfig) => api.patch("/api/household/film-config", next),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["me"] });
+      qc.invalidateQueries({ queryKey: ["films"] });
+    },
+  });
+
+  /** Bascule une valeur d'une liste, en refusant de la vider. */
+  const toggleKept = <T,>(list: T[], v: T): T[] =>
+    list.includes(v) ? (list.length > 1 ? list.filter((x) => x !== v) : list) : [...list, v];
+
+  return (
+    <div className="card">
+      <div className="text-sm font-semibold">🎛️ Ce qu'on propose</div>
+      <p className="mb-3 mt-1 text-xs text-slate-400">
+        Valeurs de départ des filtres de la page Films (Activités → Films).
+      </p>
+
+      <div className="text-sm font-medium">Films ou séries</div>
+      <p className="mb-2 text-xs text-slate-400">
+        Sélection de départ du filtre Film / Série. Les deux = catalogues mélangés.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {FILM_MEDIA_TYPES.map((t) => (
+          <FilterToggle
+            key={t}
+            active={cfg.mediaTypes.includes(t)}
+            onClick={() => save.mutate({ ...cfg, mediaTypes: toggleKept(cfg.mediaTypes, t) })}
+          >
+            {FILM_MEDIA_LABEL[t]}
+          </FilterToggle>
+        ))}
+      </div>
+
+      <div className="mt-4 text-sm font-medium">Publics proposés</div>
+      <p className="mb-2 text-xs text-slate-400">
+        Un seul public retire le choix Enfants / Adultes des pages : il n'aurait rien à choisir.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {FILM_AUDIENCE.map((a) => (
+          <FilterToggle
+            key={a}
+            active={cfg.audiences.includes(a)}
+            onClick={() => save.mutate({ ...cfg, audiences: toggleKept(cfg.audiences, a) })}
+          >
+            {a === "enfants" ? "Enfants" : "Adultes"}
+          </FilterToggle>
+        ))}
+      </div>
+
+      {FILM_AUDIENCE.filter((a) => cfg.audiences.includes(a)).map((a) => (
+        <div key={a} className="mt-4">
+          <div className="text-sm font-medium">
+            Genres par défaut — {a === "enfants" ? "Enfants" : "Adultes"}
+          </div>
+          <p className="mb-2 text-xs text-slate-400">
+            Genres interrogés quand aucun n'est choisi dans les filtres de la page.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {FILM_GENRES.map((g) => (
+              <FilterToggle
+                key={g.id}
+                active={cfg.genres[a].includes(g.id)}
+                onClick={() =>
+                  save.mutate({
+                    ...cfg,
+                    genres: {
+                      ...cfg.genres,
+                      [a]: cfg.genres[a].includes(g.id)
+                        ? cfg.genres[a].filter((x) => x !== g.id)
+                        : [...cfg.genres[a], g.id],
+                    },
+                  })
+                }
+              >
+                {g.label}
+              </FilterToggle>
+            ))}
+          </div>
+          {cfg.genres[a].length === 0 && (
+            <p className="mt-1.5 text-xs text-warning">
+              Aucun genre : TMDB proposera tout son catalogue pour ce public.
+            </p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Plateformes de streaming + âge max des films enfants (Activités → Films).
+function FilmsConfigCard() {
+  const qc = useQueryClient();
+  const { data: providers } = useQuery({
+    queryKey: ["providers"],
+    queryFn: () => api.get<StreamingProvider[]>("/api/household/providers"),
+  });
+  const { data: config } = useQuery({
+    queryKey: ["household-config"],
+    queryFn: () => api.get<HouseholdConfig>("/api/household/config"),
+  });
+  const invalidateFilms = () => {
+    qc.invalidateQueries({ queryKey: ["films"] });
+    qc.invalidateQueries({ queryKey: ["film-favorites"] });
+  };
+  const toggleProvider = useMutation({
+    mutationFn: (p: StreamingProvider) =>
+      api.patch(`/api/household/providers/${p.id}`, { enabled: !p.enabled }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["providers"] });
+      invalidateFilms();
+    },
+  });
+  const setKidsCert = useMutation({
+    mutationFn: (cert: string) => api.patch("/api/household", { kidsMaxCert: cert }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["household-config"] });
+      invalidateFilms();
+    },
+  });
+
+  return (
+    <div className="card">
+      <div className="text-sm font-semibold">🎬 Films</div>
+      <p className="mb-3 mt-1 text-xs text-slate-400">
+        Plateformes utilisées pour proposer des films (Activités → Films).
+      </p>
+      <div className="flex flex-wrap gap-3">
+        {(providers ?? []).map((p) => (
+          <button
+            key={p.id}
+            onClick={() => toggleProvider.mutate(p)}
+            title={`${streamingProviderLabel(p.tmdbId, p.name)}${p.enabled ? "" : " (désactivé)"}`}
+            className={`flex items-center gap-2 rounded-xl border px-3 py-2 transition ${
+              p.enabled
+                ? "border-brand-600 bg-brand-50 dark:bg-brand-600/15"
+                : "border-slate-200 opacity-45 grayscale dark:border-slate-700"
+            }`}
+          >
+            {p.logo ? (
+              <img src={p.logo} alt={p.name} className="h-7 w-7 rounded-md object-cover" />
+            ) : (
+              <span className="text-sm font-medium">{streamingProviderLabel(p.tmdbId, p.name)}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      <div className="mt-4 text-sm font-medium">Âge max pour les films enfants</div>
+      <p className="mb-2 text-xs text-slate-400">
+        Certification cinéma française maximale (« Tous publics » convient pour ≤ 7 ans).
+      </p>
+      <div className="w-48">
+        <Select
+          value={config?.kidsMaxCert ?? "U"}
+          onChange={(v) => setKidsCert.mutate(v)}
+          options={FR_CERTS.map((c) => ({ value: c, label: CERT_LABEL[c] }))}
+        />
+      </div>
+    </div>
+  );
+}
+
+// Réglages des voyages (Activités → Vacances).
+function VacancesConfigCard() {
+  return (
+    <div className="card">
+      <div className="text-base font-bold">✈️ Vacances</div>
+      <p className="mt-1 text-xs text-slate-400">
+        Réglages utilisés par Activités → Vacances.
+      </p>
+      <div className="mt-4 space-y-4">
+        <ExpenseCategoriesCard />
+        <div className="border-t border-slate-100 pt-4 dark:border-slate-800">
+          <DefaultPackingCard />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Personne proposée par défaut comme payeuse d'une dépense partagée
+ * (`ExpenseFormModal`). Config de foyer : les deux membres voient le même
+ * réglage.
+ */
+function DefaultPayerRow() {
+  const me = useMe();
+  const qc = useQueryClient();
+  const save = useMutation({
+    mutationFn: (payer: Member) => api.patch("/api/household", { defaultPayer: payer }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
+  });
+
+  return (
+    <div className="mt-4 border-t border-slate-100 pt-4 dark:border-slate-800">
+      <div className="text-sm font-medium">Qui paye par défaut</div>
+      <p className="mb-2 text-xs text-slate-400">
+        Membre présélectionné à la création d'une dépense partagée.
+      </p>
+      <div className="flex gap-3">
+        {MEMBERS.map((m) => {
+          const active = me.household.defaultPayer === m;
+          return (
+            <button
+              key={m}
+              type="button"
+              onClick={() => !active && save.mutate(m)}
+              aria-pressed={active}
+              className={`flex min-h-tap items-center gap-2 rounded-xl border px-3 py-2 text-sm transition ${
+                active
+                  ? "border-brand-600 bg-brand-50 font-semibold dark:bg-brand-600/15"
+                  : "border-line text-ink-2 hover:border-brand-400"
+              }`}
+            >
+              <MemberAvatar id={m} className="h-7 w-7 text-2xs" />
+              {me.household.members[m].name}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export default function Settings() {
+  const me = useMe();
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const logout = async () => {
+    await api.post("/auth/logout");
+    await qc.invalidateQueries();
+    navigate("/login");
+  };
+  const [splitJ, setSplitJ] = useState(me.household.defaultSplitA);
+  const [theme, setThemeState] = useState<Theme>(getStoredTheme());
 
   // Lignes de transport
   const [lineId, setLineId] = useState(IDF_LINES[0].id);
@@ -2112,34 +2467,6 @@ export default function Settings() {
   });
   const stationOpts = (stationData?.stations ?? []).map((s) => ({ value: s, label: s }));
 
-  const { data: providers } = useQuery({
-    queryKey: ["providers"],
-    queryFn: () => api.get<StreamingProvider[]>("/api/household/providers"),
-  });
-  const { data: config } = useQuery({
-    queryKey: ["household-config"],
-    queryFn: () => api.get<HouseholdConfig>("/api/household/config"),
-  });
-  const invalidateFilms = () => {
-    qc.invalidateQueries({ queryKey: ["films"] });
-    qc.invalidateQueries({ queryKey: ["film-favorites"] });
-  };
-  const toggleProvider = useMutation({
-    mutationFn: (p: StreamingProvider) =>
-      api.patch(`/api/household/providers/${p.id}`, { enabled: !p.enabled }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers"] });
-      invalidateFilms();
-    },
-  });
-  const setKidsCert = useMutation({
-    mutationFn: (cert: string) => api.patch("/api/household", { kidsMaxCert: cert }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["household-config"] });
-      invalidateFilms();
-    },
-  });
-
   const chooseTheme = (t: Theme) => {
     setTheme(t);
     setThemeState(t);
@@ -2154,20 +2481,33 @@ export default function Settings() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
   });
 
-  const SECTIONS = ["generale", "argent", "accueil", "outils", "courses", "repas", "parametre"] as const;
+  const SECTIONS = [
+    "generale",
+    "accueil",
+    "courses",
+    "repas",
+    "outils",
+    "films",
+    "vacances",
+    "argent",
+    "parametre",
+  ] as const;
   type Section = (typeof SECTIONS)[number];
+  // `outils` = l'onglet Activités (slug historique, gardé pour ne pas casser les liens).
   const { section } = useParams();
   const tab: Section = (SECTIONS as readonly string[]).includes(section ?? "")
     ? (section as Section)
     : "generale";
   const TABS = [
     { value: "generale", label: "Générale", icon: "⚙️" },
-    { value: "argent", label: "Argent", icon: "💶" },
     { value: "accueil", label: "Accueil", icon: "🏠" },
-    { value: "outils", label: "Activités", icon: "🏖️" },
     { value: "courses", label: "Courses", icon: "🛒" },
     { value: "repas", label: "Repas", icon: "🍽️" },
-    { value: "parametre", label: "Paramètre", icon: "🔧" },
+    { value: "outils", label: "Activités", icon: "🎲" },
+    { value: "films", label: "Films", icon: "🎬" },
+    { value: "vacances", label: "Vacances", icon: "✈️" },
+    { value: "argent", label: "Argent", icon: "💶" },
+    { value: "parametre", label: "Paramètres", icon: "🔧" },
   ];
 
   usePageHeader("Réglages");
@@ -2268,154 +2608,18 @@ export default function Settings() {
         </div>
       )}
 
-      {/* Activités + Films (menu Activités) */}
-      {tab === "outils" && (
-      <div className="grid gap-4 lg:grid-cols-2">
-        <div className="card">
-          <div className="text-sm font-semibold">🎲 Activités</div>
-          <p className="mb-3 mt-1 text-xs text-slate-400">
-            Villes suivies pour les activités (Activités → Activités).
-          </p>
-          <div className="mb-3 flex flex-wrap gap-2">
-            {(cities ?? []).map((c) => (
-              <span
-                key={c.id}
-                className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
-              >
-                {c.name}
-                <button
-                  onClick={() => removeCity.mutate(c.id)}
-                  className="text-slate-300 hover:text-red-500"
-                  title="Retirer"
-                >
-                  ✕
-                </button>
-              </span>
-            ))}
-            {(cities ?? []).length === 0 && (
-              <span className="text-sm text-slate-400">Aucune ville suivie.</span>
-            )}
-          </div>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (newCity.trim()) addCity.mutate(newCity.trim());
-            }}
-            className="flex gap-2"
-          >
-            <input
-              value={newCity}
-              onChange={(e) => setNewCity(e.target.value)}
-              placeholder="Ajouter une ville…"
-              className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-            />
-            <button
-              className="btn-primary shrink-0"
-              disabled={addCity.isPending || !newCity.trim()}
-            >
-              Ajouter
-            </button>
-          </form>
+      {/* Un onglet par menu de la section Activités : Activités, Films, Vacances. */}
+      {tab === "outils" && <ActivitesConfigCard />}
 
-          <div className="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
-            <div className="text-sm font-semibold">Flux RSS d'agendas</div>
-            {/* `break-words` : l'URL d'exemple est un mot insécable qui poussait
-                la carte au-delà de l'écran sur mobile (scroll latéral). */}
-            <p className="mb-3 mt-1 break-words text-xs text-slate-400">
-              Pour les villes absentes d'OpenAgenda : ajoute le flux RSS des événements de leur
-              site (ex. <code className="break-all">https://www.ma-ville.fr/evenement/feed/</code>).
-            </p>
-            <div className="mb-3 space-y-1.5">
-              {(activityFeeds ?? []).map((f) => (
-                <div
-                  key={f.id}
-                  className="flex min-w-0 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm dark:border-slate-700 dark:bg-slate-800"
-                >
-                  <span className="max-w-[40%] truncate font-medium">{f.name}</span>
-                  <span className="min-w-0 flex-1 truncate text-xs text-slate-400">{f.url}</span>
-                  <button
-                    onClick={() => removeFeed.mutate(f.id)}
-                    className="shrink-0 text-slate-300 hover:text-red-500"
-                    title="Retirer"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
-              {(activityFeeds ?? []).length === 0 && (
-                <span className="text-sm text-slate-400">Aucun flux suivi.</span>
-              )}
-            </div>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (newFeed.name.trim() && newFeed.url.trim()) addFeed.mutate(newFeed);
-              }}
-              className="flex flex-col gap-2 sm:flex-row"
-            >
-              <input
-                value={newFeed.name}
-                onChange={(e) => setNewFeed({ ...newFeed, name: e.target.value })}
-                placeholder="Ville"
-                className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 sm:w-44"
-              />
-              <input
-                type="url"
-                value={newFeed.url}
-                onChange={(e) => setNewFeed({ ...newFeed, url: e.target.value })}
-                placeholder="URL du flux RSS…"
-                className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-              />
-              <button
-                className="btn-primary"
-                disabled={addFeed.isPending || !newFeed.name.trim() || !newFeed.url.trim()}
-              >
-                Ajouter
-              </button>
-            </form>
-          </div>
+      {tab === "films" && (
+        <div className="grid items-start gap-4 lg:grid-cols-2">
+          <FilmsConfigCard />
+          <FilmDefaultsCard />
         </div>
-
-        <div className="card">
-          <div className="text-sm font-semibold">🎬 Films</div>
-          <p className="mb-3 mt-1 text-xs text-slate-400">
-            Plateformes utilisées pour proposer des films (Activités → Films).
-          </p>
-          <div className="flex flex-wrap gap-3">
-            {(providers ?? []).map((p) => (
-              <button
-                key={p.id}
-                onClick={() => toggleProvider.mutate(p)}
-                title={`${PROVIDER_LABEL[p.name] ?? p.name}${p.enabled ? "" : " (désactivé)"}`}
-                className={`flex items-center gap-2 rounded-xl border px-3 py-2 transition ${
-                  p.enabled
-                    ? "border-brand-600 bg-brand-50 dark:bg-brand-600/15"
-                    : "border-slate-200 opacity-45 grayscale dark:border-slate-700"
-                }`}
-              >
-                {p.logo ? (
-                  <img src={p.logo} alt={p.name} className="h-7 w-7 rounded-md object-cover" />
-                ) : (
-                  <span className="text-sm font-medium">{PROVIDER_LABEL[p.name] ?? p.name}</span>
-                )}
-              </button>
-            ))}
-          </div>
-
-          <div className="mt-4 text-sm font-medium">Âge max pour les films enfants</div>
-          <p className="mb-2 text-xs text-slate-400">
-            Certification cinéma française maximale (« Tous publics » convient pour ≤ 7 ans).
-          </p>
-          <div className="w-48">
-            <Select
-              value={config?.kidsMaxCert ?? "U"}
-              onChange={(v) => setKidsCert.mutate(v)}
-              options={FR_CERTS.map((c) => ({ value: c, label: CERT_LABEL[c] }))}
-            />
-          </div>
-        </div>
-      </div>
       )}
+
+      {/* Vacances porte assez de contenu pour la pleine largeur. */}
+      {tab === "vacances" && <VacancesConfigCard />}
 
       {/* Transports (Accueil) */}
       {tab === "accueil" && (
@@ -2556,6 +2760,7 @@ export default function Settings() {
                 {updateSplit.isPending ? "Enregistrement…" : "Enregistrer"}
               </button>
             </div>
+            <DefaultPayerRow />
           </div>
         </div>
       )}
@@ -2564,22 +2769,6 @@ export default function Settings() {
       {tab === "accueil" && (
         <div className="grid gap-4 lg:grid-cols-2">
           <WeatherCitiesCard />
-        </div>
-      )}
-
-      {/* Réglages des voyages : catégories de dépenses + affaires à prendre */}
-      {tab === "outils" && (
-        <div className="card">
-          <div className="text-base font-bold">✈️ Voyage</div>
-          <p className="mt-1 text-xs text-slate-400">
-            Réglages utilisés par Activités → Vacances.
-          </p>
-          <div className="mt-4 space-y-4">
-            <ExpenseCategoriesCard />
-            <div className="border-t border-slate-100 pt-4 dark:border-slate-800">
-              <DefaultPackingCard />
-            </div>
-          </div>
         </div>
       )}
 

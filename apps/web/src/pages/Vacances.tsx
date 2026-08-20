@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import type {
   Trip,
   TripItem,
@@ -22,12 +22,18 @@ import {
   Select,
   Input,
   Checkbox,
+  DateInput,
   DateTimeInput,
   DateRangeCalendar,
   SubNav,
   MobileActionBar,
   OverflowMenu,
   FilterChips,
+  FilterButton,
+  FilterField,
+  FilterModal,
+  FilterToggle,
+  SearchField,
   ActionSheet,
 } from "../components/ui";
 import { useToast } from "../components/Toast";
@@ -130,6 +136,30 @@ function tripLength(t: Trip): number | null {
   return Math.round((day(t.endDate ?? t.startDate) - day(t.startDate)) / 86_400_000) + 1;
 }
 
+/** Recherche insensible à la casse et aux accents (« gênes » trouve « Genes »). */
+const norm = (s: string) =>
+  s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+/**
+ * Texte cherchable d'un voyage. Un voyage n'a pas de champ « ville » ni
+ * « pays » : ils vivent dans ses étapes (l'adresse d'un logement, les villes de
+ * départ et d'arrivée d'un transport), au même endroit que les noms des
+ * activités et des logements. On cherche donc dans tout ce texte à la fois.
+ */
+function tripHaystack(t: Trip, items: TripItem[]): string {
+  return norm(
+    [
+      t.name,
+      ...items.flatMap((i) => [i.title, i.address, i.fromPlace, i.toPlace, i.description]),
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+}
+
 export default function Vacances() {
   const navigate = useNavigate();
   const { view, tripId, tab } = useParams();
@@ -169,8 +199,69 @@ function TripsIndex({ statut, trips }: { statut: "prevu" | "archive"; trips?: Tr
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [modal, setModal] = useState<{ trip: Trip | null } | null>(null);
+  const [search, setSearch] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  // Période : le voyage doit chevaucher la fenêtre (pas y être contenu — un
+  // road trip de trois semaines répond bien à « et en août ? »).
+  const [fFrom, setFFrom] = useState("");
+  const [fTo, setFTo] = useState("");
+  const [fDaysMin, setFDaysMin] = useState("");
+  const [fDaysMax, setFDaysMax] = useState("");
+  const [fBudgetMin, setFBudgetMin] = useState("");
+  const [fBudgetMax, setFBudgetMax] = useState("");
+  const [fModes, setFModes] = useState<TransportMode[]>([]);
 
   const list = (trips ?? []).filter((t) => (statut === "archive" ? t.archived : !t.archived));
+
+  /**
+   * Les étapes de chaque voyage de l'onglet : elles portent la ville, le pays,
+   * les activités, les logements et les modes de transport — donc tout ce sur
+   * quoi on cherche et on filtre. Même clé de cache que les cartes, qui les
+   * demandent déjà toutes : rien de plus sur le réseau.
+   */
+  const itemQueries = useQueries({
+    queries: list.map((t) => ({
+      queryKey: ["trip-items", t.id],
+      queryFn: () => api.get<TripItem[]>(`/api/trips/${t.id}/items`),
+    })),
+  });
+  const itemsByTrip = new Map(list.map((t, i) => [t.id, itemQueries[i]?.data ?? []]));
+
+  const hasFilters =
+    !!fFrom || !!fTo || !!fDaysMin || !!fDaysMax || !!fBudgetMin || !!fBudgetMax || fModes.length > 0;
+  const resetFilters = () => {
+    setFFrom("");
+    setFTo("");
+    setFDaysMin("");
+    setFDaysMax("");
+    setFBudgetMin("");
+    setFBudgetMax("");
+    setFModes([]);
+  };
+
+  const q = norm(search.trim());
+  const matches = (t: Trip) => {
+    const items = itemsByTrip.get(t.id) ?? [];
+    if (q && !tripHaystack(t, items).includes(q)) return false;
+    const start = t.startDate?.slice(0, 10) ?? null;
+    const end = (t.endDate ?? t.startDate)?.slice(0, 10) ?? null;
+    if (fFrom && (!end || end < fFrom)) return false;
+    if (fTo && (!start || start > fTo)) return false;
+    const days = tripLength(t);
+    if (fDaysMin && (days == null || days < Number(fDaysMin))) return false;
+    if (fDaysMax && (days == null || days > Number(fDaysMax))) return false;
+    // Un voyage sans budget saisi ne peut pas répondre à une borne de budget.
+    if (fBudgetMin && (t.budget == null || t.budget < eurToCents(Number(fBudgetMin)))) return false;
+    if (fBudgetMax && (t.budget == null || t.budget > eurToCents(Number(fBudgetMax)))) return false;
+    if (
+      fModes.length > 0 &&
+      !items.some((i) => i.type === "transport" && i.mode && fModes.includes(i.mode))
+    )
+      return false;
+    return true;
+  };
+  const shown = list.filter(matches);
+  const narrowed = !!q || hasFilters;
   // Le prochain départ décide du sur-titre : c'est l'information qu'on vient
   // chercher en ouvrant la page.
   const today = todayIso();
@@ -187,13 +278,17 @@ function TripsIndex({ statut, trips }: { statut: "prevu" | "archive"; trips?: Tr
     : null;
   usePageHeader(
     "Vacances",
-    ongoing
-      ? `${ongoing.name} · en cours`
-      : days !== null
-        ? `${next!.name} dans ${days} jour${days > 1 ? "s" : ""}`
-        : statut === "archive"
-          ? `${list.length} voyage${list.length > 1 ? "s" : ""} archivé${list.length > 1 ? "s" : ""}`
-          : "0 voyage prévu",
+    // Une recherche en cours répond à sa propre question : combien de voyages
+    // elle laisse. Le prochain départ ne redevient le sur-titre qu'après.
+    narrowed
+      ? `${shown.length} voyage${shown.length > 1 ? "s" : ""} sur ${list.length}`
+      : ongoing
+        ? `${ongoing.name} · en cours`
+        : days !== null
+          ? `${next!.name} dans ${days} jour${days > 1 ? "s" : ""}`
+          : statut === "archive"
+            ? `${list.length} voyage${list.length > 1 ? "s" : ""} archivé${list.length > 1 ? "s" : ""}`
+            : "0 voyage prévu",
   );
 
   const remove = useMutation({
@@ -203,6 +298,15 @@ function TripsIndex({ statut, trips }: { statut: "prevu" | "archive"; trips?: Tr
 
   return (
     <>
+      {list.length > 0 && (
+        <SearchField
+          value={search}
+          onChange={setSearch}
+          placeholder="Voyage, ville, pays, activité, logement…"
+          trailing={<FilterButton active={hasFilters} onClick={() => setFiltersOpen(true)} />}
+        />
+      )}
+
       {list.length === 0 ? (
         <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
           <p>{statut === "archive" ? "Aucun voyage archivé." : "Aucun voyage prévu."}</p>
@@ -212,8 +316,22 @@ function TripsIndex({ statut, trips }: { statut: "prevu" | "archive"; trips?: Tr
             </button>
           )}
         </div>
+      ) : shown.length === 0 ? (
+        <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+          <p>Aucun voyage ne correspond {q ? "à cette recherche" : "à ces filtres"}.</p>
+          <button
+            type="button"
+            onClick={() => {
+              setSearch("");
+              resetFilters();
+            }}
+            className="btn"
+          >
+            Tout afficher
+          </button>
+        </div>
       ) : (
-        list.map((t) => (
+        shown.map((t) => (
           <TripStateCard
             key={t.id}
             trip={t}
@@ -221,6 +339,90 @@ function TripsIndex({ statut, trips }: { statut: "prevu" | "archive"; trips?: Tr
             onEdit={() => setModal({ trip: t })}
           />
         ))
+      )}
+
+      {filtersOpen && (
+        <FilterModal
+          onClose={() => setFiltersOpen(false)}
+          onReset={hasFilters ? resetFilters : undefined}
+          summary={`${shown.length} / ${list.length} voyage${list.length > 1 ? "s" : ""}`}
+        >
+          <div className="grid grid-cols-2 gap-3">
+            <FilterField label="Période — à partir du">
+              <DateInput value={fFrom} onChange={setFFrom} placeholder="Peu importe" />
+            </FilterField>
+            <FilterField label="Jusqu'au">
+              <DateInput value={fTo} onChange={setFTo} placeholder="Peu importe" />
+            </FilterField>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <FilterField label="Durée min. (jours)">
+              <Input
+                type="number"
+                min={1}
+                inputMode="numeric"
+                value={fDaysMin}
+                onChange={(e) => setFDaysMin(e.target.value)}
+                placeholder="—"
+              />
+            </FilterField>
+            <FilterField label="Durée max. (jours)">
+              <Input
+                type="number"
+                min={1}
+                inputMode="numeric"
+                value={fDaysMax}
+                onChange={(e) => setFDaysMax(e.target.value)}
+                placeholder="—"
+              />
+            </FilterField>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <FilterField label="Budget min. (€)">
+              <Input
+                type="number"
+                min={0}
+                inputMode="numeric"
+                value={fBudgetMin}
+                onChange={(e) => setFBudgetMin(e.target.value)}
+                placeholder="—"
+              />
+            </FilterField>
+            <FilterField label="Budget max. (€)">
+              <Input
+                type="number"
+                min={0}
+                inputMode="numeric"
+                value={fBudgetMax}
+                onChange={(e) => setFBudgetMax(e.target.value)}
+                placeholder="—"
+              />
+            </FilterField>
+          </div>
+          <div>
+            <div className="text-xs text-slate-400">Type de transport</div>
+            <div className="mt-1.5 flex flex-wrap gap-2">
+              {TRANSPORT_MODES.map((m) => (
+                <FilterToggle
+                  key={m}
+                  active={fModes.includes(m)}
+                  onClick={() =>
+                    setFModes(
+                      fModes.includes(m) ? fModes.filter((x) => x !== m) : [...fModes, m],
+                    )
+                  }
+                >
+                  {TRANSPORT_META[m].icon} {TRANSPORT_META[m].label}
+                </FilterToggle>
+              ))}
+            </div>
+            {fModes.length > 0 && (
+              <p className="mt-1.5 text-xs text-slate-400">
+                Voyages dont le planning contient au moins un de ces transports.
+              </p>
+            )}
+          </div>
+        </FilterModal>
       )}
 
       <MobileActionBar label="Nouveau voyage" onClick={() => setModal({ trip: null })} />
@@ -283,7 +485,9 @@ function TripStateCard({
 
   const packed = (packing ?? []).filter((i) => i.checked).length;
   const nPacking = (packing ?? []).length;
-  const spent = (expenses ?? []).reduce((s, e) => s + e.amount, 0);
+  // Une dépense est stockée en négatif (argent qui sort) : sur la carte on lit
+  // « 511 € / 450 € », pas « -511 € » — le libellé « Budget » dit déjà le sens.
+  const spent = (expenses ?? []).reduce((s, e) => s + Math.abs(e.amount), 0);
   const countdown = tripCountdown(t);
   const length = tripLength(t);
   // Première étape à venir : ce qu'on a besoin de savoir avant de partir.
@@ -358,7 +562,7 @@ function TripStateCard({
                     {eur0(spent)} / {eur0(t.budget)}
                   </span>
                 </div>
-                {bar(spent, t.budget, spent > t.budget ? "bg-danger" : "bg-info")}
+                {bar(spent, t.budget, spent > t.budget ? "bg-warning" : "bg-brand-600")}
               </div>
             )}
           </div>
@@ -709,6 +913,16 @@ function TripExpenses({ trip }: { trip: Trip }) {
   const fullTotal = sum(expenses);
   const pct = (amt: number) => (total > 0 ? Math.round((amt / total) * 100) : 0);
 
+  // Totaux par catégorie (sans catégorie = divers), du plus gros poste au plus petit.
+  const categoryRows = (() => {
+    const byCat = new Map<string, number>();
+    for (const e of filtered) {
+      const key = e.category ?? "divers";
+      byCat.set(key, (byCat.get(key) ?? 0) + Math.abs(e.amount));
+    }
+    return [...byCat.entries()].filter(([, amt]) => amt > 0).sort((a, b) => b[1] - a[1]);
+  })();
+
   // Budget : restant + par jour sur le reste du voyage (sur le total complet).
   const budget = trip.budget;
   const remaining = budget != null ? budget - fullTotal : null;
@@ -895,6 +1109,42 @@ function TripExpenses({ trip }: { trip: Trip }) {
               })}
             </div>
           </div>
+
+          {/* Où part l'argent : le poids de chaque poste, du plus gros au plus petit. */}
+          {categoryRows.length > 0 && (
+            <div className="card mt-1">
+              <div className="eyebrow">Par catégorie</div>
+              <div className="mt-2 flex flex-col gap-2.5">
+                {categoryRows.map(([key, amt]) => {
+                  const cm = catMeta(key === "divers" ? null : key);
+                  return (
+                    <div key={key} className="flex items-center gap-3">
+                      <span aria-hidden="true" className="w-6 shrink-0 text-center text-lg">
+                        {cm.icon}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline justify-between gap-2 text-sm">
+                          <span className="truncate">{cm.name}</span>
+                          <span className="flex shrink-0 items-baseline gap-2 tabular-nums">
+                            <span className="font-semibold">{eur(amt)}</span>
+                            <span className="w-9 text-right text-xs text-slate-400">
+                              {pct(amt)} %
+                            </span>
+                          </span>
+                        </div>
+                        <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-surface-2">
+                          <span
+                            className="block h-full rounded-full bg-brand-600"
+                            style={{ width: `${pct(amt)}%` }}
+                          />
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </>
       )}
 

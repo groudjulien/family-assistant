@@ -5,6 +5,8 @@ import {
   extraPersonSchema,
   parseWeddingDays,
   WEDDING_DAYS_DEFAULT,
+  filmConfigSchema,
+  DEFAULT_FILM_CONFIG,
   type Member,
 } from "@gfa/shared";
 import { z } from "zod";
@@ -209,6 +211,7 @@ auth.get("/me", requireAuth, (c) => {
       currency: h.currency,
       defaultSplitA: h.defaultSplitA,
       defaultSplitB: h.defaultSplitB,
+      defaultPayer: h.defaultPayer === "b" ? "b" : "a",
       defaultAccountId: h.defaultAccountId ?? null,
       members: {
         a: { name: h.memberAName, color: h.memberAColor },
@@ -230,6 +233,15 @@ auth.get("/me", requireAuth, (c) => {
         }
       })(),
       weddingTargetDate: h.weddingTargetDate,
+      // Réglages Films : parsés défensivement, comme les autres colonnes JSON —
+      // une valeur illisible retombe sur le comportement d'origine.
+      filmConfig: (() => {
+        try {
+          return h.filmConfig ? filmConfigSchema.parse(JSON.parse(h.filmConfig)) : DEFAULT_FILM_CONFIG;
+        } catch {
+          return DEFAULT_FILM_CONFIG;
+        }
+      })(),
     },
   });
 });

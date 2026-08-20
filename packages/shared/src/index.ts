@@ -197,6 +197,33 @@ export const updateStreamingProviderSchema = z.object({
   enabled: z.boolean(),
 });
 
+/**
+ * Catalogue des plateformes de streaming proposées dans Réglages → Activités →
+ * Films. `tmdbId` est l'identifiant TMDB de la plateforme en France (filtre
+ * `with_watch_providers`) ; `name` est le nom TMDB (celui stocké en base, il
+ * sert de repli d'affichage) et `label` le nom montré dans l'UI.
+ *
+ * L'API garantit une ligne `streaming_provider` par entrée pour le foyer
+ * (`ensureProviders`) : ajouter une plateforme ici la fait apparaître dans les
+ * Réglages, désactivée, sans toucher aux plateformes déjà activées.
+ */
+export const STREAMING_PROVIDERS = [
+  { tmdbId: 8, name: "Netflix", label: "Netflix" },
+  { tmdbId: 119, name: "Amazon Prime Video", label: "Amazon Prime" },
+  { tmdbId: 337, name: "Disney Plus", label: "Disney+" },
+  { tmdbId: 381, name: "Canal+", label: "Canal+" },
+  { tmdbId: 350, name: "Apple TV", label: "Apple TV+" },
+  { tmdbId: 531, name: "Paramount Plus", label: "Paramount+" },
+  // En France, Max et HBO sont un seul service côté TMDB (« HBO Max », 1899) :
+  // pas d'entrée séparée, ce serait la même plateforme deux fois.
+  { tmdbId: 1899, name: "HBO Max", label: "HBO Max" },
+] as const;
+
+/** Libellé d'affichage d'une plateforme, par son identifiant TMDB. */
+export function streamingProviderLabel(tmdbId: number, fallback: string): string {
+  return STREAMING_PROVIDERS.find((p) => p.tmdbId === tmdbId)?.label ?? fallback;
+}
+
 // Certifications cinéma FR (du plus permissif au plus restreint)
 export const FR_CERTS = ["U", "10", "12", "16", "18"] as const;
 
@@ -218,6 +245,113 @@ export type FilmAudience = (typeof FILM_AUDIENCE)[number];
  */
 export const FILM_AVAILABILITY = ["subscription", "vod", "unknown"] as const;
 export type FilmAvailability = (typeof FILM_AVAILABILITY)[number];
+
+/**
+ * Film ou série : TMDB expose deux catalogues distincts (`/movie`, `/tv`) et
+ * les propositions comme la liste « À voir » peuvent porter les deux.
+ */
+export const FILM_MEDIA_TYPES = ["movie", "tv"] as const;
+export type FilmMediaType = (typeof FILM_MEDIA_TYPES)[number];
+
+/** Nom affiché d'un type de média (UI en français). */
+export const FILM_MEDIA_LABEL: Record<FilmMediaType, string> = {
+  movie: "Film",
+  tv: "Série",
+};
+
+/**
+ * Identifiant d'une œuvre, tel qu'il est stocké (`film_favorite.external_id`)
+ * et échangé avec le front.
+ *
+ * Une série porte le préfixe `tv:` — l'identifiant TMDB 550 désigne un film
+ * **et** une série différents, sans préfixe les deux se confondraient dans les
+ * favoris, les vus et les masqués. Un film garde son identifiant nu : les
+ * lignes déjà en base restent valides, aucune migration de données.
+ */
+export function filmMediaId(type: FilmMediaType, tmdbId: string | number): string {
+  return type === "tv" ? `tv:${tmdbId}` : String(tmdbId);
+}
+
+/** Type de média porté par un identifiant (cf. `filmMediaId`). */
+export function filmMediaType(externalId: string): FilmMediaType {
+  return externalId.startsWith("tv:") ? "tv" : "movie";
+}
+
+/** Identifiant TMDB nu, sans le préfixe de type. */
+export function filmTmdbId(externalId: string): string {
+  return externalId.startsWith("tv:") ? externalId.slice(3) : externalId;
+}
+
+/**
+ * Genres TMDB (identifiants officiels, stables) et leur nom français.
+ *
+ * Lu par le front (les pastilles du filtre « type ») **et** par l'API (le
+ * paramètre `with_genres` de discover) : les identifiants ne doivent exister
+ * qu'à un seul endroit. Ordre = ordre d'affichage, les genres les plus
+ * demandés d'abord.
+ *
+ * `tvId` : équivalent dans la **liste des genres séries**, qui n'est pas celle
+ * des films (TMDB fusionne Action et Aventure en « Action & Adventure »,
+ * Science-fiction et Fantastique en « Sci-Fi & Fantasy »). Absent = le genre
+ * n'existe pas pour les séries ; il est alors simplement ignoré côté séries
+ * plutôt que de renvoyer une liste vide.
+ */
+export const FILM_GENRES: { id: number; label: string; tvId?: number }[] = [
+  { id: 28, label: "Action", tvId: 10759 },
+  { id: 35, label: "Comédie", tvId: 35 },
+  { id: 878, label: "Science-fiction", tvId: 10765 },
+  { id: 99, label: "Documentaire", tvId: 99 },
+  { id: 16, label: "Animation", tvId: 16 },
+  { id: 12, label: "Aventure", tvId: 10759 },
+  { id: 10751, label: "Familial", tvId: 10751 },
+  { id: 14, label: "Fantastique", tvId: 10765 },
+  { id: 18, label: "Drame", tvId: 18 },
+  { id: 53, label: "Thriller", tvId: 9648 },
+  { id: 80, label: "Policier", tvId: 80 },
+  { id: 9648, label: "Mystère", tvId: 9648 },
+  { id: 27, label: "Horreur" },
+  { id: 10749, label: "Romance" },
+  { id: 36, label: "Histoire" },
+  { id: 10752, label: "Guerre", tvId: 10768 },
+  { id: 37, label: "Western", tvId: 37 },
+  { id: 10402, label: "Musique" },
+];
+
+/** Nom français d'un genre, par identifiant TMDB (film). */
+export function filmGenreLabel(id: number): string | null {
+  return FILM_GENRES.find((g) => g.id === id)?.label ?? null;
+}
+
+/**
+ * Réglages de la section Films, partagés par le foyer (Réglages → Films) :
+ * ce qu'on propose par défaut, et donc ce que les filtres portent à l'ouverture.
+ *
+ * - `mediaTypes` — valeur de départ du filtre Film / Série (au moins un) ;
+ * - `audiences` — publics proposés (au moins un) ; un seul public retire la
+ *   rangée de choix Enfants / Adultes des pages, qui n'aurait rien à choisir ;
+ * - `genres` — genres interrogés quand aucun n'est choisi dans les filtres,
+ *   par public.
+ */
+export const filmConfigSchema = z.object({
+  mediaTypes: z.array(z.enum(FILM_MEDIA_TYPES)).min(1),
+  audiences: z.array(z.enum(FILM_AUDIENCE)).min(1),
+  genres: z.object({
+    enfants: z.array(z.number().int()),
+    adultes: z.array(z.number().int()),
+  }),
+});
+export type FilmConfig = z.infer<typeof filmConfigSchema>;
+
+/** Réglages d'origine : le comportement de l'app avant qu'ils soient réglables. */
+export const DEFAULT_FILM_CONFIG: FilmConfig = {
+  mediaTypes: ["movie"],
+  audiences: ["enfants", "adultes"],
+  // Animation pour les enfants ; action et fantastique pour les adultes.
+  genres: { enfants: [16], adultes: [28, 14] },
+};
+
+/** Mise à jour des réglages Films (Réglages → Films). */
+export const updateFilmConfigSchema = filmConfigSchema;
 
 export const createFilmFavoriteSchema = z.object({
   externalId: z.string().min(1),
@@ -563,6 +697,8 @@ export const meSchema = z.object({
     currency: z.string(),
     defaultSplitA: z.number(),
     defaultSplitB: z.number(),
+    /** Membre proposé par défaut comme payeur d'une dépense partagée. */
+    defaultPayer: z.enum(MEMBERS),
     defaultAccountId: z.string().nullable(), // compte proposé par défaut (transactions)
     /** Noms/couleurs d'affichage des deux membres. */
     members: membersConfigSchema,
@@ -572,6 +708,8 @@ export const meSchema = z.object({
     weddingDays: z.array(weddingDaySchema),
     /** Date du mariage : le compte à rebours en tête de la section la lit. */
     weddingTargetDate: z.string(),
+    /** Réglages de la section Films (Réglages → Films). */
+    filmConfig: filmConfigSchema,
   }),
 });
 export type Me = z.infer<typeof meSchema>;

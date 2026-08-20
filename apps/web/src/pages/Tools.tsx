@@ -187,6 +187,14 @@ function ActivityImage({
   );
 }
 
+/**
+ * Grille des cartes pleines : une colonne sur mobile, jusqu'à 4 par rangée sur
+ * ordinateur (la zone de contenu plafonne à `max-w-5xl` → ~240 px par carte à
+ * partir de `xl`, en dessous on retombe à 3 puis 2 pour garder l'affiche et le
+ * titre lisibles).
+ */
+const heroGrid = "grid gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4";
+
 type TimeFilter = "tout" | "week-end" | "semaine";
 
 function Activites({ view }: { view: Tab }) {
@@ -467,7 +475,7 @@ function Activites({ view }: { view: Tab }) {
             {dated.length > 0 && (
               <div className="flex flex-col gap-2">
                 <div className="eyebrow">Datées · {dated.length}</div>
-                {dated.map((a) => heroCard(a, "itineraire"))}
+                <div className={heroGrid}>{dated.map((a) => heroCard(a, "itineraire"))}</div>
               </div>
             )}
             {section(`Sans date · ${undated.length}`, undated, (a, last) => row(a, last, "sheet"))}
@@ -597,7 +605,7 @@ function Activites({ view }: { view: Tab }) {
           {shown.ongoing.length > 0 && (
             <div className="flex flex-col gap-2">
               <div className="eyebrow">En cours</div>
-              {shown.ongoing.map((a) => heroCard(a, "fav"))}
+              <div className={heroGrid}>{shown.ongoing.map((a) => heroCard(a, "fav"))}</div>
             </div>
           )}
           {section("Ce week-end", shown.weekend, (a, last) => row(a, last, "fav"))}

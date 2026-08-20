@@ -21,6 +21,9 @@ import {
   updateMembersConfigSchema,
   setPersonEmailsSchema,
   FR_CERTS,
+  MEMBERS,
+  STREAMING_PROVIDERS,
+  updateFilmConfigSchema,
 } from "@gfa/shared";
 import {
   household,
@@ -332,6 +335,7 @@ const updateSchema = z.object({
   name: z.string().min(1).optional(),
   defaultSplitA: z.number().int().min(0).max(100).optional(),
   defaultSplitB: z.number().int().min(0).max(100).optional(),
+  defaultPayer: z.enum(MEMBERS).optional(),
   kidsMaxCert: z.enum(FR_CERTS).optional(),
 });
 
@@ -344,6 +348,7 @@ router.patch("/", async (c) => {
       ...(body.name !== undefined && { name: body.name }),
       ...(body.defaultSplitA !== undefined && { defaultSplitA: body.defaultSplitA }),
       ...(body.defaultSplitB !== undefined && { defaultSplitB: body.defaultSplitB }),
+      ...(body.defaultPayer !== undefined && { defaultPayer: body.defaultPayer }),
       ...(body.kidsMaxCert !== undefined && { kidsMaxCert: body.kidsMaxCert }),
     })
     .where(eq(household.id, c.get("household").id));
@@ -593,7 +598,50 @@ router.delete("/access/:email", async (c) => {
   return c.json({ ok: true });
 });
 
+/**
+ * Garantit une ligne par plateforme du catalogue partagé (`STREAMING_PROVIDERS`)
+ * pour ce foyer. Les plateformes ajoutées au catalogue apparaissent ainsi dans
+ * les Réglages, **désactivées**, sans toucher à celles déjà configurées : c'est
+ * la clé TMDB qui identifie la ligne, pas son nom (renommer côté TMDB ne crée
+ * pas de doublon).
+ */
+async function ensureProviders(
+  db: AppContext["Variables"]["db"],
+  householdId: string,
+): Promise<void> {
+  const existing = await db
+    .select({ tmdbId: streamingProvider.tmdbId })
+    .from(streamingProvider)
+    .where(eq(streamingProvider.householdId, householdId));
+  const known = new Set(existing.map((r) => r.tmdbId));
+  const missing = STREAMING_PROVIDERS.filter((p) => !known.has(p.tmdbId));
+  if (missing.length === 0) return;
+  await db.insert(streamingProvider).values(
+    missing.map((p) => ({
+      id: newId(),
+      householdId,
+      tmdbId: p.tmdbId,
+      name: p.name,
+      enabled: 0,
+      // Après les plateformes déjà rangées par le foyer, dans l'ordre du catalogue.
+      position: 100 + STREAMING_PROVIDERS.findIndex((x) => x.tmdbId === p.tmdbId),
+    })),
+  );
+}
+
+/** Réglages de la section Films (type de média, publics, genres par défaut). */
+router.patch("/film-config", async (c) => {
+  const body = await parseBody(c, updateFilmConfigSchema);
+  await c
+    .get("db")
+    .update(household)
+    .set({ filmConfig: JSON.stringify(body) })
+    .where(eq(household.id, c.get("household").id));
+  return c.json({ ok: true });
+});
+
 router.get("/providers", async (c) => {
+  await ensureProviders(c.get("db"), c.get("household").id);
   const rows = await c
     .get("db")
     .select()

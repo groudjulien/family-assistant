@@ -6,6 +6,7 @@ export const household = sqliteTable("household", {
   currency: text("currency").notNull().default("EUR"),
   defaultSplitA: integer("default_split_a").notNull().default(50),
   defaultSplitB: integer("default_split_b").notNull().default(50),
+  defaultPayer: text("default_payer").notNull().default("a"), // membre payeur proposé par défaut (dépenses partagées)
   memberAName: text("member_a_name").notNull().default("Membre A"),
   memberBName: text("member_b_name").notNull().default("Membre B"),
   memberAColor: text("member_a_color").notNull().default("#3b82f6"),
@@ -15,6 +16,7 @@ export const household = sqliteTable("household", {
   weddingTargetDate: text("wedding_target_date").notNull().default("2030-01-01"),
   weddingDays: text("wedding_days"), // JSON [{ key, label }] — jours retenus (null = les 3 par défaut)
   kidsMaxCert: text("kids_max_cert").notNull().default("U"), // certification FR max pour les enfants
+  filmConfig: text("film_config"), // JSON { mediaTypes, audiences, genres } — null = défauts
   anthropicApiKey: text("anthropic_api_key"), // clé API Claude chiffrée (AES-GCM, cf. lib/crypto)
   lunchflowApiKey: text("lunchflow_api_key"), // clé API LunchFlow chiffrée (AES-GCM, cf. lib/crypto)
   primApiKey: text("prim_api_key"), // clé API PRIM Île-de-France Mobilités chiffrée
