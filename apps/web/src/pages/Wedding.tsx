@@ -1,5 +1,5 @@
-import { useState, useRef, type ReactNode } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useState, useRef, useEffect, type ReactNode } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   DndContext,
@@ -26,6 +26,9 @@ import type {
   Member,
   WeddingDay,
   WeddingDayKey,
+  WeddingInviteConfig,
+  InviteDish,
+  InviteMeal,
 } from "@gfa/shared";
 import {
   GUEST_GROUP,
@@ -42,6 +45,8 @@ import {
   WEDDING_SAVINGS_MAX_MONTHS,
   WEDDING_BUDGET_TEMPLATE,
   isAllowedWeddingFile,
+  inviteUrl,
+  choiceFor,
 } from "@gfa/shared";
 import { useMe } from "../auth";
 import { api, API_URL } from "../lib/api";
@@ -54,25 +59,36 @@ import {
   FilterChips,
   Input,
   MobileActionBar,
+  FilterButton,
   SearchField,
+  SectionLabel,
   Select,
+  OverflowMenu,
   Sheet,
   SheetRow,
   SubNav,
   Switch,
+  TagChips,
+  TagSelect,
   type OverflowItem,
 } from "../components/ui";
+import { useWeddingCategories } from "../lib/weddingCategories";
 import { MemberAvatar } from "../components/MemberAvatar";
 import { Indicator } from "../components/Indicator";
-import { usePageHeader, usePageTabs } from "../components/PageHeader";
+import { usePageChrome, usePageHeader, usePageTabs } from "../components/PageHeader";
+import FairePart from "../components/FairePart";
 import { useNavBadges } from "../lib/badges";
+import { useEnsureInviteCodes } from "../lib/inviteCodes";
 import {
+  IconAlert,
   IconCheck,
   IconChevronDown,
+  IconChevronLeft,
   IconChevronRight,
   IconClock,
   IconFilter,
   IconInbox,
+  IconExternal,
   IconMail,
   IconMapPin,
 } from "../components/icons";
@@ -87,33 +103,339 @@ const monthName = (ym: string) => MONTHS_FR[Number(ym.slice(5, 7)) - 1] ?? ym;
 const guestIcon = (g: WeddingGuest) =>
   g.ageGroup === "child" ? GUEST_AGE_META.child : GUEST_TYPE_META[g.type];
 
-// Faire-part : seuls les chefs de famille (sans parent) ont une valeur ; les
-// membres rattachés affichent « - ». Chef → menu déroulant compact.
-function InvitationCell({
-  g,
-  onChange,
-}: {
-  g: WeddingGuest;
-  onChange: (s: InvitationStatus) => void;
-}) {
-  if (g.parentId) return <span className="text-slate-300">-</span>;
+/**
+ * Marqueur d'allergie ou de régime, posé après le nom dans le tableau. Le
+ * détail tient dans l'infobulle — une colonne de plus pour un texte libre qui
+ * ne concerne qu'une poignée de personnes coûterait plus qu'elle ne rapporte.
+ */
+function DietMark({ g }: { g: WeddingGuest }) {
+  if (!g.rsvpDiet) return null;
   return (
-    <select
-      value={g.invitationStatus}
-      onClick={(e) => e.stopPropagation()}
-      onChange={(e) => onChange(e.target.value as InvitationStatus)}
-      className="w-full rounded-lg border border-slate-300 bg-white px-1.5 py-1 text-xs outline-none focus:border-brand-500 dark:border-slate-700 dark:bg-slate-900"
-    >
-      {INVITATION_STATUS.map((s) => (
-        <option key={s} value={s}>
-          {INVITATION_STATUS_META[s].label}
-        </option>
-      ))}
-    </select>
+    <IconAlert
+      size={15}
+      className="ml-1 inline-block shrink-0 align-text-bottom text-warning"
+      title={`Allergie ou régime : ${g.rsvpDiet}`}
+    />
   );
 }
 
-type Tab = "invites" | "todo" | "budget" | "epargne";
+/**
+ * « Rien ici » — un seul et même tiret pour toutes les cellules du tableau.
+ * Trois d'entre elles avaient chacune le sien, cadratin ou trait d'union selon
+ * la cellule : les colonnes semblaient dessinées à des tailles différentes.
+ */
+const Empty = () => <span className="text-slate-300">—</span>;
+
+/**
+ * Faire-part : seuls les chefs de famille (sans parent) ont une valeur ; les
+ * membres rattachés affichent « — ».
+ *
+ * En **lecture seule** : le statut se change dans la modale d'édition, avec le
+ * reste de la fiche. Une liste de 58 foyers n'a pas à être 58 champs de
+ * formulaire ouverts en même temps — on lisait une colonne de menus déroulants
+ * au lieu d'une colonne d'états, et un clic de travers changeait un statut.
+ */
+function InvitationCell({ g }: { g: WeddingGuest }) {
+  if (g.parentId) return <Empty />;
+  // Seul « à envoyer » est une anomalie : c'est le seul état qui appelle une action.
+  const warn = g.invitationStatus === "to_send";
+  return (
+    <span className={`text-xs ${warn ? "font-medium text-warning" : "text-ink-2"}`}>
+      {INVITATION_STATUS_META[g.invitationStatus].label}
+    </span>
+  );
+}
+
+/**
+ * Logement du foyer, porté par le chef de famille comme l'adresse : il décide
+ * du texte « Où dormir » de leur faire-part. En lecture seule, comme le statut
+ * — il se règle dans la fiche.
+ */
+function HousingCell({ g }: { g: WeddingGuest }) {
+  if (g.parentId) return <Empty />;
+  return g.housed ? (
+    <span className="text-xs text-ink-2">Sur place</span>
+  ) : (
+    <span title="À se loger par ses propres moyens">
+      <Empty />
+    </span>
+  );
+}
+
+/**
+ * Un jour, pour une personne : **ce qu'elle a répondu** depuis `/i/<code>`, et
+ * non ce à quoi on la convie. Coche verte = elle vient ; tiret = elle n'a pas
+ * répondu, ou a décliné ce jour-là.
+ *
+ * En lecture seule : les jours auxquels on convie quelqu'un se cochent dans sa
+ * fiche. La distinction compte — si décliner le vendredi retirait l'invitation
+ * du vendredi, le foyer ne pourrait plus jamais se raviser.
+ */
+/**
+ * Le premier jour n'est ouvert qu'aux foyers conviés dès ce jour-là ; les
+ * autres jours le sont à tout le monde. C'est la portée de l'invitation, portée
+ * par `guestGroup` — à ne pas confondre avec la présence.
+ */
+const dayIsOpen = (g: WeddingGuest, day: Day, days: Day[]) =>
+  g.guestGroup === "vendredi" || day !== days[0];
+
+function DayAnswerCell({ g, day, open }: { g: WeddingGuest; day: Day; open: boolean }) {
+  // Hors de la portée du foyer (« à partir du samedi ») : la case reste vide,
+  // le jour ne le concerne pas.
+  if (!open) return null;
+  return g[day] ? (
+    <IconCheck size={18} className="mx-auto text-brand-600" title="Présent" />
+  ) : (
+    <span title="Absent">
+      <Empty />
+    </span>
+  );
+}
+
+/**
+ * Case d'en-tête d'un tableau : tout cocher / tout décocher. Elle ne pilote que
+ * les lignes de **son** tableau — avec deux tableaux à l'écran, une case qui
+ * sélectionnerait aussi l'autre serait un piège.
+ */
+function SelectAll({
+  ids,
+  selected,
+  onToggle,
+}: {
+  ids: string[];
+  selected: Set<string>;
+  onToggle: (ids: string[], on: boolean) => void;
+}) {
+  const all = ids.length > 0 && ids.every((id) => selected.has(id));
+  return (
+    <div className="flex justify-center">
+      <span aria-label={all ? "Tout désélectionner" : "Tout sélectionner"}>
+        <Checkbox checked={all} onChange={() => onToggle(ids, !all)} size="sm" />
+      </span>
+    </div>
+  );
+}
+
+/** Filtres de foyer, partagés par les deux rendus de l'onglet Invités. */
+const INVIT_FILTERS: { value: string; label: string }[] = [
+  { value: "all", label: "Tous" },
+  ...INVITATION_STATUS.filter((s) => s !== "none").map((s) => ({
+    value: s,
+    label: INVITATION_STATUS_META[s].label,
+  })),
+];
+
+const HOUSING_FILTERS: { value: string; label: string }[] = [
+  { value: "all", label: "Tous" },
+  { value: "yes", label: "Logés sur place" },
+  { value: "no", label: "À se loger" },
+];
+/* ------------------------------------------------------------------ */
+/* Choix du repas — filtre partagé par les deux rendus                 */
+/*                                                                     */
+/* Le filtre vit dans l'**URL** (`?meal=…&starter=…&main=…&dessert=…`) */
+/* : un chiffre de l'onglet Faire-part y mène d'un clic, et la vue      */
+/* obtenue se partage et se recharge à l'identique.                    */
+/*                                                                     */
+/* Il porte toujours **un** repas : les plats d'un dîner et ceux d'un   */
+/* brunch ne se croisent pas, et « pas encore choisi » n'a de sens que  */
+/* rapporté à un repas donné.                                          */
+/* ------------------------------------------------------------------ */
+
+/** Les trois services. La clé est aussi le paramètre d'URL du filtre. */
+type MealCourse = "starter" | "main" | "dessert";
+
+const MEAL_COURSES: {
+  key: MealCourse;
+  label: string;
+  plural: string;
+  /** La liste correspondante sur un repas. */
+  list: "starters" | "mains" | "desserts";
+}[] = [
+  { key: "starter", label: "Entrée", plural: "Entrées", list: "starters" },
+  { key: "main", label: "Plat", plural: "Plats", list: "mains" },
+  { key: "dessert", label: "Dessert", plural: "Desserts", list: "desserts" },
+];
+
+/** Valeur d'un service : `all` (pas de filtre), `none` (pas encore choisi), ou l'id d'un plat. */
+type MealFilter = { mealId: string | null } & Record<MealCourse, string>;
+const MEAL_NONE = "none";
+const MEAL_FILTER_OFF: MealFilter = { mealId: null, starter: "all", main: "all", dessert: "all" };
+
+const mealById = (cfg: WeddingInviteConfig | undefined, id: string | null): InviteMeal | null =>
+  (id && cfg?.meals.find((m) => m.id === id)) || null;
+
+const dishesOf = (meal: InviteMeal | null, c: MealCourse): InviteDish[] =>
+  meal ? meal[MEAL_COURSES.find((x) => x.key === c)!.list] : [];
+
+const pickOf = (g: WeddingGuest, mealId: string, c: MealCourse) => {
+  const choice = choiceFor(g.rsvpMeals, mealId);
+  return c === "starter" ? choice.starterId : c === "main" ? choice.mainId : choice.dessertId;
+};
+
+/** Le plat choisi, ou `null` quand le choix reste à faire (ou porte sur un plat supprimé). */
+const pickedDish = (g: WeddingGuest, meal: InviteMeal, c: MealCourse) =>
+  dishesOf(meal, c).find((d) => d.id === pickOf(g, meal.id, c)) ?? null;
+
+/** Les services réellement proposés à ce repas : sans plat saisi, il n'y a rien à filtrer. */
+const servedCourses = (meal: InviteMeal | null) =>
+  MEAL_COURSES.filter((c) => dishesOf(meal, c.key).length > 0);
+
+/**
+ * Les personnes concernées par un repas : celles qui viennent son jour.
+ * Exactement la population des compteurs de l'onglet Faire-part — un chiffre
+ * cliqué là-bas doit ramener autant de lignes ici, ni plus ni moins.
+ */
+const mealEaters = (guests: WeddingGuest[], meal: InviteMeal) =>
+  guests.filter((g) => !g.archived && g[meal.dayKey]);
+
+const mealFilterActive = (f: MealFilter) =>
+  f.mealId !== null && MEAL_COURSES.some((c) => f[c.key] !== "all");
+
+const matchesMeal = (g: WeddingGuest, meal: InviteMeal, f: MealFilter) =>
+  MEAL_COURSES.every((c) => {
+    const v = f[c.key];
+    if (v === "all") return true;
+    // « Pas encore choisi » recouvre aussi le choix devenu caduc (plat retiré
+    // du menu depuis) : c'est ce que compte l'onglet Faire-part.
+    if (v === MEAL_NONE) return !dishesOf(meal, c.key).some((d) => d.id === pickOf(g, meal.id, c.key));
+    return pickOf(g, meal.id, c.key) === v;
+  });
+
+/** « Dîner du samedi · Entrée : Terrine · Dessert : pas encore choisi » — le filtre en clair. */
+const mealFilterLabel = (f: MealFilter, meal: InviteMeal | null) => {
+  if (!meal) return "";
+  const parts = MEAL_COURSES.filter((c) => f[c.key] !== "all").map((c) => {
+    const v = f[c.key];
+    const name =
+      v === MEAL_NONE
+        ? "pas encore choisi"
+        : (dishesOf(meal, c.key).find((d) => d.id === v)?.name ?? "plat retiré du menu");
+    return `${c.label} : ${name}`;
+  });
+  return [meal.title || "Le repas", ...parts].join(" · ");
+};
+
+/** Pastilles d'un service, dans l'ordre du menu, « Pas encore choisi » en fin. */
+const mealChips = (meal: InviteMeal | null, c: MealCourse) => [
+  { value: "all", label: "Tous" },
+  ...dishesOf(meal, c).map((d) => ({ value: d.id, label: d.name || "Sans nom" })),
+  { value: MEAL_NONE, label: "Pas encore choisi" },
+];
+
+/** Lecture / écriture du filtre repas dans la barre d'adresse. */
+function useMealFilter(): [MealFilter, (next: MealFilter) => void] {
+  const [params, setParams] = useSearchParams();
+  const value: MealFilter = {
+    mealId: params.get("meal"),
+    starter: params.get("starter") || "all",
+    main: params.get("main") || "all",
+    dessert: params.get("dessert") || "all",
+  };
+  const set = (next: MealFilter) => {
+    const p = new URLSearchParams(params);
+    if (next.mealId) p.set("meal", next.mealId);
+    else p.delete("meal");
+    for (const c of MEAL_COURSES) {
+      if (next[c.key] === "all") p.delete(c.key);
+      else p.set(c.key, next[c.key]);
+    }
+    // `replace` : filtrer n'empile pas d'étape dans l'historique du navigateur.
+    setParams(p, { replace: true });
+  };
+  return [value, set];
+}
+
+/** La config du menu, pour nommer les repas et les plats. Même clé que l'onglet Faire-part. */
+function useInviteConfig() {
+  return useQuery({
+    queryKey: ["wedding-invite-config"],
+    queryFn: () => api.get<WeddingInviteConfig>("/api/wedding/invite-config"),
+  }).data;
+}
+
+/** Le repas, puis ses trois pastilles de filtre, dans une feuille ou une modale. */
+function MealFilterFields({
+  cfg,
+  value,
+  onChange,
+  wrap = false,
+}: {
+  cfg: WeddingInviteConfig | undefined;
+  value: MealFilter;
+  onChange: (next: MealFilter) => void;
+  /** Dans une modale, les pastilles passent à la ligne au lieu de défiler. */
+  wrap?: boolean;
+}) {
+  const meals = cfg?.meals ?? [];
+  if (meals.length === 0) return null;
+  const meal = mealById(cfg, value.mealId);
+  return (
+    <>
+      <div>
+        <div className="eyebrow mb-2">Repas</div>
+        <FilterChips
+          value={value.mealId ?? "all"}
+          // Changer de repas remet les trois services à zéro : un id de plat
+          // n'a aucun sens d'une carte à l'autre.
+          onChange={(v) => onChange({ ...MEAL_FILTER_OFF, mealId: v === "all" ? null : v })}
+          items={[
+            { value: "all", label: "Aucun" },
+            ...meals.map((m) => ({ value: m.id, label: m.title || "Le repas" })),
+          ]}
+          wrap={wrap}
+        />
+      </div>
+      {servedCourses(meal).map((c) => (
+        <div key={c.key}>
+          <div className="eyebrow mb-2">{c.plural}</div>
+          <FilterChips
+            value={value[c.key]}
+            onChange={(v) => onChange({ ...value, [c.key]: v })}
+            items={mealChips(meal, c.key)}
+            wrap={wrap}
+          />
+        </div>
+      ))}
+    </>
+  );
+}
+
+/**
+ * Bandeau du filtre repas : ce qu'on regarde, combien, et de quoi en sortir.
+ * Il apparaît notamment quand on arrive d'un chiffre de l'onglet Faire-part —
+ * sans lui, la liste changerait de nature sans dire pourquoi.
+ */
+function MealFilterBanner({
+  label,
+  count,
+  onClear,
+}: {
+  label: string;
+  count: number;
+  onClear: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-3 rounded-2xl border border-brand-600/30 bg-brand-50 p-3.5 dark:bg-brand-600/20">
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-semibold text-brand-700 dark:text-brand-50">{label}</span>
+        <span className="mt-0.5 block text-xs text-ink-2">
+          {count} personne{count > 1 ? "s" : ""} au repas
+        </span>
+      </span>
+      <button
+        type="button"
+        onClick={onClear}
+        className="min-h-tap shrink-0 rounded-full border border-brand-600/40 px-4 text-sm font-semibold text-brand-600"
+      >
+        Effacer
+      </button>
+    </div>
+  );
+}
+
+
+type Tab = "invites" | "faire-part" | "todo" | "budget" | "epargne";
 
 /**
  * Une seule rangée d'onglets pour les quatre écrans de la section. Avant, deux
@@ -123,6 +445,7 @@ type Tab = "invites" | "todo" | "budget" | "epargne";
  */
 const WEDDING_TABS: { id: Tab; label: string }[] = [
   { id: "invites", label: "Invités" },
+  { id: "faire-part", label: "Faire-part" },
   { id: "todo", label: "Todo" },
   { id: "budget", label: "Prestataires" },
   { id: "epargne", label: "Épargne" },
@@ -147,10 +470,16 @@ function useWeddingEyebrow(): string {
 
 export default function Wedding() {
   const navigate = useNavigate();
-  const { tab: tabParam } = useParams();
+  const { tab: tabParam, record } = useParams();
   const tab: Tab = WEDDING_TABS.some((t) => t.id === tabParam) ? (tabParam as Tab) : "invites";
+  // 3e segment = un foyer ouvert. C'est un identifiant, pas un sous-menu : rien
+  // à mémoriser, et `RECORD_TABS` le tronque pour que la barre latérale ne
+  // rouvre pas un enregistrement — voire un enregistrement supprimé.
+  const openFoyerId = tab === "invites" ? record : undefined;
 
-  usePageHeader("Mariage", useWeddingEyebrow());
+  // La sous-page pose son propre titre : le laisser à `null` ici, sinon le
+  // parent l'écraserait (ses effets passent après ceux de l'enfant).
+  usePageHeader(openFoyerId ? null : "Mariage", useWeddingEyebrow());
 
   // Pastille de l'onglet Todo : ce qui est en retard. La requête est partagée
   // avec l'onglet lui-même (même clé de cache) — pas d'appel supplémentaire, et
@@ -166,18 +495,22 @@ export default function Wedding() {
     label: t.label,
     badge: t.id === "todo" ? overdue : undefined,
   }));
-  usePageTabs(tab, items, (v) => navigate(`/wedding/${v}`));
+  // Un foyer ouvert est un écran à part entière : sa rangée d'onglets disparaît.
+  usePageTabs(tab, openFoyerId ? [] : items, (v) => navigate(`/wedding/${v}`));
 
   return (
     <div className="flex flex-col gap-4 pb-28 md:pb-0">
       {/* Sur mobile les onglets vivent dans la barre du haut (`usePageTabs`). */}
-      <SubNav
-        value={tab}
-        onChange={(v) => navigate(`/wedding/${v}`)}
-        items={items}
-        className="hidden md:block"
-      />
-      {tab === "invites" && <Invites />}
+      {!openFoyerId && (
+        <SubNav
+          value={tab}
+          onChange={(v) => navigate(`/wedding/${v}`)}
+          items={items}
+          className="hidden md:block"
+        />
+      )}
+      {tab === "invites" && (openFoyerId ? <FoyerPage headId={openFoyerId} /> : <Invites />)}
+      {tab === "faire-part" && <FairePart />}
       {tab === "todo" && <WeddingTodos />}
       {tab === "budget" && <Budget />}
       {tab === "epargne" && <Epargne />}
@@ -286,35 +619,9 @@ function Callout({
 }
 
 /** Étiquette de section au-dessus d'une carte : « À TRAITER · 6 ». */
-function SectionLabel({ children, right }: { children: ReactNode; right?: ReactNode }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3">
-      <div className="eyebrow">{children}</div>
-      {right}
-    </div>
-  );
-}
-
 /** Ligne d'un tableau chiffré, sous une `SectionLabel`. */
 const rowCls = (last: boolean, minH = "min-h-[60px]") =>
   `flex ${minH} items-center gap-3 ${last ? "" : "border-b border-hairline"}`;
-
-/** Bouton de filtres à côté de la recherche (48 px, actif = liseré vert). */
-function FilterButton({ active, onClick }: { active: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label="Filtres"
-      aria-pressed={active}
-      className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border ${
-        active ? "border-brand-600 text-brand-600" : "border-line bg-surface text-ink-2"
-      }`}
-    >
-      <IconFilter size={20} />
-    </button>
-  );
-}
 
 
 /* ------------------------------------------------------------------ */
@@ -324,7 +631,507 @@ function FilterButton({ active, onClick }: { active: boolean; onClick: () => voi
 /* ne déclenche aucune requête supplémentaire.                         */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Sous-page d'un foyer                                                */
+/* ------------------------------------------------------------------ */
+
+/** Champ texte enregistré **en sortant** : on ne PATCH pas à chaque frappe. */
+function BlurInput({
+  value,
+  onCommit,
+  ...rest
+}: { value: string; onCommit: (v: string) => void } & Omit<
+  React.InputHTMLAttributes<HTMLInputElement>,
+  "value" | "onChange" | "onBlur"
+>) {
+  const [v, setV] = useState(value);
+  useEffect(() => setV(value), [value]);
+  return (
+    <Input
+      {...rest}
+      value={v}
+      onChange={(e) => setV(e.target.value)}
+      onBlur={() => {
+        if (v !== value) onCommit(v);
+      }}
+    />
+  );
+}
+
+/**
+ * Ce que la personne mange, **repas par repas**.
+ *
+ * « Pas encore choisi » se dit en toutes lettres, en ambre : c'est
+ * l'information qu'on vient chercher sur une fiche — la liste part chez le
+ * traiteur, et un plat manquant est ce qui appelle une relance. Un repas dont
+ * elle n'est pas (elle ne vient pas ce jour-là) est dit tel quel plutôt que
+ * montré vide, sinon on la compterait parmi les retardataires.
+ */
+function PersonMenu({ g, cfg }: { g: WeddingGuest; cfg: WeddingInviteConfig | undefined }) {
+  const meals = (cfg?.meals ?? []).filter((m) => servedCourses(m).length > 0);
+  if (meals.length === 0) return null;
+  return (
+    <div className="min-w-[12rem]">
+      <div className="eyebrow mb-1.5">Menu</div>
+      <div className="flex flex-col gap-2">
+        {meals.map((m) => (
+          <div key={m.id}>
+            {meals.length > 1 && (
+              <div className="text-xs font-medium text-ink-2">{m.title || "Le repas"}</div>
+            )}
+            {!g[m.dayKey] ? (
+              <div className="text-sm text-slate-400">Pas à ce repas</div>
+            ) : (
+              <dl className="flex flex-col gap-0.5">
+                {servedCourses(m).map((c) => {
+                  const dish = pickedDish(g, m, c.key);
+                  return (
+                    <div key={c.key} className="flex items-baseline gap-2 text-sm">
+                      <dt className="w-16 shrink-0 text-xs text-slate-400">{c.label}</dt>
+                      <dd className={dish ? "font-medium" : "text-warning"}>
+                        {dish ? dish.name : "Pas encore choisi"}
+                      </dd>
+                    </div>
+                  );
+                })}
+              </dl>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Un foyer ouvert — `/wedding/invites/<idDuChefDeFamille>`.
+ *
+ * Tout ce qui le concerne tient ici : son adresse, son faire-part, son
+ * logement, son lien, et chacune de ses personnes avec les jours auxquels elle
+ * est conviée et ce qu'elle a répondu. La matière était jusqu'ici répartie
+ * entre une feuille (mobile) et une modale (ordinateur), dont aucune ne
+ * montrait tout.
+ *
+ * Les champs s'enregistrent en sortant (texte) ou au clic (cases, listes) :
+ * une fiche n'a pas de bouton « Enregistrer » qu'on puisse oublier.
+ */
+function FoyerPage({ headId }: { headId: string }) {
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const weddingDays = useWeddingDays();
+  const twoGroups = weddingDays.length > 1;
+  const categories = useWeddingCategories();
+  const [adding, setAdding] = useState(false);
+
+  const { data } = useQuery({
+    queryKey: ["wedding-guests"],
+    queryFn: () => api.get<WeddingGuest[]>("/api/wedding/guests"),
+  });
+  // Sert à nommer les plats choisis. Même clé que l'onglet Faire-part.
+  const inviteConfig = useInviteConfig();
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["wedding-guests"] });
+  const patch = useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Partial<WeddingGuest> }) =>
+      api.patch(`/api/wedding/guests/${id}`, body),
+    onSuccess: invalidate,
+  });
+
+  const head = data?.find((g) => g.id === headId) ?? null;
+  const members = (data ?? [])
+    .filter((g) => g.parentId === headId)
+    .sort((a, b) => a.position - b.position);
+  const people = head ? [head, ...members] : [];
+  const foyerName = head ? (buildFoyers(people)[0]?.name ?? head.name) : "Foyer";
+  const subtitle = head
+    ? [
+        `${people.length} personne${people.length > 1 ? "s" : ""}`,
+        people.filter((p) => p.ageGroup === "child").length > 0
+          ? `${people.filter((p) => p.ageGroup === "child").length} enfant${people.filter((p) => p.ageGroup === "child").length > 1 ? "s" : ""}`
+          : null,
+        GUEST_TYPE_META[head.type].label,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+
+  const url = head?.inviteCode ? inviteUrl(window.location.origin, head.inviteCode) : null;
+
+  const setArchived = async (archived: boolean) => {
+    if (!head) return;
+    for (const p of people) await api.patch(`/api/wedding/guests/${p.id}`, { archived });
+    invalidate();
+  };
+  const removeFoyer = async () => {
+    // Les rattachés d'abord : supprimer le principal les détacherait au lieu de
+    // les supprimer, et le foyer réapparaîtrait en morceaux.
+    for (const m of members) await api.del(`/api/wedding/guests/${m.id}`);
+    if (head) await api.del(`/api/wedding/guests/${head.id}`);
+    invalidate();
+    navigate("/wedding/invites");
+  };
+
+  const actions: OverflowItem[] = [
+    ...(url
+      ? [
+          { label: "Voir leur faire-part", onClick: () => window.open(url, "_blank", "noopener") },
+          { label: "Copier le lien", onClick: () => navigator.clipboard?.writeText(url) },
+        ]
+      : []),
+    ...(head
+      ? [
+          {
+            label: head.archived ? "Remettre dans les invités" : "Retirer des invités",
+            onClick: () => void setArchived(!head.archived),
+          },
+        ]
+      : []),
+    {
+      label: "Supprimer le foyer",
+      danger: true,
+      onClick: () => {
+        if (confirm(`Supprimer le foyer « ${foyerName} » et ses ${people.length} personnes ?`))
+          void removeFoyer();
+      },
+    },
+  ];
+
+  usePageHeader(foyerName, subtitle);
+  usePageChrome("/wedding/invites", actions);
+
+  if (!data) return <PageLoader variant="mariage" />;
+  if (!head) {
+    return (
+      <div className="card text-center">
+        <div className="font-semibold">Ce foyer n'existe plus.</div>
+        <Link to="/wedding/invites" className="btn-primary mt-3 inline-flex">
+          Retour aux invités
+        </Link>
+      </div>
+    );
+  }
+
+  /** Un invité rattaché au tableau « à partir du samedi » n'a pas de vendredi. */
+  const dayActive = (p: WeddingGuest, key: WeddingDayKey) =>
+    p.guestGroup === "vendredi" || key !== "vendredi";
+
+  /** Le tableau d'arrivée est une propriété du foyer : les rattachés suivent. */
+  const setGroup = async (group: GuestGroup) => {
+    for (const p of people) {
+      const body: Partial<WeddingGuest> = { guestGroup: group };
+      if (group === "samedi") body.vendredi = false;
+      await api.patch(`/api/wedding/guests/${p.id}`, body);
+    }
+    invalidate();
+  };
+
+  return (
+    <div className="flex flex-col gap-4 pb-28 md:pb-0">
+      {/* Sur mobile, retour et « ⋯ » vivent dans la barre du haut (usePageChrome). */}
+      <div className="hidden items-start justify-between gap-3 md:flex">
+        <div className="min-w-0">
+          <Link
+            to="/wedding/invites"
+            className="inline-flex items-center gap-1 text-sm text-ink-2 transition hover:text-brand-600"
+          >
+            <IconChevronLeft size={16} />
+            Invités
+          </Link>
+          <h1 className="mt-1 truncate text-3xl font-bold">{foyerName}</h1>
+          <p className="text-sm text-slate-400">{subtitle}</p>
+        </div>
+        <OverflowMenu vertical items={actions} label={`Actions sur ${foyerName}`} />
+      </div>
+
+      <div className="card flex flex-col gap-4">
+        <div className="text-base font-semibold">Le foyer</div>
+
+        <label className="flex flex-col gap-1.5">
+          <span className="text-sm font-medium">Adresse</span>
+          <BlurInput
+            value={head.address ?? ""}
+            placeholder="N° et rue"
+            onCommit={(v) => patch.mutate({ id: head.id, body: { address: v || null } })}
+          />
+          <div className="grid grid-cols-3 gap-2">
+            <BlurInput
+              value={head.postalCode ?? ""}
+              placeholder="Code postal"
+              onCommit={(v) => patch.mutate({ id: head.id, body: { postalCode: v || null } })}
+            />
+            <BlurInput
+              className="col-span-2"
+              value={head.city ?? ""}
+              placeholder="Ville"
+              onCommit={(v) => patch.mutate({ id: head.id, body: { city: v || null } })}
+            />
+          </div>
+        </label>
+
+        <div className="grid gap-4 sm:grid-cols-3">
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium">Faire-part</span>
+            <Select
+              value={head.invitationStatus}
+              onChange={(v) =>
+                patch.mutate({ id: head.id, body: { invitationStatus: v as InvitationStatus } })
+              }
+              options={INVITATION_STATUS.filter((s) => s !== "none").map((s) => ({
+                value: s,
+                label: INVITATION_STATUS_META[s].label,
+              }))}
+            />
+          </label>
+          {twoGroups && (
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium">Tableau</span>
+              <Select
+                value={head.guestGroup}
+                onChange={(v) => void setGroup(v as GuestGroup)}
+                options={GUEST_GROUP.map((g, i) => ({
+                  value: g,
+                  label: `À partir de ${labelOf(weddingDays, weddingDays[i].key)}`,
+                }))}
+              />
+            </label>
+          )}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium">Logement</span>
+            {/* Même hauteur que les deux listes voisines, pour que la rangée
+                s'aligne. La conséquence du décochage passe en infobulle. */}
+            <div
+              className="flex items-center rounded-xl border border-slate-300 px-3 py-2 dark:border-slate-700"
+              title="Décoché : leur faire-part propose des pistes de logement."
+            >
+              <Checkbox
+                checked={head.housed}
+                onChange={() => patch.mutate({ id: head.id, body: { housed: !head.housed } })}
+                label="Logé sur place"
+              />
+            </div>
+          </div>
+        </div>
+
+        <TagSelect
+          label="Catégories du foyer"
+          options={categories.list}
+          value={head.familyCategories}
+          onChange={(next) => patch.mutate({ id: head.id, body: { familyCategories: next } })}
+          onCreate={categories.create}
+          placeholder="Aucune"
+        />
+
+        {url && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium">Code du faire-part</span>
+            <div className="flex items-center gap-2 rounded-xl border border-slate-300 px-3 py-1 dark:border-slate-700">
+              <span className="min-w-0 flex-1 font-mono text-base font-bold tracking-widest">
+                {head.inviteCode}
+              </span>
+              <button
+                type="button"
+                onClick={() => navigator.clipboard?.writeText(url)}
+                className="min-h-tap shrink-0 rounded-lg px-2 text-sm font-medium text-brand-600"
+              >
+                Copier
+              </button>
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener"
+                aria-label="Ouvrir leur faire-part"
+                title={url}
+                className="flex h-tap w-tap shrink-0 items-center justify-center text-slate-400 hover:text-brand-600"
+              >
+                <IconExternal size={18} />
+              </a>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="card flex flex-col gap-3">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-base font-semibold">
+            Les personnes <span className="text-slate-400">({people.length})</span>
+          </span>
+          <button onClick={() => setAdding(true)} className="btn-ghost hidden text-xs md:inline-flex">
+            + Personne
+          </button>
+        </div>
+
+        {people.map((p, i) => {
+          const isHead = p.id === head.id;
+          const personActions: OverflowItem[] = [
+            ...(isHead
+              ? []
+              : [
+                  {
+                    label: "Détacher du foyer",
+                    onClick: () => patch.mutate({ id: p.id, body: { parentId: null } }),
+                  },
+                ]),
+            {
+              label: "Supprimer",
+              danger: true,
+              onClick: () => {
+                if (!confirm(`Supprimer ${p.name} ?`)) return;
+                if (isHead) void removeFoyer();
+                else api.del(`/api/wedding/guests/${p.id}`).then(invalidate);
+              },
+            },
+          ];
+          return (
+            // Un filet entre les personnes plutôt qu'un cadre autour de chacune :
+            // quatre cartes dans une carte, c'était une boîte de trop.
+            <div
+              key={p.id}
+              className={`flex flex-col gap-3 py-3 ${i > 0 ? "border-t border-hairline" : ""}`}
+            >
+              {/* Nom, type et âge sur une seule ligne : trois lignes pour
+                  trois champs courts faisaient de chaque personne un pavé. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="order-1 min-w-[9rem] flex-1">
+                  <BlurInput
+                    value={p.name}
+                    placeholder="Nom"
+                    onCommit={(v) => v.trim() && patch.mutate({ id: p.id, body: { name: v.trim() } })}
+                  />
+                </div>
+                {/* Le « ⋮ » suit le nom au téléphone (deux rangées : nom+menu,
+                    puis type+âge) et ferme la ligne sur ordinateur. */}
+                <div className="order-2 shrink-0 sm:order-4">
+                  <OverflowMenu vertical items={personActions} label={`Actions sur ${p.name}`} />
+                </div>
+                <Select
+                  className="order-3 w-36 shrink-0 sm:order-2"
+                  value={p.type}
+                  onChange={(v) => patch.mutate({ id: p.id, body: { type: v as GuestType } })}
+                  options={GUEST_TYPE.map((t) => ({
+                    value: t,
+                    label: `${GUEST_TYPE_META[t].icon} ${GUEST_TYPE_META[t].label}`,
+                  }))}
+                />
+                <div className="order-4 flex shrink-0 gap-1.5 sm:order-3">
+                  {(Object.keys(GUEST_AGE_META) as GuestAge[]).map((a) => (
+                    <button
+                      key={a}
+                      type="button"
+                      onClick={() => patch.mutate({ id: p.id, body: { ageGroup: a } })}
+                      aria-pressed={p.ageGroup === a}
+                      aria-label={GUEST_AGE_META[a].label}
+                      title={GUEST_AGE_META[a].label}
+                      className={`min-h-tap min-w-tap rounded-xl border px-2.5 text-sm transition ${
+                        p.ageGroup === a
+                          ? "border-brand-500 bg-brand-50 text-brand-700 dark:bg-brand-500/10 dark:text-brand-300"
+                          : "border-line text-ink-2"
+                      }`}
+                    >
+                      {/* Sous `sm`, l'émoji suffit : c'est ce qui permet de
+                          garder type et âge sur la même ligne au téléphone. */}
+                      {GUEST_AGE_META[a].icon}
+                      <span className="hidden sm:inline"> {GUEST_AGE_META[a].label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {isHead && (
+                <span className="-mt-1 block text-xs text-slate-400">
+                  Chef de famille — porte l'adresse et le faire-part du foyer.
+                </span>
+              )}
+
+              {/* Présence, menu, réponse : elles se lisent ensemble — ce à quoi
+                  on convie, ce qui sera servi, et quand le foyer l'a dit. */}
+              <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+                <div>
+                  <div className="eyebrow mb-1.5">Présence</div>
+                  <div className="flex flex-wrap gap-4">
+                    {weddingDays.map((d) =>
+                      dayActive(p, d.key) ? (
+                        <Checkbox
+                          key={d.key}
+                          checked={p[d.key]}
+                          onChange={() => patch.mutate({ id: p.id, body: { [d.key]: !p[d.key] } })}
+                          label={d.label}
+                        />
+                      ) : (
+                        <span key={d.key} className="text-sm text-slate-400">
+                          {d.label} —
+                        </span>
+                      ),
+                    )}
+                  </div>
+                </div>
+                <PersonMenu g={p} cfg={inviteConfig} />
+                <div className="ml-auto max-w-[18rem] text-right">
+                  <div className="eyebrow mb-1.5">Réponse</div>
+                  <div className={`text-sm ${p.rsvpAt ? "text-ink-2" : "text-slate-400"}`}>
+                    {p.rsvpAt ? `répondu le ${dateFr(p.rsvpAt.slice(0, 10))}` : "pas encore répondu"}
+                  </div>
+                </div>
+              </div>
+
+              <TagSelect
+                label="Catégories"
+                options={categories.list}
+                value={p.categories}
+                onChange={(next) => patch.mutate({ id: p.id, body: { categories: next } })}
+                onCreate={categories.create}
+                placeholder="Aucune"
+              />
+
+              {/* Saisissable ici aussi : le foyer le renseigne depuis son
+                  faire-part, mais un invité annonce parfois son régime de vive
+                  voix — et c'est cette liste qui part chez le traiteur. */}
+              <label className="flex flex-col gap-1.5">
+                <span
+                  className={`flex items-center gap-1.5 text-sm font-medium ${
+                    p.rsvpDiet ? "text-warning" : ""
+                  }`}
+                >
+                  {p.rsvpDiet && <IconAlert size={15} className="shrink-0" />}
+                  Allergies ou régime
+                </span>
+                <BlurInput
+                  value={p.rsvpDiet ?? ""}
+                  placeholder="ex. sans lactose, pas de porc… (laissez vide si rien)"
+                  onCommit={(v) =>
+                    patch.mutate({ id: p.id, body: { rsvpDiet: v.trim() || null } })
+                  }
+                />
+              </label>
+
+            </div>
+          );
+        })}
+      </div>
+
+      <MobileActionBar label="Ajouter une personne" onClick={() => setAdding(true)} />
+
+      {adding && (
+        <GuestModal
+          item={null}
+          defaultGroup={head.guestGroup}
+          parentId={head.id}
+          onClose={() => setAdding(false)}
+          onSaved={() => {
+            invalidate();
+            setAdding(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 function Invites() {
+  // Même clé de cache que les deux rendus : aucune requête supplémentaire.
+  const { data } = useQuery({
+    queryKey: ["wedding-guests"],
+    queryFn: () => api.get<WeddingGuest[]>("/api/wedding/guests"),
+  });
+  useEnsureInviteCodes(data);
   return (
     <>
       <div className="md:hidden">
@@ -503,7 +1310,8 @@ function FoyerRow({
     : foyer.principal.invitationStatus === "to_send"
       ? [IconMail, "à envoyer"]
       : [
-          IconCheck,
+          IconAlert,
+  IconCheck,
           [foyer.city, INVITATION_STATUS_META[foyer.principal.invitationStatus].label.toLowerCase()]
             .filter((v) => v && v !== "-")
             .join(" · "),
@@ -529,11 +1337,166 @@ function FoyerRow({
   );
 }
 
+/**
+ * Une **personne** et son menu. C'est la ligne qu'on veut quand on filtre sur
+ * un plat : le foyer n'a pas de choix de repas, chacun a le sien. Le clic ouvre
+ * quand même le foyer — c'est là que tout se corrige.
+ */
+function MealPersonRow({
+  g,
+  foyerName,
+  meal,
+  onOpen,
+  last,
+}: {
+  g: WeddingGuest;
+  foyerName: string;
+  meal: InviteMeal;
+  onOpen: () => void;
+  last: boolean;
+}) {
+  const courses = servedCourses(meal);
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={`w-full text-left ${rowCls(last)}`}
+      aria-label={`Ouvrir le foyer de ${g.name}`}
+    >
+      <FoyerInitials name={g.name} className="h-9 w-9 text-xs" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-base font-semibold">
+          {g.name}
+          <DietMark g={g} />
+        </span>
+        <span className="mt-0.5 block truncate text-xs text-ink-2">
+          {foyerName}
+          {courses.map((c) => {
+            const dish = pickedDish(g, meal, c.key);
+            return (
+              <span key={c.key} className={dish ? "" : "text-warning"}>
+                {" · "}
+                {dish ? dish.name : `${c.label} à choisir`}
+              </span>
+            );
+          })}
+        </span>
+      </span>
+      <IconChevronRight size={20} className="shrink-0 text-slate-400" />
+    </button>
+  );
+}
+
+/**
+ * Pose ou retire des catégories sur une sélection.
+ *
+ * Le **périmètre** est le premier choix : les mêmes catégories posées « aux
+ * personnes » ou « aux foyers » ne disent pas la même chose, et c'est ce que
+ * les conditions du faire-part interrogeront. Ajouter et retirer sont deux
+ * boutons distincts — une case à cocher à trois états sur cinquante lignes ne
+ * se lit pas.
+ */
+function BulkCategories({ ids, onDone }: { ids: string[]; onDone: () => void }) {
+  const categories = useWeddingCategories();
+  const [open, setOpen] = useState(false);
+  const [scope, setScope] = useState<"person" | "family">("person");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+
+  const target = scope === "family" ? "foyers" : "personnes";
+
+  const apply = async (mode: "add" | "remove") => {
+    if (picked.length === 0 || busy) return;
+    setBusy(true);
+    setDone(null);
+    try {
+      const res = await api.patch<{ changed: number }>("/api/wedding/guests/categories", {
+        ids,
+        scope,
+        add: mode === "add" ? picked : [],
+        remove: mode === "remove" ? picked : [],
+      });
+      // Dire ce qui a bougé, y compris « rien » : une action en masse qui ne
+      // change rien et ne le dit pas se lit comme une panne.
+      setDone(
+        res.changed === 0
+          ? "Aucun changement — ils portaient déjà ce choix."
+          : `${res.changed} ${res.changed > 1 ? target : target.slice(0, -1)} mis à jour.`,
+      );
+      setPicked([]);
+      onDone();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="relative shrink-0">
+      <button type="button" onClick={() => setOpen((o) => !o)} className="btn-ghost text-sm">
+        Catégories
+      </button>
+      {open && (
+        <div className="absolute bottom-full right-0 z-40 mb-2 w-80 rounded-xl border border-line bg-surface p-3 shadow-lg">
+          <div className="mb-2 eyebrow">Périmètre</div>
+          <FilterChips
+            value={scope}
+            onChange={(v) => setScope(v as "person" | "family")}
+            wrap
+            items={[
+              { value: "person", label: "Les personnes" },
+              { value: "family", label: "Les foyers" },
+            ]}
+          />
+          <div className="mt-3">
+            <TagSelect
+              options={categories.list}
+              value={picked}
+              onChange={setPicked}
+              onCreate={categories.create}
+              label="Catégories"
+              placeholder="Choisir…"
+            />
+          </div>
+          <p className="mt-2 text-xs text-slate-400">
+            {scope === "family"
+              ? "Le tag va sur le foyer de chaque personne sélectionnée."
+              : "La catégorie va sur chaque personne sélectionnée."}
+          </p>
+          {done && <p className="mt-2 text-xs font-medium text-brand-600">{done}</p>}
+          {/* Libellés portant le périmètre : le sélecteur du dessus a déjà son
+              propre « Ajouter « … » » pour créer une catégorie, et deux
+              « Ajouter » dans le même panneau ne se distinguent pas. */}
+          <div className="mt-3 flex justify-end gap-2">
+            <button
+              type="button"
+              disabled={picked.length === 0 || busy}
+              onClick={() => void apply("remove")}
+              className="btn-ghost text-sm disabled:opacity-40"
+            >
+              Retirer des {target}
+            </button>
+            <button
+              type="button"
+              disabled={picked.length === 0 || busy}
+              onClick={() => void apply("add")}
+              className="btn-primary text-sm disabled:opacity-40"
+            >
+              {busy ? "…" : `Poser sur les ${target}`}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Nombre de foyers montrés dans « À traiter » avant le dépliage. */
 const TRIAGE_PREVIEW = 2;
 
 function InvitesMobile() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const weddingDays = useWeddingDays();
   const { data } = useQuery({
     queryKey: ["wedding-guests"],
@@ -543,10 +1506,14 @@ function InvitesMobile() {
   const [search, setSearch] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [addressFilter, setAddressFilter] = useState<"all" | "with" | "without">("all");
-  const [invitFilter, setInvitFilter] = useState<"all" | "to_send" | "done">("all");
+  const [invitFilter, setInvitFilter] = useState<"all" | InvitationStatus>("all");
+  const [housingFilter, setHousingFilter] = useState<"all" | "yes" | "no">("all");
+  // Le choix du repas se filtre par l'URL : il vient souvent d'un clic depuis
+  // l'onglet Faire-part.
+  const [meal, setMeal] = useMealFilter();
+  const cfg = useInviteConfig();
   const [showArchived, setShowArchived] = useState(false);
   const [triageOpen, setTriageOpen] = useState(false);
-  const [openId, setOpenId] = useState<string | null>(null);
   const [modal, setModal] = useState<{ open: boolean; item: WeddingGuest | null }>({
     open: false,
     item: null,
@@ -571,8 +1538,10 @@ function InvitesMobile() {
   const passes = (f: Foyer) => {
     if (addressFilter === "with" && !f.address) return false;
     if (addressFilter === "without" && f.address) return false;
-    if (invitFilter === "to_send" && f.principal.invitationStatus !== "to_send") return false;
-    if (invitFilter === "done" && f.principal.invitationStatus === "to_send") return false;
+    // Faire-part et logement appartiennent au foyer : c'est son chef qui les porte.
+    if (invitFilter !== "all" && f.principal.invitationStatus !== invitFilter) return false;
+    if (housingFilter === "yes" && !f.principal.housed) return false;
+    if (housingFilter === "no" && f.principal.housed) return false;
     if (q) {
       const hay = `${f.name} ${f.members.map((m) => m.name).join(" ")} ${f.address}`.toLowerCase();
       if (!hay.includes(q)) return false;
@@ -585,9 +1554,27 @@ function InvitesMobile() {
   const triage = showArchived ? [] : shown.filter(foyerNeedsWork);
   const triageShown = triageOpen ? triage : triage.slice(0, TRIAGE_PREVIEW);
   const filterCount =
-    (addressFilter !== "all" ? 1 : 0) + (invitFilter !== "all" ? 1 : 0) + (showArchived ? 1 : 0);
+    (addressFilter !== "all" ? 1 : 0) +
+    (invitFilter !== "all" ? 1 : 0) +
+    (housingFilter !== "all" ? 1 : 0) +
+    (mealFilterActive(meal) ? 1 : 0) +
+    (showArchived ? 1 : 0);
 
-  const openFoyer = shown.find((f) => f.principal.id === openId) ?? null;
+  // Filtrer sur un plat, c'est chercher des **personnes** : la liste de foyers
+  // cède la place à la liste de convives, celle qui part chez le traiteur. Les
+  // filtres de foyer restent appliqués — un foyer masqué n'y réapparaît pas.
+  const pickedMeal = mealById(cfg, meal.mealId);
+  const mealOn = mealFilterActive(meal) && !!pickedMeal;
+  const shownPeopleIds = new Set(shown.flatMap((f) => f.members.map((m) => m.id)));
+  const foyerNameOf = new Map(
+    source.flatMap((f) => f.members.map((m) => [m.id, f.name] as const)),
+  );
+  const mealPeople =
+    mealOn && pickedMeal
+      ? mealEaters(data, pickedMeal).filter(
+          (g) => shownPeopleIds.has(g.id) && matchesMeal(g, pickedMeal, meal),
+        )
+      : [];
 
   return (
     <div className="flex flex-col gap-4">
@@ -617,96 +1604,117 @@ function InvitesMobile() {
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
-        <SearchField
-          value={search}
-          onChange={setSearch}
-          placeholder="Nom, foyer, ville…"
-          className="min-w-0 flex-1"
-        />
-        <FilterButton active={filterCount > 0} onClick={() => setFiltersOpen(true)} />
-      </div>
+      <SearchField
+        value={search}
+        onChange={setSearch}
+        placeholder="Nom, foyer, ville…"
+        trailing={<FilterButton active={filterCount > 0} onClick={() => setFiltersOpen(true)} />}
+      />
 
-      {triage.length > 0 && (
-        <div className="flex flex-col gap-2">
-          <SectionLabel>À traiter · {triage.length}</SectionLabel>
-          <div className="card">
-            {triageShown.map((f, i) => (
-              <FoyerRow
-                key={f.principal.id}
-                foyer={f}
-                days={weddingDays}
-                onOpen={() => setOpenId(f.principal.id)}
-                last={i === triageShown.length - 1 && triage.length <= TRIAGE_PREVIEW}
-              />
-            ))}
-            {triage.length > TRIAGE_PREVIEW && (
-              <button
-                type="button"
-                onClick={() => setTriageOpen((v) => !v)}
-                aria-expanded={triageOpen}
-                className="flex min-h-tap w-full items-center justify-between text-sm font-medium text-brand-600"
-              >
-                {triageOpen ? "Réduire" : `Voir les ${triage.length - TRIAGE_PREVIEW} autres`}
-                <IconChevronDown size={18} className={triageOpen ? "rotate-180" : ""} />
+      {mealOn ? (
+        <div className="flex flex-col gap-3">
+          <MealFilterBanner
+            label={mealFilterLabel(meal, pickedMeal)}
+            count={mealPeople.length}
+            onClear={() => setMeal(MEAL_FILTER_OFF)}
+          />
+          {mealPeople.length === 0 ? (
+            <div className="card text-center">
+              <div className="font-semibold">Personne n'a fait ce choix.</div>
+              <button onClick={() => setMeal(MEAL_FILTER_OFF)} className="btn-primary mt-3">
+                Revenir aux foyers
               </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      <div className="flex flex-col gap-2">
-        <SectionLabel>
-          {showArchived ? "Non invités" : "Tous les foyers"} · {shown.length}
-        </SectionLabel>
-        {shown.length === 0 ? (
-          <div className="card text-center">
-            <div className="font-semibold">
-              {source.length === 0 ? "Aucun foyer pour l'instant." : "Aucun foyer dans ce filtre."}
             </div>
-            {source.length === 0 && (
-              <button
-                onClick={() => setModal({ open: true, item: null })}
-                className="btn-primary mt-3"
-              >
-                Ajouter le premier
-              </button>
-            )}
-          </div>
-        ) : (
-          <div className="card">
-            {shown.map((f, i) => (
-              <FoyerRow
-                key={f.principal.id}
-                foyer={f}
-                days={weddingDays}
-                onOpen={() => setOpenId(f.principal.id)}
-                last={i === shown.length - 1}
-              />
-            ))}
+          ) : (
+            <div className="card">
+              {mealPeople.map((g, i) => (
+                <MealPersonRow
+                  key={g.id}
+                  g={g}
+                  foyerName={foyerNameOf.get(g.id) ?? ""}
+                  meal={pickedMeal!}
+                  onOpen={() => navigate(`/wedding/invites/${g.parentId ?? g.id}`)}
+                  last={i === mealPeople.length - 1}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+        {triage.length > 0 && (
+          <div className="flex flex-col gap-2">
+            <SectionLabel>À traiter · {triage.length}</SectionLabel>
+            <div className="card">
+              {triageShown.map((f, i) => (
+                <FoyerRow
+                  key={f.principal.id}
+                  foyer={f}
+                  days={weddingDays}
+                  onOpen={() => navigate(`/wedding/invites/${f.principal.id}`)}
+                  last={i === triageShown.length - 1 && triage.length <= TRIAGE_PREVIEW}
+                />
+              ))}
+              {triage.length > TRIAGE_PREVIEW && (
+                <button
+                  type="button"
+                  onClick={() => setTriageOpen((v) => !v)}
+                  aria-expanded={triageOpen}
+                  className="flex min-h-tap w-full items-center justify-between text-sm font-medium text-brand-600"
+                >
+                  {triageOpen ? "Réduire" : `Voir les ${triage.length - TRIAGE_PREVIEW} autres`}
+                  <IconChevronDown size={18} className={triageOpen ? "rotate-180" : ""} />
+                </button>
+              )}
+            </div>
           </div>
         )}
-      </div>
+
+        <div className="flex flex-col gap-2">
+          <SectionLabel>
+            {showArchived ? "Non invités" : "Tous les foyers"} · {shown.length}
+          </SectionLabel>
+          {shown.length === 0 ? (
+            <div className="card text-center">
+              <div className="font-semibold">
+                {source.length === 0 ? "Aucun foyer pour l'instant." : "Aucun foyer dans ce filtre."}
+              </div>
+              {source.length === 0 && (
+                <button
+                  onClick={() => setModal({ open: true, item: null })}
+                  className="btn-primary mt-3"
+                >
+                  Ajouter le premier
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="card">
+              {shown.map((f, i) => (
+                <FoyerRow
+                  key={f.principal.id}
+                  foyer={f}
+                  days={weddingDays}
+                  onOpen={() => navigate(`/wedding/invites/${f.principal.id}`)}
+                  last={i === shown.length - 1}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+        </>
+      )}
 
       <MobileActionBar label="Ajouter un foyer" onClick={() => setModal({ open: true, item: null })} />
-
-      {openFoyer && (
-        <FoyerSheet
-          key={openFoyer.principal.id}
-          foyer={openFoyer}
-          days={weddingDays}
-          onClose={() => setOpenId(null)}
-          onEdit={(g) => {
-            setOpenId(null);
-            setModal({ open: true, item: g });
-          }}
-        />
-      )}
 
       {filtersOpen && (
         <Sheet
           title="Filtres"
-          subtitle={`${shown.length} foyer${shown.length > 1 ? "s" : ""} affiché${shown.length > 1 ? "s" : ""}`}
+          subtitle={
+            mealOn
+              ? `${mealPeople.length} personne${mealPeople.length > 1 ? "s" : ""} au repas`
+              : `${shown.length} foyer${shown.length > 1 ? "s" : ""} affiché${shown.length > 1 ? "s" : ""}`
+          }
           onClose={() => setFiltersOpen(false)}
           footer={
             <div className="flex gap-2">
@@ -715,6 +1723,8 @@ function InvitesMobile() {
                 onClick={() => {
                   setAddressFilter("all");
                   setInvitFilter("all");
+                  setHousingFilter("all");
+                  setMeal(MEAL_FILTER_OFF);
                   setShowArchived(false);
                 }}
                 className="btn-ghost min-h-tap shrink-0 rounded-full px-5"
@@ -749,13 +1759,18 @@ function InvitesMobile() {
               <FilterChips
                 value={invitFilter}
                 onChange={(v) => setInvitFilter(v as typeof invitFilter)}
-                items={[
-                  { value: "all", label: "Tous" },
-                  { value: "to_send", label: "À envoyer" },
-                  { value: "done", label: "Envoyé" },
-                ]}
+                items={INVIT_FILTERS}
               />
             </div>
+            <div>
+              <div className="eyebrow mb-2">Logement</div>
+              <FilterChips
+                value={housingFilter}
+                onChange={(v) => setHousingFilter(v as typeof housingFilter)}
+                items={HOUSING_FILTERS}
+              />
+            </div>
+            <MealFilterFields cfg={cfg} value={meal} onChange={setMeal} />
             <SheetRow
               label="Non invités"
               hint="Les foyers écartés, hors des totaux."
@@ -778,291 +1793,6 @@ function InvitesMobile() {
         />
       )}
     </div>
-  );
-}
-
-/**
- * Faire-part : trois états qui comptent. « Ouvert » (statut hérité) se lit
- * comme « Envoyé » — c'en est un — et reste modifiable depuis l'ordinateur.
- */
-const INVIT_SEGMENTS: { value: InvitationStatus; label: string }[] = [
-  { value: "to_send", label: "À envoyer" },
-  { value: "sent", label: "Envoyé" },
-  { value: "filled", label: "Répondu" },
-];
-
-/**
- * Feuille d'un foyer : l'adresse, la présence personne par personne et le
- * faire-part au même endroit. Les modifications sont mises de côté et
- * enregistrées d'un coup — on coche six cases avant de valider, pas six
- * requêtes.
- */
-function FoyerSheet({
-  foyer,
-  days,
-  onClose,
-  onEdit,
-}: {
-  foyer: Foyer;
-  days: WeddingDay[];
-  onClose: () => void;
-  onEdit: (g: WeddingGuest) => void;
-}) {
-  const qc = useQueryClient();
-  type Presence = Record<WeddingDayKey, boolean>;
-  const [presence, setPresence] = useState<Record<string, Presence>>(() =>
-    Object.fromEntries(
-      foyer.members.map((m) => [m.id, { vendredi: m.vendredi, samedi: m.samedi, dimanche: m.dimanche }]),
-    ),
-  );
-  const [status, setStatus] = useState<InvitationStatus>(foyer.principal.invitationStatus);
-  const [addr, setAddr] = useState({
-    address: foyer.principal.address ?? "",
-    postalCode: foyer.principal.postalCode ?? "",
-    city: foyer.principal.city ?? "",
-  });
-  const [editAddr, setEditAddr] = useState(false);
-
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["wedding-guests"] });
-  // Un invité rattaché au tableau « à partir du samedi » n'a pas de vendredi :
-  // la case existe mais reste inerte, comme sur l'ordinateur.
-  const dayActive = (m: WeddingGuest, key: WeddingDayKey) =>
-    m.guestGroup === "vendredi" || key !== "vendredi";
-
-  const save = useMutation({
-    mutationFn: async () => {
-      for (const m of foyer.members) {
-        const next = presence[m.id];
-        const body: Partial<WeddingGuest> = {};
-        for (const d of days) {
-          if (dayActive(m, d.key) && next[d.key] !== m[d.key]) body[d.key] = next[d.key];
-        }
-        if (Object.keys(body).length > 0) await api.patch(`/api/wedding/guests/${m.id}`, body);
-      }
-      const p = foyer.principal;
-      const head: Partial<WeddingGuest> = {};
-      if (status !== p.invitationStatus) head.invitationStatus = status;
-      if (addr.address !== (p.address ?? "")) head.address = addr.address || null;
-      if (addr.postalCode !== (p.postalCode ?? "")) head.postalCode = addr.postalCode || null;
-      if (addr.city !== (p.city ?? "")) head.city = addr.city || null;
-      if (Object.keys(head).length > 0) await api.patch(`/api/wedding/guests/${p.id}`, head);
-    },
-    onSuccess: () => {
-      invalidate();
-      onClose();
-    },
-  });
-
-  const archiveAll = useMutation({
-    mutationFn: async () => {
-      for (const m of foyer.members) {
-        await api.patch(`/api/wedding/guests/${m.id}`, { archived: !foyer.principal.archived });
-      }
-    },
-    onSuccess: () => {
-      invalidate();
-      onClose();
-    },
-  });
-  const removeAll = useMutation({
-    mutationFn: async () => {
-      // Les rattachés d'abord : supprimer le principal les détacherait au lieu
-      // de les supprimer, et le foyer réapparaîtrait en morceaux.
-      for (const m of foyer.members.slice(1)) await api.del(`/api/wedding/guests/${m.id}`);
-      await api.del(`/api/wedding/guests/${foyer.principal.id}`);
-    },
-    onSuccess: () => {
-      invalidate();
-      onClose();
-    },
-  });
-
-  const setDay = (id: string, key: WeddingDayKey, v: boolean) =>
-    setPresence((prev) => ({ ...prev, [id]: { ...prev[id], [key]: v } }));
-  const checkAll = () =>
-    setPresence(
-      Object.fromEntries(
-        foyer.members.map((m) => [
-          m.id,
-          {
-            vendredi: dayActive(m, "vendredi") || m.vendredi,
-            samedi: true,
-            dimanche: true,
-          } as Presence,
-        ]),
-      ),
-    );
-
-  const actions: OverflowItem[] = [
-    { label: `Modifier ${foyer.principal.name}`, onClick: () => onEdit(foyer.principal) },
-    {
-      label: foyer.principal.archived ? "Remettre dans les invités" : "Retirer des invités",
-      onClick: () => archiveAll.mutate(),
-    },
-    {
-      label: "Supprimer le foyer",
-      danger: true,
-      onClick: () => {
-        if (confirm(`Supprimer le foyer « ${foyer.name} » et ses ${foyer.members.length} personnes ?`))
-          removeAll.mutate();
-      },
-    },
-  ];
-
-  const subtitle = [
-    `${foyer.members.length} personne${foyer.members.length > 1 ? "s" : ""}`,
-    foyer.children.length > 0
-      ? `${foyer.children.length} enfant${foyer.children.length > 1 ? "s" : ""}`
-      : null,
-    GUEST_TYPE_META[foyer.principal.type].label,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-  return (
-    <Sheet
-      title={foyer.name}
-      subtitle={subtitle}
-      thumbnail={<FoyerInitials name={foyer.name} />}
-      actions={actions}
-      onClose={onClose}
-      footer={
-        <button
-          type="button"
-          onClick={() => save.mutate()}
-          disabled={save.isPending}
-          className="btn-primary h-[52px] w-full rounded-full text-base"
-        >
-          {save.isPending ? "Enregistrement…" : "Enregistrer"}
-        </button>
-      }
-    >
-      <div className="flex flex-col gap-5 p-4">
-        {editAddr ? (
-          <div className="flex flex-col gap-2">
-            <Input
-              autoFocus
-              placeholder="Adresse — n° et rue"
-              value={addr.address}
-              onChange={(e) => setAddr({ ...addr, address: e.target.value })}
-            />
-            <div className="grid grid-cols-3 gap-2">
-              <Input
-                placeholder="Code postal"
-                value={addr.postalCode}
-                onChange={(e) => setAddr({ ...addr, postalCode: e.target.value })}
-              />
-              <Input
-                className="col-span-2"
-                placeholder="Ville"
-                value={addr.city}
-                onChange={(e) => setAddr({ ...addr, city: e.target.value })}
-              />
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2.5 rounded-xl border border-line p-3">
-            <IconMapPin
-              size={18}
-              className={`shrink-0 ${addr.address || addr.city ? "text-ink-2" : "text-warning"}`}
-            />
-            <span
-              className={`min-w-0 flex-1 truncate text-sm ${addr.address || addr.city ? "" : "text-warning"}`}
-            >
-              {[addr.address, [addr.postalCode, addr.city].filter(Boolean).join(" ")]
-                .filter(Boolean)
-                .join(", ") || "Adresse manquante"}
-            </span>
-            <button
-              type="button"
-              onClick={() => setEditAddr(true)}
-              className="shrink-0 text-sm font-medium text-brand-600"
-            >
-              Modifier
-            </button>
-          </div>
-        )}
-
-        <div>
-          <SectionLabel
-            right={
-              <button type="button" onClick={checkAll} className="text-sm font-medium text-brand-600">
-                Tout cocher
-              </button>
-            }
-          >
-            Présence
-          </SectionLabel>
-          <div className="mt-2 rounded-xl border border-line">
-            <div className="flex items-center gap-2 border-b border-hairline px-3 py-1.5">
-              <span className="min-w-0 flex-1" />
-              {days.map((d) => (
-                <span key={d.key} className="eyebrow w-10 text-center" style={{ lineHeight: 1.25 }}>
-                  {d.label.slice(0, 3)}
-                </span>
-              ))}
-            </div>
-            {foyer.members.map((m, i) => (
-              <div
-                key={m.id}
-                className={`flex min-h-tap items-center gap-2 px-3 py-2 ${i > 0 ? "border-t border-hairline" : ""}`}
-              >
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-base">{m.name}</span>
-                  {m.ageGroup === "child" && (
-                    <span className="block text-xs text-slate-400">enfant</span>
-                  )}
-                </span>
-                {days.map((d) => (
-                  <span key={d.key} className="flex w-10 justify-center">
-                    {dayActive(m, d.key) ? (
-                      <span aria-label={`${m.name} — ${d.label}`}>
-                        <Checkbox
-                          checked={presence[m.id][d.key]}
-                          onChange={() => setDay(m.id, d.key, !presence[m.id][d.key])}
-                        />
-                      </span>
-                    ) : (
-                      <span className="text-slate-400">—</span>
-                    )}
-                  </span>
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <div className="eyebrow mb-2">Faire-part</div>
-          <div className="grid grid-cols-3 gap-2">
-            {INVIT_SEGMENTS.map((seg) => {
-              const on = status === seg.value || (seg.value === "sent" && status === "opened");
-              const warn = seg.value === "to_send";
-              return (
-                <button
-                  key={seg.value}
-                  type="button"
-                  onClick={() => setStatus(seg.value)}
-                  aria-pressed={on}
-                  className={`min-h-tap rounded-xl border px-2 text-sm font-medium transition ${
-                    on
-                      ? warn
-                        ? "border-warning bg-warning-soft text-warning"
-                        : "border-brand-600 bg-brand-50 text-brand-700"
-                      : "border-line text-ink-2"
-                  }`}
-                >
-                  {seg.label}
-                </button>
-              );
-            })}
-          </div>
-          <p className="mt-2 text-xs text-slate-400">
-            Le statut retire le foyer de « À traiter » sur la liste.
-          </p>
-        </div>
-      </div>
-    </Sheet>
   );
 }
 
@@ -1623,6 +2353,15 @@ function EpargneMobile() {
         sub={`cible à date ${eur0(s.shouldHaveByNow)} · ${eur0(s.monthlyRequired)} / mois pour tenir`}
       />
 
+      {s.weddingAccounts === 0 && (
+        <div className="card text-sm text-slate-400">
+          Aucun compte bancaire n'est marqué « Épargne mariage » : seul le déjà-payé est compté.{" "}
+          <Link to="/money/comptes" className="font-medium text-brand-600 hover:underline">
+            Choisir les comptes
+          </Link>
+        </div>
+      )}
+
       {thisMonth && (
         <div className="flex flex-col gap-2">
           <SectionLabel>Ce mois · {monthFr(nowMonth)}</SectionLabel>
@@ -1826,8 +2565,9 @@ function ContributionSheet({
           );
         })}
         <p className="text-xs text-slate-400">
-          « Versé » n'ajoute rien au total épargné : celui-ci vient du solde des comptes d'épargne.
-          La coche sert à savoir qui a déjà fait son virement du mois.
+          « Versé » n'ajoute rien au total épargné : celui-ci vient du solde des comptes marqués
+          « Épargne mariage » dans Argent → Comptes bancaires. La coche sert à savoir qui a déjà
+          fait son virement du mois.
         </p>
       </div>
     </Sheet>
@@ -3056,6 +3796,15 @@ function EpargneDesktop() {
         <Indicator label="Requis / mois" value={s.monthlyRequired} money />
       </div>
 
+      {s.weddingAccounts === 0 && (
+        <div className="card text-sm text-slate-400">
+          Aucun compte bancaire n'est marqué « Épargne mariage » : seul le déjà-payé est compté.{" "}
+          <Link to="/money/comptes" className="font-medium text-brand-600 hover:underline">
+            Choisir les comptes
+          </Link>
+        </div>
+      )}
+
       <div className="card">
         <div className="mb-2 flex items-center justify-between gap-2 text-sm">
           <span className="font-semibold">{s.percentFunded}% financé</span>
@@ -3775,6 +4524,7 @@ const useWeddingDays = () => useMe().household.weddingDays ?? WEDDING_DAYS_DEFAU
 
 function InvitesDesktop() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [modal, setModal] = useState<{ open: boolean; item: WeddingGuest | null; group: GuestGroup }>({
     open: false,
     item: null,
@@ -3792,7 +4542,13 @@ function InvitesDesktop() {
   const [search, setSearch] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [addressFilter, setAddressFilter] = useState<"all" | "with" | "without">("all");
+  const [invitFilter, setInvitFilter] = useState<"all" | InvitationStatus>("all");
+  const [housingFilter, setHousingFilter] = useState<"all" | "yes" | "no">("all");
   const [minSize, setMinSize] = useState("");
+  // Choix du repas : dans l'URL, pour qu'un chiffre de l'onglet Faire-part y mène.
+  const [meal, setMeal] = useMealFilter();
+  const cfg = useInviteConfig();
+  const categories = useWeddingCategories();
 
   const { data } = useQuery({
     queryKey: ["wedding-guests"],
@@ -3813,9 +4569,22 @@ function InvitesDesktop() {
     mutationFn: (orderedIds: string[]) => api.patch("/api/wedding/guests/reorder", { orderedIds }),
     onSuccess: invalidate,
   });
+  const bulk = useMutation({
+    mutationFn: ({ ids, patch: body }: { ids: string[]; patch: Partial<WeddingGuest> }) =>
+      api.patch("/api/wedding/guests/bulk", { ids, patch: body }),
+    onSuccess: invalidate,
+  });
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   // Mode "famille" : id de l'invité principal auquel on rattache des personnes (clic)
   const [groupingFor, setGroupingFor] = useState<string | null>(null);
+  // Mode "réorganiser" : hors de ce mode, la liste ne bouge pas. Un tableau de
+  // 60 lignes où chaque ligne se saisit à la souris se réordonne tout seul par
+  // accident, et le « ⋮ » vaut mieux que deux flèches qu'on n'utilise presque
+  // jamais.
+  const [reordering, setReordering] = useState(false);
+  // Sélection pour les actions rapides. Les ids peuvent survivre à un filtre :
+  // on les recroise avec les lignes affichées au moment d'agir.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   if (!data) return <div className="text-slate-400">Chargement…</div>;
 
@@ -3838,13 +4607,22 @@ function InvitesDesktop() {
     const hasAddr = familyAddress(p) !== "";
     if (addressFilter === "with" && !hasAddr) return false;
     if (addressFilter === "without" && hasAddr) return false;
+    // Faire-part et logement appartiennent au foyer : c'est son chef qui les porte.
+    if (invitFilter !== "all" && p.invitationStatus !== invitFilter) return false;
+    if (housingFilter === "yes" && !p.housed) return false;
+    if (housingFilter === "no" && p.housed) return false;
     if (q) {
       const hay = `${members.map((m) => m.name).join(" ")} ${familyAddress(p)}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
   };
-  const anyFilter = q !== "" || addressFilter !== "all" || minSize.trim() !== "";
+  const anyFilter =
+    q !== "" ||
+    addressFilter !== "all" ||
+    invitFilter !== "all" ||
+    housingFilter !== "all" ||
+    minSize.trim() !== "";
   const visibleIds = new Set<string>();
   for (const p of active.filter((g) => !g.parentId)) {
     const members = [p, ...active.filter((g) => g.parentId === p.id)];
@@ -3852,6 +4630,15 @@ function InvitesDesktop() {
   }
   const filteredActive = anyFilter ? active.filter((g) => visibleIds.has(g.id)) : active;
   const shown = filteredActive.filter(matchFilter);
+
+  // Un plat se choisit personne par personne : le filtre repas remplace donc
+  // l'arborescence des foyers par la liste des convives concernés.
+  const pickedMeal = mealById(cfg, meal.mealId);
+  const mealOn = mealFilterActive(meal) && !!pickedMeal;
+  const mealPeople =
+    mealOn && pickedMeal
+      ? mealEaters(shown, pickedMeal).filter((g) => matchesMeal(g, pickedMeal, meal))
+      : [];
 
   const count = (guests: WeddingGuest[], day: Day) => guests.filter((g) => g[day]).length;
   // Nombre d'adultes / enfants (optionnellement présents un jour donné).
@@ -3865,8 +4652,6 @@ function InvitesDesktop() {
     </span>
   );
 
-  const toggle = (g: WeddingGuest, day: Day) =>
-    patch.mutate({ id: g.id, body: { [day]: !g[day] } as Partial<WeddingGuest> });
 
   // Export .xlsx des invités (hors « non invités »), triés par tableau puis ordre.
   const downloadExcel = () => {
@@ -3890,6 +4675,8 @@ function InvitesDesktop() {
       ...(twoGroups ? [`Invité dès ${dayLabel("vendredi")}`] : []),
       ...weddingDays.map((d) => `Présent ${d.label}`),
       "Faire-part",
+      "Logé sur place",
+      "Lien du faire-part",
     ];
     const rows = guests.map((g) => [
       g.name,
@@ -3901,6 +4688,9 @@ function InvitesDesktop() {
       ...(twoGroups ? [g.guestGroup === "vendredi" ? "oui" : "non"] : []),
       ...weddingDays.map((d) => (g[d.key] ? "oui" : "non")),
       g.parentId ? "-" : INVITATION_STATUS_META[g.invitationStatus].label,
+      // Logement et lien n'existent que pour le foyer, porté par son chef.
+      g.parentId ? "-" : g.housed ? "oui" : "non",
+      g.parentId || !g.inviteCode ? "-" : inviteUrl(window.location.origin, g.inviteCode),
     ]);
     downloadXlsx("invites.xlsx", "Invités", [header, ...rows]);
   };
@@ -3914,14 +4704,112 @@ function InvitesDesktop() {
 
   const showDays = filter === "tout" && !showArchived; // colonnes de jours seulement en vue "Tout"
 
+  /** Retirer / remettre un foyer entier : archiver le seul chef laisserait ses
+   *  rattachés dans la liste, orphelins d'un principal invisible. */
+  const setArchivedFoyer = async (head: WeddingGuest, archived: boolean) => {
+    const members = data.filter((g) => g.parentId === head.id);
+    for (const m of [head, ...members]) {
+      await api.patch(`/api/wedding/guests/${m.id}`, { archived });
+    }
+    invalidate();
+  };
+
+  const link = (g: WeddingGuest) =>
+    g.inviteCode ? inviteUrl(window.location.origin, g.inviteCode) : null;
+
+  /** Ouvrir une personne, c'est ouvrir **son foyer** : la fiche est celle du foyer. */
+  const openFoyer = (g: WeddingGuest) => navigate(`/wedding/invites/${g.parentId ?? g.id}`);
+
+  /* ---- Sélection ---- */
+
+  const toggleOne = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  /** Case d'en-tête : elle ne pilote que les lignes du tableau qui la porte. */
+  const toggleMany = (ids: string[], on: boolean) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => (on ? next.add(id) : next.delete(id)));
+      return next;
+    });
+
+  const selectedGuests = data.filter((g) => selected.has(g.id));
+  /** Les foyers concernés par la sélection : une personne engage son foyer. */
+  const selectedHeadIds = [...new Set(selectedGuests.map((g) => g.parentId ?? g.id))];
+
+  const applyBulk = (patchBody: Partial<WeddingGuest>, ids: string[]) => {
+    if (ids.length > 0) bulk.mutate({ ids, patch: patchBody });
+  };
+
+  /**
+   * Actions du « ⋮ » d'une ligne. Tout ce qui était éparpillé en bout de ligne
+   * (crayon au survol, ⇄, 👪, ⤴, ✕) vit ici, avec un libellé en clair : on ne
+   * devine plus ce que fait un pictogramme, et rien de destructif n'est à un
+   * pixel d'une case à cocher.
+   *
+   * `family` : la vue « Tout », seule à afficher l'arborescence des foyers —
+   * c'est donc la seule où rattacher et détacher ont un sens.
+   */
+  const rowActions = (g: WeddingGuest, _group: GuestGroup, family = false) => {
+    const url = link(g);
+    const items: OverflowItem[] = [{ label: "Ouvrir le foyer", onClick: () => openFoyer(g) }];
+    if (!g.parentId && url) {
+      items.push(
+        { label: "Voir leur faire-part", onClick: () => window.open(url, "_blank", "noopener") },
+        { label: "Copier le lien", onClick: () => navigator.clipboard?.writeText(url) },
+      );
+    }
+    if (family) {
+      items.push(
+        g.parentId
+          ? {
+              label: "Détacher de la famille",
+              onClick: () => patch.mutate({ id: g.id, body: { parentId: null } }),
+            }
+          : { label: "Rattacher des invités", onClick: () => setGroupingFor(g.id) },
+      );
+    }
+    // Le tableau d'arrivée est une propriété du foyer : les rattachés suivent.
+    if (twoGroups && !g.parentId && !g.archived) {
+      items.push({
+        label: `Déplacer dans « à partir de ${dayLabel(g.guestGroup === "vendredi" ? "samedi" : "vendredi")} »`,
+        onClick: () => transfer(g),
+      });
+    }
+    if (!g.parentId) {
+      items.push({
+        label: g.archived ? "Remettre dans les invités" : "Retirer des invités",
+        onClick: () => void setArchivedFoyer(g, !g.archived),
+      });
+    }
+    items.push({
+      label: "Supprimer",
+      danger: true,
+      onClick: () => {
+        if (confirm(`Supprimer ${g.name} ?`)) remove.mutate(g.id);
+      },
+    });
+    return items;
+  };
+
   const renderGuestTable = (opts: {
     title: string;
     guests: WeddingGuest[];
     group: GuestGroup;
     showCreate: boolean;
+    /** Colonnes du repas au lieu des colonnes de jours (vue « choix du repas »). */
+    meal?: boolean;
   }) => {
     const { title, guests, group, showCreate } = opts;
     const isActive = (d: Day) => group === "vendredi" || d !== "vendredi";
+    // Les deux jeux de colonnes ne cohabitent pas : sept colonnes de plus
+    // rendraient la colonne des noms illisible.
+    const mealCols = opts.meal ? servedCourses(pickedMeal) : [];
+    const withDays = showDays && !opts.meal;
     return (
       <div className="card">
         <div className="mb-2 flex items-center justify-between gap-2">
@@ -3945,77 +4833,106 @@ function InvitesDesktop() {
         ) : (
           <>
           <table className="w-full table-fixed text-sm">
+            {/* `table-fixed` prend ses largeurs sur la **première** rangée : le
+                sur-titre à `colSpan` les écrasait, et la colonne des noms se
+                retrouvait tronquée. On les déclare donc ici, hors des en-têtes. */}
+            <colgroup>
+              <col className="w-10" />
+              <col />
+              <col className="w-28" />
+              <col className="w-24" />
+              {withDays && dayKeys.map((d) => <col key={d} className="w-12 sm:w-16" />)}
+              {mealCols.map((c) => (
+                <col key={c.key} />
+              ))}
+              <col className="w-12" />
+            </colgroup>
             <thead className="sticky top-0 z-10 bg-white text-xs text-slate-400 dark:bg-slate-900">
+              {/* Les colonnes de jours ne montrent pas qui est convié, mais ce
+                  que chacun a répondu : sans ce sur-titre, on lisait le tableau
+                  comme un état de présence décidé par les mariés. */}
               <tr>
+                <th className="px-1">
+                  <SelectAll ids={guests.map((g) => g.id)} selected={selected} onToggle={toggleMany} />
+                </th>
                 <th className="py-1 text-left">Invité</th>
                 <th className="w-28 px-1 text-center">Faire-part</th>
-                {showDays &&
+                <th className="w-24 px-1 text-center">Logement</th>
+                {withDays &&
                   dayKeys.map((d) => (
                     <th key={d} className="w-12 px-1 text-center sm:w-16">
                       {isActive(d) ? dayLabel(d) : ""}
                     </th>
                   ))}
-                <th className="w-24"></th>
+                {mealCols.map((c) => (
+                  <th key={c.key} className="px-1 py-1 text-left">
+                    {c.label}
+                  </th>
+                ))}
+                <th className="w-12"></th>
               </tr>
             </thead>
             <tbody>
               {guests.map((g) => (
-                <tr key={g.id} className="group border-t border-slate-100 dark:border-slate-800">
+                <tr
+                  key={g.id}
+                  onClick={() => openFoyer(g)}
+                  className="group cursor-pointer border-t border-slate-100 hover:bg-brand-50/60 dark:border-slate-800 dark:hover:bg-slate-800"
+                >
+                  <td className="px-1" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex justify-center">
+                      <Checkbox checked={selected.has(g.id)} onChange={() => toggleOne(g.id)} size="sm" />
+                    </div>
+                  </td>
                   <td className="py-1.5">
                     <span className="mr-1.5" title={guestIcon(g).label}>
                       {guestIcon(g).icon}
                     </span>
                     {g.name}
-                    <button
-                      onClick={() => setModal({ open: true, item: g, group })}
-                      title="Modifier"
-                      className="ml-1 text-slate-400 opacity-0 transition hover:text-brand-600 group-hover:opacity-100"
-                    >
-                      ✎
-                    </button>
+                    <DietMark g={g} />
                   </td>
                   <td className="px-1 text-center">
-                    <InvitationCell
-                      g={g}
-                      onChange={(s) => patch.mutate({ id: g.id, body: { invitationStatus: s } })}
-                    />
+                    <InvitationCell g={g} />
                   </td>
-                  {showDays &&
+                  <td className="px-1 text-center">
+                    <HousingCell g={g} />
+                  </td>
+                  {withDays &&
                     dayKeys.map((d) => (
                       <td key={d} className="px-1 text-center">
-                        {isActive(d) && (
-                          <div className="flex justify-center">
-                            <Checkbox checked={g[d]} onChange={() => toggle(g, d)} size="sm" />
-                          </div>
-                        )}
+                        {isActive(d) && <DayAnswerCell g={g} day={d} open={dayIsOpen(g, d, dayKeys)} />}
                       </td>
                     ))}
-                  <td className="whitespace-nowrap text-right">
-                    {showDays && (
-                      <button
-                        onClick={() => transfer(g)}
-                        title={group === "vendredi" ? "Transférer vers samedi" : "Transférer vers vendredi"}
-                        className="px-1 text-slate-400 hover:text-brand-600"
-                      >
-                        ⇄
-                      </button>
-                    )}
-                    <button
-                      onClick={() => {
-                        if (confirm(`Supprimer ${g.name} ?`)) remove.mutate(g.id);
-                      }}
-                      className="px-1 text-slate-300 hover:text-red-500"
-                    >
-                      ✕
-                    </button>
+                  {mealCols.map((c) => {
+                    const dish = pickedMeal ? pickedDish(g, pickedMeal, c.key) : null;
+                    return (
+                      <td key={c.key} className="px-1">
+                        {dish ? (
+                          <span title={dish.detail || undefined}>{dish.name}</span>
+                        ) : (
+                          <span className="text-xs text-warning">Pas encore choisi</span>
+                        )}
+                      </td>
+                    );
+                  })}
+                  <td>
+                    <div className="flex justify-end">
+                      <OverflowMenu
+                        vertical
+                        label={`Actions sur ${g.name}`}
+                        items={rowActions(g, group)}
+                      />
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
-            {showDays && (
+            {withDays && (
             <tfoot>
               <tr className="border-t-2 border-slate-300 font-semibold dark:border-slate-700">
+                <td></td>
                 <td className="py-1.5">Total présents</td>
+                <td></td>
                 <td></td>
                 {dayKeys.map((d) => (
                   <td key={d} className="px-1 text-center tabular-nums">
@@ -4057,6 +4974,34 @@ function InvitesDesktop() {
     });
     const flatIds = flat.map((f) => f.g.id);
     const guestsInTable = flat.map((f) => f.g);
+
+    // Un « bloc » = un foyer et ses rattachés. Les flèches déplacent des blocs,
+    // pas des lignes : monter un chef de famille d'une ligne l'enverrait au
+    // milieu de la famille du dessus.
+    const blocks = principals.map((p) => [p.id, ...childrenOf(p.id).map((c) => c.id)]);
+    const blockOf = (g: WeddingGuest) => blocks.findIndex((b) => b.includes(g.id));
+    const canMove = (g: WeddingGuest, dir: -1 | 1) => {
+      const bi = blockOf(g);
+      if (bi < 0) return false;
+      if (!g.parentId) return bi + dir >= 0 && bi + dir < blocks.length;
+      const kids = blocks[bi].slice(1);
+      const i = kids.indexOf(g.id);
+      return i + dir >= 0 && i + dir < kids.length;
+    };
+    const moveRow = (g: WeddingGuest, dir: -1 | 1) => {
+      const bi = blockOf(g);
+      if (bi < 0 || !canMove(g, dir)) return;
+      if (!g.parentId) {
+        reorderGuests.mutate(arrayMove(blocks, bi, bi + dir).flat());
+        return;
+      }
+      // Un rattaché ne sort pas de sa famille : il se déplace parmi ses pairs.
+      const kids = blocks[bi].slice(1);
+      const i = kids.indexOf(g.id);
+      reorderGuests.mutate(
+        blocks.map((b, n) => (n === bi ? [b[0], ...arrayMove(kids, i, i + dir)] : b)).flat(),
+      );
+    };
     const byId = (id: string) => filteredActive.find((g) => g.id === id);
 
     // Drag & drop = réorganisation uniquement (le regroupement se fait via le mode famille).
@@ -4086,29 +5031,57 @@ function InvitesDesktop() {
             </span>
             <span className="text-xs text-slate-400">{ageBreakdown(guestsInTable)}</span>
           </div>
-          <button
-            onClick={() => setModal({ open: true, item: null, group })}
-            className="btn-primary hidden text-xs md:inline-flex"
-          >
-            + Invité
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={() => setReordering((v) => !v)}
+              className={`hidden text-xs md:inline-flex ${reordering ? "btn-primary" : "btn-ghost"}`}
+            >
+              {reordering ? "Terminer" : "Réorganiser"}
+            </button>
+            <button
+              onClick={() => setModal({ open: true, item: null, group })}
+              className="btn-primary hidden text-xs md:inline-flex"
+            >
+              + Invité
+            </button>
+          </div>
         </div>
+        {reordering && (
+          <p className="mb-2 text-xs text-slate-400">
+            Glissez la poignée ⠿, ou utilisez les flèches en bout de ligne. Un foyer se
+            déplace avec ses rattachés.
+          </p>
+        )}
         {guestsInTable.length === 0 ? (
           <div className="text-sm text-slate-400">Aucun invité.</div>
         ) : (
           <>
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
             <table className="w-full table-fixed text-sm">
+              <colgroup>
+                <col className="w-10" />
+                <col />
+                <col className="w-28" />
+                <col className="w-24" />
+                {dayKeys.map((d) => (
+                  <col key={d} className="w-12 sm:w-16" />
+                ))}
+                <col className="w-16" />
+              </colgroup>
               <thead className="sticky top-0 z-10 bg-white text-xs text-slate-400 dark:bg-slate-900">
                 <tr>
+                  <th className="px-1">
+                    <SelectAll ids={flatIds} selected={selected} onToggle={toggleMany} />
+                  </th>
                   <th className="py-1 text-left">Invité</th>
                   <th className="w-28 px-1 text-center">Faire-part</th>
+                  <th className="w-24 px-1 text-center">Logement</th>
                   {dayKeys.map((d) => (
                     <th key={d} className="w-12 px-1 text-center sm:w-16">
                       {isActive(d) ? dayLabel(d) : ""}
                     </th>
                   ))}
-                  <th className="w-28"></th>
+                  <th className="w-16"></th>
                 </tr>
               </thead>
               <tbody>
@@ -4124,7 +5097,15 @@ function InvitesDesktop() {
                       isGroupPrincipal={groupingFor === g.id}
                       isMember={groupingFor !== null && g.parentId === groupingFor}
                       canJoin={groupingFor !== null && groupingFor !== g.id && childrenIds(g.id).length === 0}
-                      onStartGroup={() => setGroupingFor(g.id)}
+                      actions={rowActions(g, group, true)}
+                      onOpen={() => openFoyer(g)}
+                      selected={selected.has(g.id)}
+                      onSelect={() => toggleOne(g.id)}
+                      reordering={reordering}
+                      canMoveUp={canMove(g, -1)}
+                      canMoveDown={canMove(g, 1)}
+                      onMove={(dir) => moveRow(g, dir)}
+                      categories={categories.list}
                       onStopGroup={() => setGroupingFor(null)}
                       onToggleMember={() => {
                         if (!groupingFor) return;
@@ -4138,20 +5119,15 @@ function InvitesDesktop() {
                           });
                         }
                       }}
-                      onToggle={(d) => toggle(g, d)}
-                      onStatus={(s) => patch.mutate({ id: g.id, body: { invitationStatus: s } })}
-                      onUngroup={() => patch.mutate({ id: g.id, body: { parentId: null } })}
-                      onEdit={() => setModal({ open: true, item: g, group })}
-                      onRemove={() => {
-                        if (confirm(`Supprimer ${g.name} ?`)) remove.mutate(g.id);
-                      }}
                     />
                   ))}
                 </SortableContext>
               </tbody>
               <tfoot>
                 <tr className="border-t-2 border-slate-300 font-semibold dark:border-slate-700">
+                  <td></td>
                   <td className="py-1.5">Total présents</td>
+                  <td></td>
                   <td></td>
                   {dayKeys.map((d) => (
                     <td key={d} className="px-1 text-center tabular-nums">
@@ -4184,40 +5160,31 @@ function InvitesDesktop() {
   return (
     <div className="space-y-4">
       {!showArchived ? (
-        <div className="flex items-center gap-2">
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Rechercher (nom, adresse…)"
-            className="input min-w-0 flex-1"
-          />
-          <button
-            onClick={() => setFiltersOpen(true)}
-            className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-3 py-2 text-sm ${
-              addressFilter !== "all" || minSize.trim() !== ""
-                ? "border-brand-500 text-brand-600 ring-1 ring-brand-500"
-                : "border-slate-300 text-slate-500 dark:border-slate-700"
-            }`}
-            aria-label="Filtres"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
-              <path d="M3 4h18l-7 8v6l-4 2v-8L3 4z" />
-            </svg>
-            Filtres
-          </button>
-        </div>
+        <SearchField
+          value={search}
+          onChange={setSearch}
+          placeholder="Rechercher (nom, adresse…)"
+          trailing={
+            <FilterButton
+              active={
+                addressFilter !== "all" ||
+                invitFilter !== "all" ||
+                housingFilter !== "all" ||
+                mealOn ||
+                minSize.trim() !== ""
+              }
+              onClick={() => setFiltersOpen(true)}
+            />
+          }
+        />
       ) : (
         // Vue « non invités » : sur mobile, un bouton Filtres pour rouvrir la modale (et en sortir).
         <div className="md:hidden">
           <button
             onClick={() => setFiltersOpen(true)}
-            className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-brand-500 px-3 py-2 text-sm text-brand-600 ring-1 ring-brand-500"
-            aria-label="Filtres"
+            className="flex min-h-tap w-full items-center justify-center gap-1.5 rounded-xl border border-brand-500 px-3 text-sm text-brand-600"
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
-              <path d="M3 4h18l-7 8v6l-4 2v-8L3 4z" />
-            </svg>
+            <IconFilter size={18} />
             Filtres
           </button>
         </div>
@@ -4262,7 +5229,22 @@ function InvitesDesktop() {
         })
       ) : (
         <>
-          {showDays ? (
+          {mealOn ? (
+            <>
+              <MealFilterBanner
+                label={mealFilterLabel(meal, pickedMeal)}
+                count={mealPeople.length}
+                onClear={() => setMeal(MEAL_FILTER_OFF)}
+              />
+              {renderGuestTable({
+                title: pickedMeal?.title || "Choix du repas",
+                guests: mealPeople,
+                group: "vendredi",
+                showCreate: false,
+                meal: true,
+              })}
+            </>
+          ) : showDays ? (
             <>
               {groupingFor && (
                 <div className="flex items-center justify-between gap-2 rounded-xl bg-brand-50 px-3 py-2 text-sm text-brand-700 dark:bg-brand-600/20 dark:text-brand-50">
@@ -4296,6 +5278,99 @@ function InvitesDesktop() {
             })
           )}
 
+          {/* Actions rapides : elles n'apparaissent qu'avec une sélection, et
+              collent au bas de l'écran — sur 60 lignes, une barre en pied de
+              tableau serait hors de vue au moment où on coche. */}
+          {selected.size > 0 && (
+            <div className="sticky bottom-0 z-20 -mx-4 border-t border-line bg-surface/95 px-4 py-3 backdrop-blur">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="shrink-0 text-sm font-semibold">
+                  {selected.size} sélectionné{selected.size > 1 ? "s" : ""}
+                </span>
+                <button
+                  onClick={() => setSelected(new Set())}
+                  className="shrink-0 text-sm font-medium text-brand-600"
+                >
+                  Tout désélectionner
+                </button>
+                <span className="grow" />
+
+                <Select
+                  className="w-36 shrink-0"
+                  value=""
+                  placeholder="Présence"
+                  onChange={(v) => {
+                    const [key, on] = v.split(":") as [Day, "1" | "0"];
+                    // Un invité du tableau « à partir du samedi » n'a pas de
+                    // premier jour : le lui cocher créerait un état impossible.
+                    const ids = selectedGuests
+                      .filter((g) => key !== "vendredi" || g.guestGroup === "vendredi")
+                      .map((g) => g.id);
+                    applyBulk({ [key]: on === "1" } as Partial<WeddingGuest>, ids);
+                  }}
+                  options={weddingDays.flatMap((d) => [
+                    { value: `${d.key}:1`, label: `Présent — ${d.label}` },
+                    { value: `${d.key}:0`, label: `Absent — ${d.label}` },
+                  ])}
+                />
+
+                <Select
+                  className="w-36 shrink-0"
+                  value=""
+                  placeholder="Logement"
+                  onChange={(v) => applyBulk({ housed: v === "1" }, selectedHeadIds)}
+                  options={[
+                    { value: "1", label: "Logé sur place" },
+                    { value: "0", label: "À se loger" },
+                  ]}
+                />
+
+                <Select
+                  className="w-36 shrink-0"
+                  value=""
+                  placeholder="Faire-part"
+                  onChange={(v) =>
+                    applyBulk({ invitationStatus: v as InvitationStatus }, selectedHeadIds)
+                  }
+                  options={INVITATION_STATUS.filter((s) => s !== "none").map((s) => ({
+                    value: s,
+                    label: INVITATION_STATUS_META[s].label,
+                  }))}
+                />
+
+                {/* « Type » et non « Catégorie » : les catégories sont
+                    désormais la liste libre du bouton voisin, et deux mots
+                    identiques pour deux notions à côté l'une de l'autre ne
+                    peuvent que se confondre. */}
+                <Select
+                  className="w-36 shrink-0"
+                  value=""
+                  placeholder="Type"
+                  onChange={(v) =>
+                    applyBulk({ type: v as GuestType }, [...selected])
+                  }
+                  options={GUEST_TYPE.map((t) => ({
+                    value: t,
+                    label: `${GUEST_TYPE_META[t].icon} ${GUEST_TYPE_META[t].label}`,
+                  }))}
+                />
+
+                <BulkCategories ids={[...selected]} onDone={invalidate} />
+              </div>
+              {bulk.isPending && (
+                <p className="mt-1.5 text-xs text-slate-400">Application…</p>
+              )}
+              {selectedHeadIds.length !== selected.size && (
+                <p className="mt-1.5 text-xs text-slate-400">
+                  Logement et faire-part appartiennent au foyer : ils s'appliquent aux{" "}
+                  {selectedHeadIds.length} foyer{selectedHeadIds.length > 1 ? "s" : ""} concerné
+                  {selectedHeadIds.length > 1 ? "s" : ""}.
+                </p>
+              )}
+            </div>
+          )}
+
+          {!mealOn && (
           <div className="card">
             <div className="mb-2 font-semibold">Total invités présents</div>
             <div
@@ -4311,6 +5386,7 @@ function InvitesDesktop() {
               ))}
             </div>
           </div>
+          )}
         </>
       )}
 
@@ -4352,7 +5428,10 @@ function InvitesDesktop() {
           className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center"
           onClick={() => setFiltersOpen(false)}
         >
-          <div className="card w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+          {/* Assez large pour que les noms de plats tiennent en entier : les
+              pastilles du menu sont des phrases (« Térrine de canard »), pas
+              des mots d'un tiret. */}
+          <div className="card w-full max-w-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-lg font-bold">Filtres</h2>
               <button onClick={() => setFiltersOpen(false)} className="text-slate-400 hover:text-slate-600">
@@ -4409,6 +5488,45 @@ function InvitesDesktop() {
                   ))}
                 </div>
               </div>
+              <div>
+                <div className="mb-1.5 text-xs text-slate-400">Faire-part</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {INVIT_FILTERS.map((o) => (
+                    <button
+                      key={o.value}
+                      type="button"
+                      onClick={() => setInvitFilter(o.value as typeof invitFilter)}
+                      className={`rounded-full px-2.5 py-1 text-xs font-medium transition ${
+                        invitFilter === o.value
+                          ? "bg-brand-600 text-on-brand"
+                          : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="mb-1.5 text-xs text-slate-400">Logement</div>
+                <div className="flex rounded-xl border border-slate-300 p-0.5 dark:border-slate-700">
+                  {HOUSING_FILTERS.map((o) => (
+                    <button
+                      key={o.value}
+                      type="button"
+                      onClick={() => setHousingFilter(o.value as typeof housingFilter)}
+                      className={`flex-1 rounded-lg px-2 py-1.5 text-sm ${
+                        housingFilter === o.value
+                          ? "bg-brand-600 text-on-brand"
+                          : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <MealFilterFields cfg={cfg} value={meal} onChange={setMeal} wrap />
               <label className="text-xs text-slate-400">
                 Familles d'au moins X personnes
                 <input
@@ -4425,6 +5543,9 @@ function InvitesDesktop() {
               <button
                 onClick={() => {
                   setAddressFilter("all");
+                  setInvitFilter("all");
+                  setHousingFilter("all");
+                  setMeal(MEAL_FILTER_OFF);
                   setMinSize("");
                 }}
                 className="btn-ghost text-sm"
@@ -4547,14 +5668,17 @@ function FamilyRow({
   isGroupPrincipal,
   isMember,
   canJoin,
-  onStartGroup,
+  actions,
+  onOpen,
+  selected,
+  onSelect,
+  reordering,
+  canMoveUp,
+  canMoveDown,
+  onMove,
   onStopGroup,
   onToggleMember,
-  onToggle,
-  onStatus,
-  onUngroup,
-  onEdit,
-  onRemove,
+  categories,
 }: {
   g: WeddingGuest;
   child: boolean;
@@ -4564,29 +5688,45 @@ function FamilyRow({
   isGroupPrincipal: boolean;
   isMember: boolean;
   canJoin: boolean;
-  onStartGroup: () => void;
+  /** Tout ce que la ligne sait faire, derrière le « ⋮ » de fin de ligne. */
+  actions: OverflowItem[];
+  /** Ouvre la fiche du foyer (celui de la personne, si elle est rattachée). */
+  onOpen: () => void;
+  /** Sélection pour les actions rapides du bas de tableau. */
+  selected: boolean;
+  onSelect: () => void;
+  /** Mode réorganisation : poignée + flèches à la place du « ⋮ ». */
+  reordering: boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  onMove: (dir: -1 | 1) => void;
   onStopGroup: () => void;
   onToggleMember: () => void;
-  onToggle: (d: Day) => void;
-  onStatus: (s: InvitationStatus) => void;
-  onUngroup: () => void;
-  onEdit: () => void;
-  onRemove: () => void;
+  categories: { id: string; name: string }[];
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: g.id,
-    disabled: groupingActive,
+    // Hors mode réorganisation, la ligne ne se saisit pas : une liste de 60
+    // foyers se réordonnait par accident au moindre glissement.
+    disabled: groupingActive || !reordering,
   });
-  const rowClick = groupingActive && canJoin ? onToggleMember : undefined;
+  // Toutes les cellules sont en lecture seule : la ligne entière peut donc
+  // ouvrir le foyer. Le « ⋮ » arrête la propagation de son côté.
+  const rowClick = groupingActive ? (canJoin ? onToggleMember : undefined) : onOpen;
   return (
     <tr
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition }}
-      onClick={rowClick}
+      onClick={reordering ? undefined : rowClick}
       className={`group border-t border-slate-100 dark:border-slate-800 ${isDragging ? "bg-brand-50 dark:bg-slate-800" : ""} ${
         isGroupPrincipal ? "bg-brand-50 dark:bg-slate-800" : ""
-      } ${rowClick ? "cursor-pointer hover:bg-brand-50/60 dark:hover:bg-slate-800" : ""}`}
+      } ${rowClick && !reordering ? "cursor-pointer hover:bg-brand-50/60 dark:hover:bg-slate-800" : ""}`}
     >
+      <td className="px-1" onClick={(e) => e.stopPropagation()}>
+        <div className="flex justify-center">
+          <Checkbox checked={selected} onChange={onSelect} size="sm" />
+        </div>
+      </td>
       <td className={child ? "py-1" : "py-2.5"}>
         <div className={`flex items-center gap-1 ${child ? "pl-6" : ""}`}>
           {groupingActive ? (
@@ -4595,7 +5735,7 @@ function FamilyRow({
             ) : (
               <span className="w-4" />
             )
-          ) : (
+          ) : reordering ? (
             <button
               {...attributes}
               {...listeners}
@@ -4604,7 +5744,7 @@ function FamilyRow({
             >
               ⠿
             </button>
-          )}
+          ) : null}
           {child && <span className="text-slate-300">↳</span>}
           <span
             className={child ? "text-xs" : "text-base"}
@@ -4615,16 +5755,17 @@ function FamilyRow({
           <span className={`truncate ${child ? "text-xs text-slate-500 dark:text-slate-400" : "font-semibold"}`}>
             {g.name}
           </span>
-          {!groupingActive && (
-            <button
-              onClick={onEdit}
-              title="Modifier"
-              className="text-slate-400 opacity-0 transition hover:text-brand-600 group-hover:opacity-100"
-            >
-              ✎
-            </button>
-          )}
+          <DietMark g={g} />
         </div>
+        {/* Ce que la ligne porte : sans ça, on pose des catégories en masse
+            sans jamais voir le résultat. */}
+        {(g.categories.length > 0 || g.familyCategories.length > 0) && (
+          <TagChips
+            ids={[...g.familyCategories, ...g.categories]}
+            options={categories}
+            className="pl-6 pt-0.5"
+          />
+        )}
         {!child && (g.address || g.postalCode || g.city) && (
           <div className="truncate pl-6 text-xs text-slate-400">
             📍{" "}
@@ -4634,48 +5775,48 @@ function FamilyRow({
           </div>
         )}
       </td>
-      <td className="px-1 text-center">{!groupingActive && <InvitationCell g={g} onChange={onStatus} />}</td>
+      <td className="px-1 text-center">{!groupingActive && <InvitationCell g={g} />}</td>
+      <td className="px-1 text-center">{!groupingActive && <HousingCell g={g} />}</td>
       {days.map((d) => (
         <td key={d} className="px-1 text-center">
-          {isActive(d) && (
-            <div className="flex justify-center">
-              <Checkbox checked={g[d]} onChange={() => onToggle(d)} size="sm" />
-            </div>
-          )}
+          {isActive(d) && <DayAnswerCell g={g} day={d} open={dayIsOpen(g, d, days)} />}
         </td>
       ))}
-      <td className="whitespace-nowrap text-right">
+      <td>
         {isGroupPrincipal ? (
-          <button
-            onClick={onStopGroup}
-            className="rounded-lg bg-brand-600 px-2 py-0.5 text-xs font-medium text-on-brand"
-          >
-            Terminé
-          </button>
-        ) : groupingActive ? null : (
-          <>
-            {child && (
-              <button
-                onClick={onUngroup}
-                title="Détacher de la famille"
-                className="px-1 text-slate-400 hover:text-brand-600"
-              >
-                ⤴
-              </button>
-            )}
-            {!child && (
-              <button
-                onClick={onStartGroup}
-                title="Créer une famille : rattacher des invités sous cette personne"
-                className="px-1 text-slate-400 hover:text-brand-600"
-              >
-                👪
-              </button>
-            )}
-            <button onClick={onRemove} className="px-1 text-slate-300 hover:text-red-500">
-              ✕
+          <div className="flex justify-end">
+            <button
+              onClick={onStopGroup}
+              className="rounded-lg bg-brand-600 px-2 py-0.5 text-xs font-medium text-on-brand"
+            >
+              Terminé
             </button>
-          </>
+          </div>
+        ) : groupingActive ? null : reordering ? (
+          // Même hauteur de cible que le « ⋮ » qu'elles remplacent : sans
+          // `h-tap`, la ligne se tassait en passant en mode réorganisation.
+          <div className="flex justify-end">
+            <button
+              onClick={() => onMove(-1)}
+              disabled={!canMoveUp}
+              aria-label={`Monter ${g.name}`}
+              className="flex h-tap w-7 items-center justify-center rounded-lg text-slate-400 transition hover:text-brand-600 disabled:opacity-25"
+            >
+              ↑
+            </button>
+            <button
+              onClick={() => onMove(1)}
+              disabled={!canMoveDown}
+              aria-label={`Descendre ${g.name}`}
+              className="flex h-tap w-7 items-center justify-center rounded-lg text-slate-400 transition hover:text-brand-600 disabled:opacity-25"
+            >
+              ↓
+            </button>
+          </div>
+        ) : (
+          <div className="flex justify-end">
+            <OverflowMenu vertical label={`Actions sur ${g.name}`} items={actions} />
+          </div>
         )}
       </td>
     </tr>
@@ -4685,11 +5826,14 @@ function FamilyRow({
 function GuestModal({
   item,
   defaultGroup,
+  parentId,
   onClose,
   onSaved,
 }: {
   item: WeddingGuest | null;
   defaultGroup: GuestGroup;
+  /** Création depuis la fiche d'un foyer : la personne y est rattachée d'emblée. */
+  parentId?: string;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -4700,12 +5844,13 @@ function GuestModal({
     ageGroup: (item?.ageGroup ?? "adult") as GuestAge,
     invitationStatus: (item?.invitationStatus ?? "to_send") as InvitationStatus,
     guestGroup: (item?.guestGroup ?? defaultGroup) as GuestGroup,
-    vendredi: item?.vendredi ?? true,
-    samedi: item?.samedi ?? true,
-    dimanche: item?.dimanche ?? true,
+    vendredi: item?.vendredi ?? false,
+    samedi: item?.samedi ?? false,
+    dimanche: item?.dimanche ?? false,
     address: item?.address ?? "",
     postalCode: item?.postalCode ?? "",
     city: item?.city ?? "",
+    housed: item?.housed ?? false,
     archived: item?.archived ?? false,
   });
 
@@ -4723,7 +5868,9 @@ function GuestModal({
         address: form.address || null,
         postalCode: form.postalCode || null,
         city: form.city || null,
+        housed: form.housed,
         archived: form.archived,
+        ...(parentId && !isEdit ? { parentId } : {}),
       };
       return isEdit
         ? api.patch(`/api/wedding/guests/${item!.id}`, payload)
@@ -4830,6 +5977,9 @@ function GuestModal({
           </div>
           <div className="text-xs text-slate-400">
             Présence
+            <span className="ml-1 text-slate-400">
+              — le foyer la corrigera lui-même depuis son faire-part.
+            </span>
             <div className="mt-1 flex gap-4">
               {days.map((d) => (
                 <Checkbox
@@ -4841,18 +5991,49 @@ function GuestModal({
               ))}
             </div>
           </div>
-          {!item?.parentId && (
-            <div className="text-xs text-slate-400">
-              Faire-part
-              <Select
-                value={form.invitationStatus}
-                onChange={(v) => setForm({ ...form, invitationStatus: v as InvitationStatus })}
-                options={INVITATION_STATUS.map((s) => ({
-                  value: s,
-                  label: INVITATION_STATUS_META[s].label,
-                }))}
-              />
-            </div>
+          {/* Réglages du **foyer** : ils vivent sur le chef de famille, pas sur
+              chacun de ses membres. */}
+          {!item?.parentId && !parentId && (
+            <>
+              <div className="text-xs text-slate-400">
+                Faire-part
+                <Select
+                  value={form.invitationStatus}
+                  onChange={(v) => setForm({ ...form, invitationStatus: v as InvitationStatus })}
+                  options={INVITATION_STATUS.map((s) => ({
+                    value: s,
+                    label: INVITATION_STATUS_META[s].label,
+                  }))}
+                />
+              </div>
+              <div className="rounded-xl border border-slate-200 p-2.5 dark:border-slate-700">
+                <Checkbox
+                  checked={form.housed}
+                  onChange={() => setForm({ ...form, housed: !form.housed })}
+                  label={
+                    <>
+                      Logé sur place
+                      <span className="mt-0.5 block text-xs text-slate-400">
+                        Décoché : leur faire-part propose des pistes de logement.
+                      </span>
+                    </>
+                  }
+                />
+              </div>
+              {item?.inviteCode && (
+                <div className="flex items-center gap-3 rounded-xl border border-line px-3 py-2">
+                  <span className="min-w-0 flex-1 text-xs text-slate-400">
+                    Code du faire-part
+                    <span className="mt-0.5 block">
+                      Il ouvre {inviteUrl(window.location.origin, item.inviteCode)}
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-mono text-base font-bold tracking-widest">
+                    {item.inviteCode}
+                  </span>
+                </div>
+              )}
+            </>
           )}
           <div className="rounded-xl border border-slate-200 p-2.5 dark:border-slate-700">
             <Checkbox

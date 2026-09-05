@@ -15,6 +15,7 @@ export const household = sqliteTable("household", {
   weddingTargetAmount: integer("wedding_target_amount").notNull().default(0),
   weddingTargetDate: text("wedding_target_date").notNull().default("2030-01-01"),
   weddingDays: text("wedding_days"), // JSON [{ key, label }] — jours retenus (null = les 3 par défaut)
+  weddingInviteConfig: text("wedding_invite_config"), // JSON — faire-part (menus, déroulé, lieux, FAQ)
   kidsMaxCert: text("kids_max_cert").notNull().default("U"), // certification FR max pour les enfants
   filmConfig: text("film_config"), // JSON { mediaTypes, audiences, genres } — null = défauts
   anthropicApiKey: text("anthropic_api_key"), // clé API Claude chiffrée (AES-GCM, cf. lib/crypto)
@@ -26,6 +27,8 @@ export const household = sqliteTable("household", {
   defaultPacking: text("default_packing"), // JSON ["Passeport", …] injecté à la création d'un voyage
   excludedIngredients: text("excluded_ingredients"), // JSON string[] — jamais dans les idées repas
   defaultAccountId: text("default_account_id"), // compte proposé par défaut (transactions)
+  /** JSON [{id,name}] — catégories du mariage, partagées foyers/personnes. */
+  weddingCategories: text("wedding_categories"),
   shoppingCategories: text("shopping_categories"), // JSON [{ key, name }] (null = défauts)
   defaultMenuOrder: text("default_menu_order"), // JSON string[] — ordre des menus par défaut (wizard)
   defaultMenuHidden: text("default_menu_hidden"), // JSON string[] — menus masqués par défaut (wizard)
@@ -97,6 +100,7 @@ export const account = sqliteTable("account", {
   type: text("type").notNull().default("checking"),
   isPrimary: integer("is_primary").notNull().default(0), // compte principal de dépenses du propriétaire
   forecast: integer("forecast").notNull().default(1), // affiché dans les prévisions de trésorerie
+  weddingSavings: integer("wedding_savings").notNull().default(0), // solde compté comme épargne mariage
   currentBalance: integer("current_balance").notNull().default(0),
   balanceUpdatedAt: text("balance_updated_at"),
   lunchflowAccountId: text("lunchflow_account_id"), // id externe LunchFlow associé (null = non connecté)
@@ -269,6 +273,26 @@ export const weddingGuest = sqliteTable("wedding_guest", {
   city: text("city"),
   position: real("position").notNull().default(0),
   createdAt: text("created_at").notNull(),
+  // ---- Faire-part (sur le chef de famille) ----
+  inviteCode: text("invite_code"), // 4 caractères, unique — ouvre /i/<code>
+  housed: integer("housed").notNull().default(0), // logé sur place, ou par ses propres moyens
+  // ---- Réponse au faire-part (par personne) ----
+  // La présence vit dans les colonnes de jours ci-dessus : un seul champ, que
+  // les mariés pré-remplissent et que le foyer corrige depuis `/i/<code>`.
+  /**
+   * Choix de repas, en JSON : `{ "<id de repas>": { starterId, mainId, dessertId } }`.
+   *
+   * Les colonnes `rsvp_starter` / `rsvp_main` / `rsvp_dessert` existent encore
+   * en base (migration 0089) mais ne sont plus lues : elles ne portaient qu'un
+   * seul repas.
+   */
+  rsvpMeals: text("rsvp_meals"),
+  /** JSON [id] — les catégories de la personne. */
+  categories: text("categories"),
+  /** JSON [id] — les tags du foyer ; seul son chef de famille les porte. */
+  familyCategories: text("family_categories"),
+  rsvpDiet: text("rsvp_diet"),
+  rsvpAt: text("rsvp_at"), // horodatage de la dernière réponse (sur le chef de famille)
 });
 
 export const utilityReading = sqliteTable(
@@ -667,11 +691,26 @@ export const wish = sqliteTable("wish", {
 });
 
 /** Listes libres du menu « Listes » : partagées au foyer ou personnelles. */
+// Dossier de listes. Même portée et même propriétaire que les listes qu'il
+// range : un dossier perso n'est visible que de son créateur. Un seul niveau,
+// pas de dossier dans un dossier.
+export const listFolder = sqliteTable("list_folder", {
+  id: text("id").primaryKey(),
+  householdId: text("household_id").notNull(),
+  scope: text("scope").notNull(), // shared | personal
+  ownerId: text("owner_id"), // user.id quand scope = personal, null si partagé
+  name: text("name").notNull(),
+  emoji: text("emoji"),
+  position: integer("position").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+});
+
 export const customList = sqliteTable("custom_list", {
   id: text("id").primaryKey(),
   householdId: text("household_id").notNull(),
   scope: text("scope").notNull(), // shared | personal
   ownerId: text("owner_id"), // user.id quand scope = personal, null si partagée
+  folderId: text("folder_id"), // list_folder.id, null = à la racine de l'onglet
   name: text("name").notNull(),
   emoji: text("emoji"), // emoji de contenu affiché en tête de liste
   position: integer("position").notNull().default(0),

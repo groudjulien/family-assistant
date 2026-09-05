@@ -74,6 +74,14 @@ const money = new Hono<AppContext>();
 
 /* ---------------- Accounts ---------------- */
 
+// Les drapeaux sont stockés en 0/1 : le front les attend en booléens.
+const serializeAccount = (r: typeof account.$inferSelect) => ({
+  ...r,
+  isPrimary: Boolean(r.isPrimary),
+  forecast: Boolean(r.forecast),
+  weddingSavings: Boolean(r.weddingSavings),
+});
+
 money.get("/accounts", async (c) => {
   const db = c.get("db");
   // Le front a besoin du solde ici : on synchronise depuis LunchFlow les comptes
@@ -93,7 +101,7 @@ money.get("/accounts", async (c) => {
     .from(account)
     .where(eq(account.householdId, c.get("household").id))
     .orderBy(asc(account.name));
-  return c.json(rows.map((r) => ({ ...r, isPrimary: Boolean(r.isPrimary), forecast: Boolean(r.forecast) })));
+  return c.json(rows.map(serializeAccount));
 });
 
 // Un seul compte principal par propriétaire : poser le flag le retire des autres.
@@ -120,7 +128,10 @@ money.post("/accounts", async (c) => {
     currentBalance: 0,
     balanceUpdatedAt: nowIso(),
   });
-  return c.json((await db.select().from(account).where(eq(account.id, id)).limit(1))[0], 201);
+  return c.json(
+    serializeAccount((await db.select().from(account).where(eq(account.id, id)).limit(1))[0]),
+    201,
+  );
 });
 
 // Supprime un compte et toutes ses données rattachées (transactions bancaires,
@@ -172,13 +183,14 @@ money.patch("/accounts/:id", async (c) => {
       ...(body.type !== undefined && { type: body.type }),
       ...(body.isPrimary !== undefined && { isPrimary: body.isPrimary ? 1 : 0 }),
       ...(body.forecast !== undefined && { forecast: body.forecast ? 1 : 0 }),
+      ...(body.weddingSavings !== undefined && { weddingSavings: body.weddingSavings ? 1 : 0 }),
       ...(body.currentBalance !== undefined && { currentBalance: body.currentBalance }),
       ...((body.currentBalance !== undefined || body.balanceUpdatedAt !== undefined) && {
         balanceUpdatedAt: body.balanceUpdatedAt ?? nowIso(),
       }),
     })
     .where(eq(account.id, id));
-  return c.json((await db.select().from(account).where(eq(account.id, id)).limit(1))[0]);
+  return c.json(serializeAccount((await db.select().from(account).where(eq(account.id, id)).limit(1))[0]));
 });
 
 /* ---------------- Categories ---------------- */

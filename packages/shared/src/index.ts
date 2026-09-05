@@ -988,6 +988,7 @@ export const accountSchema = z.object({
   type: z.enum(ACCOUNT_TYPE),
   isPrimary: z.boolean(), // compte principal de dépenses de son propriétaire
   forecast: z.boolean(), // affiché dans les prévisions de trésorerie
+  weddingSavings: z.boolean(), // son solde compte comme épargne mariage
   currentBalance: z.number().int(),
   balanceUpdatedAt: z.string().nullable(),
   lunchflowAccountId: z.string().nullable(), // id externe LunchFlow associé (null = non connecté)
@@ -1001,6 +1002,7 @@ export const updateAccountSchema = z.object({
   type: z.enum(ACCOUNT_TYPE).optional(),
   isPrimary: z.boolean().optional(),
   forecast: z.boolean().optional(),
+  weddingSavings: z.boolean().optional(),
   currentBalance: z.number().int().optional(),
   balanceUpdatedAt: z.string().optional(),
 });
@@ -1310,6 +1312,30 @@ export const INVITATION_STATUS_META: Record<InvitationStatus, { label: string }>
   filled: { label: "Répondu" },
 };
 
+/** Ce qu'une personne a choisi pour **un** repas. */
+export const rsvpChoiceSchema = z.object({
+  starterId: z.string().max(64).nullable().catch(null).default(null),
+  mainId: z.string().max(64).nullable().catch(null).default(null),
+  dessertId: z.string().max(64).nullable().catch(null).default(null),
+});
+export type RsvpChoice = z.infer<typeof rsvpChoiceSchema>;
+
+/** Tous ses choix, par identifiant de repas. */
+export const rsvpMealsSchema = z.record(z.string(), rsvpChoiceSchema).default({});
+export type RsvpMeals = z.infer<typeof rsvpMealsSchema>;
+
+export const RSVP_CHOICE_EMPTY: RsvpChoice = { starterId: null, mainId: null, dessertId: null };
+
+/** Lecture défensive de la colonne JSON `wedding_guest.rsvp_meals`. */
+export function parseRsvpMeals(raw: unknown): RsvpMeals {
+  const parsed = rsvpMealsSchema.safeParse(raw);
+  return parsed.success ? parsed.data : {};
+}
+
+/** Les choix d'une personne pour un repas donné — jamais `undefined`. */
+export const choiceFor = (meals: RsvpMeals, mealId: string): RsvpChoice =>
+  meals[mealId] ?? RSVP_CHOICE_EMPTY;
+
 export const weddingGuestSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -1326,6 +1352,30 @@ export const weddingGuestSchema = z.object({
   postalCode: z.string().nullable(),
   city: z.string().nullable(),
   position: z.number(),
+  /** Faire-part — chef de famille : code de la page publique `/i/<code>`. */
+  inviteCode: z.string().nullable(),
+  /** Faire-part — chef de famille : le foyer est logé sur place. */
+  housed: z.boolean(),
+  /**
+   * Horodatage de la dernière réponse au faire-part ; `null` = pas encore
+   * répondu. La **présence** n'est pas ici : ce sont les colonnes de jours
+   * ci-dessus, que le foyer met à jour lui-même depuis `/i/<code>`.
+   */
+  rsvpAt: z.string().nullable(),
+  /**
+   * Ce que la personne mange, **repas par repas** : `{ "<id de repas>": { … } }`.
+   * Un repas absent de l'objet est un repas où rien n'a encore été choisi.
+   */
+  rsvpMeals: rsvpMealsSchema,
+  rsvpDiet: z.string().nullable(),
+  /** Ses catégories à elle. */
+  categories: z.array(z.string()).default([]),
+  /**
+   * Les catégories du **foyer**, portées par son chef de famille comme
+   * l'adresse et le logement. Sur une personne rattachée, la liste est vide :
+   * c'est celle de son chef qui vaut pour elle.
+   */
+  familyCategories: z.array(z.string()).default([]),
 });
 export type WeddingGuest = z.infer<typeof weddingGuestSchema>;
 
@@ -1335,15 +1385,28 @@ export const createWeddingGuestSchema = z.object({
   ageGroup: z.enum(GUEST_AGE).default("adult"),
   invitationStatus: z.enum(INVITATION_STATUS).default("to_send"),
   guestGroup: z.enum(GUEST_GROUP).default("vendredi"),
-  vendredi: z.boolean().default(true),
-  samedi: z.boolean().default(true),
-  dimanche: z.boolean().default(true),
+  // Absent par défaut : ces colonnes portent la **présence**, pas l'invitation.
+  // Un invité qu'on vient d'ajouter n'a rien confirmé — c'est au foyer de le
+  // dire depuis son faire-part, ou aux mariés de le cocher.
+  vendredi: z.boolean().default(false),
+  samedi: z.boolean().default(false),
+  dimanche: z.boolean().default(false),
   archived: z.boolean().default(false),
   parentId: z.string().nullish(),
   address: z.string().nullish(),
   postalCode: z.string().nullish(),
   city: z.string().nullish(),
   position: z.number().optional(),
+  /** Logé sur place — se saisit sur le chef de famille (page Faire-part). */
+  housed: z.boolean().default(false),
+  /**
+   * Allergies ou régime. Le foyer le saisit depuis son faire-part, mais les
+   * mariés doivent pouvoir le relire et le corriger : c'est ce qui part chez le
+   * traiteur, et un invité annonce parfois son régime de vive voix.
+   */
+  rsvpDiet: z.string().trim().max(200).nullish(),
+  categories: z.array(z.string()).max(60).optional(),
+  familyCategories: z.array(z.string()).max(60).optional(),
 });
 
 export const reorderGuestsSchema = z.object({
@@ -1351,6 +1414,30 @@ export const reorderGuestsSchema = z.object({
 });
 
 export const updateWeddingGuestSchema = createWeddingGuestSchema.partial();
+
+/**
+ * Même modification appliquée à plusieurs invités (actions rapides du tableau).
+ * En un appel : cocher « samedi » sur cinquante personnes ne doit pas coûter
+ * cinquante allers-retours.
+ */
+/**
+ * Pose ou retire des catégories sur plusieurs lignes d'un coup.
+ *
+ * `add` / `remove` plutôt qu'une liste à écraser : depuis une sélection de
+ * cinquante personnes, remplacer effacerait ce que chacune porte déjà.
+ */
+export const bulkCategoriesSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(500),
+  /** `person` = la personne · `family` = son foyer (le tag va sur le chef). */
+  scope: z.enum(["person", "family"]),
+  add: z.array(z.string()).max(60).default([]),
+  remove: z.array(z.string()).max(60).default([]),
+});
+
+export const bulkUpdateGuestsSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(500),
+  patch: updateWeddingGuestSchema,
+});
 
 export const weddingSummarySchema = z.object({
   targetAmount: z.number().int(),
@@ -1363,8 +1450,519 @@ export const weddingSummarySchema = z.object({
   percentFunded: z.number(),
   totalDue: z.number().int(),
   totalPaid: z.number().int(),
+  weddingAccounts: z.number().int(), // nb de comptes marqués « épargne mariage »
 });
 export type WeddingSummary = z.infer<typeof weddingSummarySchema>;
+
+/* ------------------------------------------------------------------ */
+/* Faire-part : configuration du foyer + page publique /i/<code>       */
+/* ------------------------------------------------------------------ */
+
+/** Longueur du code famille imprimé dans l'URL (`/i/AB12`). */
+export const INVITE_CODE_LENGTH = 4;
+
+/**
+ * Alphabet du code : ni `0`/`O`, ni `1`/`I`/`L`. Le code se dicte au téléphone
+ * et se recopie à la main depuis un carton — les caractères confondables
+ * fabriquent des « le lien ne marche pas ».
+ */
+export const INVITE_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+/** `ab-12`, `AB12`, ` ab 12 ` désignent le même foyer : la casse ne compte pas. */
+export function normalizeInviteCode(raw: string): string {
+  return raw
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, INVITE_CODE_LENGTH);
+}
+
+/** URL publique du faire-part d'un foyer, à partir de l'origine de l'app. */
+export function inviteUrl(appUrl: string, code: string): string {
+  return `${appUrl.replace(/\/+$/, "")}/i/${code}`;
+}
+
+/**
+ * Un texte libre du faire-part.
+ *
+ * Il **tronque** au lieu de refuser, et accepte le vide. La raison n'est pas la
+ * permissivité : le faire-part est enregistré **d'un seul bloc**, à chaque
+ * modification. Un seul champ qui rejette, et c'est le document entier qui
+ * cesse d'être enregistrable — on continue à saisir, plus rien ne part, et tout
+ * ce qu'on a tapé disparaît au rechargement. Aucun mot de trop, aucun libellé
+ * laissé vide ne doit pouvoir coûter ça.
+ *
+ * Les limites restent tenues à la saisie, côté éditeur (`maxLength`).
+ */
+const inviteText = (max: number) =>
+  z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().slice(0, max) : v),
+    z.string().max(max),
+  ).default("");
+
+/**
+ * L'adresse d'une piste de logement : jamais rejetée non plus.
+ *
+ * Un lien saisi sans protocole (« airbnb.fr/… ») est complété plutôt que
+ * refusé ; ce qui n'a aucune chance d'être une adresse est vidé, et l'éditeur
+ * le montre vide. Un lien mort sur le faire-part se corrige ; une soirée de
+ * saisie perdue, non.
+ */
+const inviteUrlText = z.preprocess((v) => {
+  if (typeof v !== "string") return "";
+  const raw = v.trim();
+  if (!raw) return "";
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  // Un hôte plausible : un point, et pas d'espace. Le reste est vidé plutôt
+  // que refusé — c'est le champ qui reste vide, pas la journée qui est perdue.
+  const ok = /^https?:\/\/[^\s/]+\.[^\s/]+/i.test(withScheme);
+  return ok ? withScheme.slice(0, 400) : "";
+}, z.string().max(400)).default("");
+
+/* ------------------------------------------------------------------ */
+/* Catégories — la même liste pour les foyers et pour les personnes     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Une catégorie. **Une seule liste** : ce qu'on pose sur un foyer (« a dormi
+ * sur place ») et ce qu'on pose sur une personne (« végétarien ») se choisit
+ * au même endroit — sans quoi il faudrait deviner, à chaque condition, de
+ * laquelle des deux listes elle relève.
+ *
+ * La liste part **vide** : elle se remplit à l'usage, depuis n'importe quel
+ * sélecteur, au moment où le besoin se présente.
+ */
+export const weddingCategorySchema = z.object({
+  id: z.string().min(1),
+  name: inviteText(40),
+});
+export type WeddingCategory = z.infer<typeof weddingCategorySchema>;
+
+export const weddingCategoriesSchema = z.array(weddingCategorySchema).max(60).default([]);
+
+/** Lecture défensive de la colonne JSON `household.wedding_categories`. */
+export function parseWeddingCategories(raw: unknown): WeddingCategory[] {
+  const parsed = weddingCategoriesSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  return Array.isArray(raw)
+    ? raw.map((v) => weddingCategorySchema.safeParse(v)).flatMap((r) => (r.success ? [r.data] : []))
+    : [];
+}
+
+export const putWeddingCategoriesSchema = z.object({ categories: weddingCategoriesSchema });
+
+/**
+ * Condition d'affichage d'un bloc du faire-part.
+ *
+ * Vide = visible par tout le monde, ce qui reste le cas normal. Sinon, le bloc
+ * n'est montré qu'à qui porte **au moins une** des catégories citées : c'est ce
+ * qui permet de servir deux plannings du samedi, l'un à ceux qui ont dormi sur
+ * place, l'autre à ceux qui arrivent à 15 h.
+ */
+export const visibleForSchema = z.array(z.string()).max(60).default([]);
+
+/** Le bloc est-il montré à cette audience ? */
+export const visibleTo = (visibleFor: string[], audience: string[]) =>
+  visibleFor.length === 0 || visibleFor.some((c) => audience.includes(c));
+
+/** Une entrée ou un plat du repas. `kids` = proposé (et mis en avant) aux enfants. */
+export const inviteDishSchema = z.object({
+  id: z.string().min(1),
+  name: inviteText(80),
+  detail: inviteText(160),
+  kids: z.boolean().default(false),
+  /** Vide = proposé à tous ; sinon, réservé aux personnes de ces catégories. */
+  visibleFor: visibleForSchema,
+});
+export type InviteDish = z.infer<typeof inviteDishSchema>;
+
+/** Une ligne du déroulé : « 15h10 — Cérémonie civile — Mairie de Franconville ». */
+export const inviteScheduleItemSchema = z.object({
+  id: z.string().min(1),
+  /** Libre, pas une heure ISO : « 15h10 », « Midi », « En fin d'après-midi ». */
+  time: inviteText(20),
+  title: inviteText(120),
+  detail: inviteText(400),
+  /** Vide = montrée à tous ; sinon, seulement aux foyers de ces catégories. */
+  visibleFor: visibleForSchema,
+});
+export type InviteScheduleItem = z.infer<typeof inviteScheduleItemSchema>;
+
+/** Le déroulé d'un des jours du mariage. Une personne non invitée ne le voit pas. */
+export const inviteScheduleDaySchema = z.object({
+  key: z.enum(WEDDING_DAY_KEYS),
+  /** Date réelle du jour : sert la pastille « 4 JUIN » sous chaque bouton. */
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().default(null),
+  /** Accroche à droite du titre du jour : « Mairie & dîner », « Le grand jour ». */
+  tagline: inviteText(40),
+  items: z.array(inviteScheduleItemSchema).max(24).default([]),
+});
+export type InviteScheduleDay = z.infer<typeof inviteScheduleDaySchema>;
+
+/**
+ * Un lieu et son itinéraire. `dayKey` conditionne l'affichage : l'adresse de la
+ * mairie n'a rien à faire sur le faire-part d'un foyer qui n'est pas invité le
+ * vendredi. `null` = visible par tous.
+ */
+export const inviteVenueSchema = z.object({
+  id: z.string().min(1),
+  name: inviteText(80),
+  /** Adresse postale : elle alimente le lien Google Maps. */
+  address: inviteText(200),
+  /** Où se garer, quand ce n'est pas sur place : un second itinéraire. */
+  parkingAddress: inviteText(200),
+  detail: inviteText(400),
+  /** Quand on y va : « Vendredi 15h10 ». */
+  when: inviteText(40),
+  dayKey: z.enum(WEDDING_DAY_KEYS).nullable().default(null),
+  /** Vide = montré à tous ; sinon, seulement aux foyers de ces catégories. */
+  visibleFor: visibleForSchema,
+});
+export type InviteVenue = z.infer<typeof inviteVenueSchema>;
+
+export const inviteFaqSchema = z.object({
+  id: z.string().min(1),
+  question: inviteText(160),
+  answer: inviteText(1200),
+  /** Vide = montrée à tous ; sinon, seulement aux foyers de ces catégories. */
+  visibleFor: visibleForSchema,
+});
+export type InviteFaq = z.infer<typeof inviteFaqSchema>;
+
+/** Piste de logement pour les foyers qui doivent se loger eux-mêmes. */
+export const inviteLinkSchema = z.object({
+  id: z.string().min(1),
+  label: inviteText(80),
+  url: inviteUrlText,
+});
+export type InviteLink = z.infer<typeof inviteLinkSchema>;
+
+/**
+ * Papeterie du faire-part. Le contenu ne change pas d'un thème à l'autre —
+ * seuls la mise en page, les polices et les couleurs changent, ainsi que le
+ * vocabulaire des titres de section (un journal titre « Coupon réponse » là où
+ * une carte titre « Votre réponse »).
+ */
+export const INVITE_THEMES = ["epure", "journal"] as const;
+export type InviteTheme = (typeof INVITE_THEMES)[number];
+
+export const INVITE_THEME_META: Record<InviteTheme, { label: string; hint: string }> = {
+  epure: { label: "Épuré", hint: "Carte crème, filets fins, vert sauge. Le thème d'origine." },
+  journal: { label: "Journal", hint: "Une de gazette : bandeau, encadrés, orange — et les polices du faire-part imprimé." },
+};
+
+/**
+ * Un **repas à la carte**, rattaché à un jour du mariage.
+ *
+ * C'est une entité et non un réglage global : un même jour peut porter deux
+ * services (le buffet du midi et la réception du soir), et chacun a sa carte,
+ * sa note enfant et sa règle. Une personne choisit pour **chaque** repas des
+ * jours où elle est présente.
+ *
+ * `id` est la clé sous laquelle chaque convive range ses choix : il ne change
+ * jamais, sinon les réponses déjà données perdraient leur repas.
+ */
+export const inviteMealSchema = z.object({
+  id: z.string().min(1),
+  dayKey: z.enum(WEDDING_DAY_KEYS),
+  title: inviteText(60).default("Le repas"),
+  /** Phrase d'explication du menu enfant (vide = rien de particulier à dire). */
+  kidsNote: inviteText(400),
+  /**
+   * Menu enfant **exclusif** : un enfant ne voit alors que les plats marqués
+   * « menu enfant », au lieu de voir toute la carte avec les siens en tête.
+   * Sans plat enfant pour un service donné, il retombe sur la carte des adultes
+   * — sinon il n'aurait rien à choisir.
+   */
+  kidsOnly: z.boolean().default(false),
+  /** Vide = proposé à tous ; sinon, réservé aux personnes de ces catégories. */
+  visibleFor: visibleForSchema,
+  starters: z.array(inviteDishSchema).max(12).default([]),
+  mains: z.array(inviteDishSchema).max(12).default([]),
+  desserts: z.array(inviteDishSchema).max(12).default([]),
+});
+export type InviteMeal = z.infer<typeof inviteMealSchema>;
+
+/** Au-delà, ce n'est plus un mariage, c'est une pension complète. */
+export const INVITE_MEALS_MAX = 6;
+
+/**
+ * Les repas dans l'ordre du week-end.
+ *
+ * L'ordre des jours est celui des emplacements (`WEDDING_DAY_KEYS`) : il ne se
+ * configure pas, c'est le calendrier. Un repas du vendredi ne peut donc pas
+ * s'afficher après celui du samedi, quel que soit l'ordre de saisie. Le tri est
+ * stable : deux services d'un même jour gardent l'ordre qu'on leur a donné.
+ */
+export function mealsInDayOrder<T extends { dayKey: WeddingDayKey }>(meals: T[]): T[] {
+  return [...meals].sort(
+    (a, b) => WEDDING_DAY_KEYS.indexOf(a.dayKey) - WEDDING_DAY_KEYS.indexOf(b.dayKey),
+  );
+}
+
+/**
+ * Les cinq sections du faire-part, dans l'ordre où la page les présente. Chacune
+ * porte une étiquette et un titre, tous deux surchargeables.
+ */
+export const INVITE_SECTIONS = ["rsvp", "schedule", "housing", "venues", "faq"] as const;
+export type InviteSection = (typeof INVITE_SECTIONS)[number];
+
+/**
+ * Les titres de section, quand on ne veut pas de ceux du thème.
+ *
+ * Chaque papeterie a son vocabulaire (le Journal titre « Coupon réponse » là où
+ * la carte titre « Votre réponse ») : c'est le **repli**. Un champ rempli ici
+ * passe devant, sur les deux thèmes — un mariage a le droit de nommer ses
+ * rubriques comme il l'entend.
+ */
+export const inviteSectionWordsSchema = z
+  .object({
+    rsvpTag: inviteText(40),
+    rsvpTitle: inviteText(60),
+    scheduleTag: inviteText(40),
+    scheduleTitle: inviteText(60),
+    housingTag: inviteText(40),
+    housingTitle: inviteText(60),
+    venuesTag: inviteText(40),
+    venuesTitle: inviteText(60),
+    faqTag: inviteText(40),
+    faqTitle: inviteText(60),
+  })
+  .default({});
+export type InviteSectionWords = z.infer<typeof inviteSectionWordsSchema>;
+
+/**
+ * Les textes de la page « Retrouver mon invitation » (`/i`).
+ *
+ * Chaque champ vide retombe sur `INVITE_LOOKUP_TEXT_DEFAULT` : la page se tient
+ * déjà sans qu'on ait rien à écrire, et on ne la vide jamais par accident.
+ */
+export const inviteLookupTextsSchema = z
+  .object({
+    /** Sur-titre au-dessus des prénoms (thème Journal). */
+    eyebrow: inviteText(60),
+    /** L'accroche : ce que l'invité lit avant de chercher. */
+    lead: inviteText(400),
+    /** L'étiquette de la carte : « Étape 1 ». */
+    tag: inviteText(40),
+    /** Le titre de la carte : « Votre adresse ». */
+    title: inviteText(80),
+    /** La phrase sous le titre, qui dit quoi taper. */
+    hint: inviteText(400),
+    /** Le libellé du bouton de recherche. */
+    button: inviteText(40),
+  })
+  .default({});
+export type InviteLookupTexts = z.infer<typeof inviteLookupTextsSchema>;
+
+/** La formulation standard, celle qu'un champ vide rétablit. */
+export const INVITE_LOOKUP_TEXT_DEFAULT: InviteLookupTexts = {
+  eyebrow: "Votre invitation vous attend",
+  lead: "Vous avez perdu le lien de votre faire-part ? Indiquez votre adresse postale, on retrouve votre invitation.",
+  tag: "Étape 1",
+  title: "Votre adresse",
+  hint: "Celle qui figure au dos de l'enveloppe. Le numéro et le nom de la rue suffisent, ou juste le code postal si vous hésitez.",
+  button: "Rechercher",
+};
+
+export const weddingInviteConfigSchema = z.object({
+  /** Le thème choisi dans l'onglet Faire-part. */
+  theme: z.enum(INVITE_THEMES).default("epure"),
+  /** Sur-titre du faire-part : « Vendredi 4 — Dimanche 6 juin 2027 ». */
+  dateLabel: inviteText(80),
+  /** Lieu principal, cité dans l'accroche. */
+  venueName: inviteText(80),
+  /** Accroche sous les prénoms. `{famille}` y est remplacé par le nom du foyer. */
+  intro: inviteText(600),
+  /** Dernier jour pour répondre ; le pied de page et la FAQ le reprennent. */
+  rsvpDeadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().catch(null).default(null),
+  contactEmail: inviteText(120),
+  contactPhone: inviteText(30),
+  /**
+   * Les repas à la carte, dans l'ordre où le faire-part les présente. Un jour
+   * peut en porter plusieurs, ou aucun.
+   */
+  meals: z.array(inviteMealSchema).max(INVITE_MEALS_MAX).default([]),
+  schedule: z.array(inviteScheduleDaySchema).max(WEDDING_DAY_KEYS.length).default([]),
+  venues: z.array(inviteVenueSchema).max(12).default([]),
+  faq: z.array(inviteFaqSchema).max(24).default([]),
+  /** Titre montré aux foyers logés sur place, au-dessus du détail. */
+  housedTitle: inviteText(120),
+  /** Détail montré aux foyers logés sur place. */
+  housedText: inviteText(800),
+  /** Texte montré aux foyers qui doivent trouver un logement. */
+  notHousedText: inviteText(800),
+  housingLinks: z.array(inviteLinkSchema).max(12).default([]),
+  /** Les textes de la page publique de recherche (`/i`). */
+  lookup: inviteLookupTextsSchema,
+  /** Étiquettes et titres des sections ; vide = le vocabulaire du thème. */
+  words: inviteSectionWordsSchema,
+});
+export type WeddingInviteConfig = z.infer<typeof weddingInviteConfigSchema>;
+
+/** Config vierge : ce que renvoie l'API tant que rien n'a été saisi. */
+export const WEDDING_INVITE_CONFIG_DEFAULT: WeddingInviteConfig =
+  weddingInviteConfigSchema.parse({});
+
+/**
+ * Lecture défensive de la colonne JSON `household.wedding_invite_config`.
+ *
+ * Si l'ensemble ne passe pas, on ne renvoie **surtout pas** la config vide : le
+ * front la reprendrait comme brouillon et le premier enregistrement rendrait
+ * l'effacement définitif. On récupère alors champ par champ ce qui est
+ * récupérable, et on ne perd que ce qui est réellement illisible.
+ */
+/**
+ * Remonte une config d'avant les repas multiples.
+ *
+ * Le repas unique (`mealDayKey` + les trois listes) devient **un** repas de la
+ * liste, et il prend pour `id` la clé de son jour : c'est ce qui permet à la
+ * migration SQL de ranger les réponses déjà données sous la bonne clé sans
+ * connaître d'identifiant généré.
+ *
+ * Un menu désactivé (`mealDayKey: null`) dont les plats étaient restés en base
+ * reparaît sur le samedi plutôt que d'être jeté en silence : il se supprime
+ * d'un clic, une carte perdue ne se retrouve pas.
+ */
+function upgradeLegacyMeal(raw: Record<string, unknown>): Record<string, unknown> {
+  if (Array.isArray(raw.meals)) return raw;
+  const lists = (["starters", "mains", "desserts"] as const).map((k) =>
+    Array.isArray(raw[k]) ? (raw[k] as unknown[]) : [],
+  );
+  if (lists.every((l) => l.length === 0)) return { ...raw, meals: [] };
+  const dayKey =
+    typeof raw.mealDayKey === "string" && (WEDDING_DAY_KEYS as readonly string[]).includes(raw.mealDayKey)
+      ? raw.mealDayKey
+      : "samedi";
+  return {
+    ...raw,
+    meals: [
+      {
+        id: dayKey,
+        dayKey,
+        title: raw.mealTitle,
+        kidsNote: raw.kidsNote,
+        kidsOnly: raw.kidsOnly,
+        starters: lists[0],
+        mains: lists[1],
+        desserts: lists[2],
+      },
+    ],
+  };
+}
+
+export function parseWeddingInviteConfig(input: unknown): WeddingInviteConfig {
+  const raw = input && typeof input === "object" ? upgradeLegacyMeal(input as Record<string, unknown>) : input;
+  const parsed = weddingInviteConfigSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  if (!raw || typeof raw !== "object") return WEDDING_INVITE_CONFIG_DEFAULT;
+
+  const source = raw as Record<string, unknown>;
+  const salvaged: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(weddingInviteConfigSchema.shape)) {
+    if (!(key in source)) continue;
+    const one = (field as z.ZodTypeAny).safeParse(source[key]);
+    if (one.success) {
+      salvaged[key] = one.data;
+      continue;
+    }
+    // Une liste dont un élément est illisible garde tous les autres.
+    const value = source[key];
+    if (Array.isArray(value)) {
+      const inner = (field as unknown as { _def?: { innerType?: z.ZodTypeAny } })._def?.innerType;
+      const item = (inner as unknown as { element?: z.ZodTypeAny })?.element;
+      if (item) {
+        salvaged[key] = value
+          .map((v) => item.safeParse(v))
+          .filter((r) => r.success)
+          .map((r) => (r as { data: unknown }).data);
+      }
+    }
+  }
+  const rescued = weddingInviteConfigSchema.safeParse(salvaged);
+  return rescued.success ? rescued.data : WEDDING_INVITE_CONFIG_DEFAULT;
+}
+
+/* ---- Page publique ---- */
+
+/** Un jour du mariage, avec sa date réelle quand elle est renseignée. */
+export const invitationDaySchema = weddingDaySchema.extend({
+  date: z.string().nullable(),
+});
+export type InvitationDay = z.infer<typeof invitationDaySchema>;
+
+export const invitationPersonSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  child: z.boolean(),
+  /**
+   * Les seuls jours que la personne peut cocher : ceux ouverts à son foyer
+   * (`guestGroup`). C'est la portée de l'invitation — un foyer convié « à
+   * partir du samedi » ne se verra jamais proposer le vendredi.
+   */
+  openDays: z.array(z.enum(WEDDING_DAY_KEYS)),
+  /**
+   * Sa présence, telle qu'elle est en base — **le même champ** que les colonnes
+   * de jours de la page Invités. Les mariés le pré-remplissent, le foyer le
+   * corrige : il n'y a pas deux vérités à réconcilier.
+   */
+  days: z.array(z.enum(WEDDING_DAY_KEYS)),
+  /** Ses choix, repas par repas. */
+  meals: rsvpMealsSchema,
+  /**
+   * Ses catégories **effectives** : les siennes plus celles de son foyer.
+   * C'est ce que lisent les conditions des repas et des plats.
+   */
+  categories: z.array(z.string()),
+  diet: z.string(),
+});
+export type InvitationPerson = z.infer<typeof invitationPersonSchema>;
+
+/** Tout ce que la page `/i/<code>` a besoin de savoir, en un appel. */
+export const invitationSchema = z.object({
+  code: z.string(),
+  /** Prénoms des deux membres du foyer organisateur. */
+  couple: z.tuple([z.string(), z.string()]),
+  /** Nom d'usage du foyer invité : « famille Marchand », ou les prénoms. */
+  familyName: z.string(),
+  /** Adresse du foyer : origine des itinéraires proposés. */
+  familyAddress: z.string(),
+  /** Logé sur place, ou à se loger par ses propres moyens. */
+  housed: z.boolean(),
+  answered: z.boolean(),
+  /**
+   * Les catégories du foyer : ses tags plus celles de chacun des siens. Les
+   * blocs qui ne se rendent qu'une fois pour tout le foyer (le programme, les
+   * adresses, les questions) s'y confrontent.
+   */
+  audience: z.array(z.string()),
+  days: z.array(invitationDaySchema),
+  people: z.array(invitationPersonSchema),
+  config: weddingInviteConfigSchema,
+});
+export type Invitation = z.infer<typeof invitationSchema>;
+
+/**
+ * Réponse d'un foyer : une entrée par personne du foyer.
+ *
+ * `confirm` sépare les deux gestes de la page publique. Chaque clic enregistre
+ * (`false`) — un foyer qui remplit à moitié et revient plus tard retrouve ses
+ * choix. « Envoyer » confirme (`true`) : c'est lui, et lui seul, qui horodate
+ * la réponse et fait passer le faire-part en « Répondu ».
+ */
+export const submitRsvpSchema = z.object({
+  confirm: z.boolean().default(false),
+  people: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        days: z.array(z.enum(WEDDING_DAY_KEYS)).max(WEDDING_DAY_KEYS.length).default([]),
+        /** Un objet par repas ; les repas absents ne sont pas touchés. */
+        meals: rsvpMealsSchema,
+        diet: z.string().trim().max(200).default(""),
+      }),
+    )
+    .max(40),
+});
 
 /* ------------------------------------------------------------------ */
 /* Courses (liste + recettes)                                          */
@@ -1425,9 +2023,21 @@ export const customListItemSchema = z.object({
 });
 export type CustomListItem = z.infer<typeof customListItemSchema>;
 
+export const listFolderSchema = z.object({
+  id: z.string(),
+  scope: z.enum(LIST_SCOPES),
+  name: z.string(),
+  emoji: z.string().nullable(),
+  /** Nombre de listes rangées dedans — l'index l'affiche sans les charger. */
+  listCount: z.number().int(),
+});
+export type ListFolder = z.infer<typeof listFolderSchema>;
+
 export const customListSchema = z.object({
   id: z.string(),
   scope: z.enum(LIST_SCOPES),
+  /** Dossier qui la range, `null` = à la racine de l'onglet. */
+  folderId: z.string().nullable(),
   name: z.string(),
   /** Emoji de contenu affiché en tête de liste (null = pastille neutre). */
   emoji: z.string().nullable(),
@@ -1452,9 +2062,26 @@ export const createCustomListSchema = z.object({
   scope: z.enum(LIST_SCOPES),
   name: z.string().trim().min(1).max(80),
   emoji: emojiField,
+  /** Dossier de destination ; absent ou `null` = à la racine. */
+  folderId: z.string().nullable().optional(),
 });
 
 export const updateCustomListSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  emoji: emojiField,
+  /** `null` sort la liste de son dossier ; champ absent = on n'y touche pas. */
+  folderId: z.string().nullable().optional(),
+  /** Bascule perso ↔ partagée. La liste repart à la racine de l'onglet visé. */
+  scope: z.enum(LIST_SCOPES).optional(),
+});
+
+export const createListFolderSchema = z.object({
+  scope: z.enum(LIST_SCOPES),
+  name: z.string().trim().min(1).max(80),
+  emoji: emojiField,
+});
+
+export const updateListFolderSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   emoji: emojiField,
 });
@@ -1705,6 +2332,12 @@ export const upsertWellnessActivitySchema = z.object({
 export const wellnessSessionItemSchema = z.object({
   activityId: z.string(),
   amount: z.number().int().min(0),
+  /**
+   * Séries de cette activité **à l'intérieur d'un tour** : « 2 séries de 10
+   * pompes » se saisit ici, la répétition de toute la liste reste le tour.
+   * Absent des séances créées avant cette option → 1.
+   */
+  series: z.number().int().min(1).default(1),
 });
 export type WellnessSessionItem = z.infer<typeof wellnessSessionItemSchema>;
 
@@ -1712,6 +2345,7 @@ export const wellnessSessionSchema = z.object({
   id: z.string(),
   name: z.string(),
   emoji: z.string(),
+  /** Nombre de tours : toute la liste d'activités est répétée à chaque tour. */
   series: z.number().int(),
   items: z.array(wellnessSessionItemSchema),
   position: z.number().int(),
@@ -1776,6 +2410,8 @@ export const wellnessLoggedSessionSchema = z.object({
       icon: z.string(),
       unit: z.enum(ACTIVITY_UNITS),
       amount: z.number().int().min(0),
+      /** Séries de l'activité dans un tour (1 pour les séances historiques). */
+      series: z.number().int().min(1).default(1),
     }),
   ),
 });
@@ -2111,3 +2747,4 @@ export const formatEuros = (cents: number): string =>
 // Réexporté ici pour que l'API comme le front consomment le même catalogue :
 // c'est lui qui donne l'emoji et le rayon par défaut d'un article.
 export * from "./groceries";
+export * from "./inviteLookup";

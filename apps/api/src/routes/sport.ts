@@ -49,6 +49,17 @@ function safeJson<T>(raw: string | null, fallback: T): T {
   }
 }
 
+/**
+ * Les séries **par activité** sont arrivées après coup : les séances et les
+ * séances réalisées écrites avant n'ont pas le champ. On le remet à 1 à la
+ * lecture, pour que le front n'ait jamais à se demander s'il vaut `undefined`.
+ */
+type StoredSessionItem = WellnessConfig["sessions"][number]["items"][number];
+
+function withItemSeries<T extends { series?: number }>(items: T[]): T[] {
+  return items.map((it) => ({ ...it, series: Math.max(1, it.series ?? 1) }));
+}
+
 /* ------------------------------------------------------------------ */
 /* Configuration (activités + séances + objectifs) en un appel         */
 /* ------------------------------------------------------------------ */
@@ -91,7 +102,7 @@ sport.get("/:member/config", async (c) => {
       name: s.name,
       emoji: s.emoji,
       series: s.series,
-      items: safeJson(s.items, [] as WellnessConfig["sessions"][number]["items"]),
+      items: withItemSeries(safeJson(s.items, [] as StoredSessionItem[])),
       position: s.position,
     })),
     goals: goals.map((g) => ({
@@ -179,7 +190,7 @@ sport.delete("/:member/activities/:id", async (c) => {
     .from(wellnessSession)
     .where(and(eq(wellnessSession.householdId, hid), eq(wellnessSession.member, member)));
   for (const s of sessions) {
-    const items = safeJson<{ activityId: string; amount: number }[]>(s.items, []);
+    const items = safeJson<StoredSessionItem[]>(s.items, []);
     const next = items.filter((it) => it.activityId !== id);
     if (next.length !== items.length) {
       await db
@@ -435,7 +446,10 @@ sport.get("/:member/logs", async (c) => {
       date: r.date,
       goalId: r.goalId,
       value: r.value,
-      sessions: safeJson(r.sessions, [] as WellnessLog["sessions"]),
+      sessions: safeJson(r.sessions, [] as WellnessLog["sessions"]).map((sess) => ({
+        ...sess,
+        items: withItemSeries(sess.items),
+      })),
     })),
     closedDates: closed.map((r) => r.date).sort(),
   };

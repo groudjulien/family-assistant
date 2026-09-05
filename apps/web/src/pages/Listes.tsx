@@ -18,14 +18,28 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { CustomList, CustomListItem, ListScope } from "@gfa/shared";
+import type { CustomList, CustomListItem, ListFolder, ListScope } from "@gfa/shared";
 import { LIST_EMOJIS } from "@gfa/shared";
 import { api } from "../lib/api";
 import { relativeFr } from "../lib/format";
 import { useMe } from "../auth";
 import type { OverflowItem } from "../components/ui";
-import { SubNav, Input, Checkbox, MobileActionBar, OverflowMenu } from "../components/ui";
-import { IconChevronDown, IconChevronLeft, IconChevronRight, IconList } from "../components/icons";
+import {
+  SubNav,
+  Input,
+  Checkbox,
+  MobileActionBar,
+  OverflowMenu,
+  SearchField,
+  SectionLabel,
+} from "../components/ui";
+import {
+  IconChevronDown,
+  IconChevronLeft,
+  IconChevronRight,
+  IconFolder,
+  IconList,
+} from "../components/icons";
 import { MemberAvatar } from "../components/MemberAvatar";
 import WishList from "../components/WishList";
 import { usePageHeader, usePageTabs, usePageChrome } from "../components/PageHeader";
@@ -41,21 +55,28 @@ const TABS: { id: Tab; label: string }[] = [
 
 const SCOPE_OF: Record<string, ListScope> = { partagees: "shared", perso: "personal" };
 
+/** Segment qui annonce un dossier : `/listes/perso/d/<id>`. Les ids sont des
+ *  UUID, il ne peut donc pas être confondu avec l'id d'une liste. */
+const FOLDER_SEGMENT = "d";
+
 export default function Listes() {
   const navigate = useNavigate();
-  const { tab: tabParam, view } = useParams();
+  const { tab: tabParam, view, sub } = useParams();
   const tab: Tab = TABS.some((t) => t.id === tabParam) ? (tabParam as Tab) : TABS[0].id;
   const scope = SCOPE_OF[tab];
-  // Troisième segment = id de la liste ouverte. Contrairement à un sous-menu,
-  // ce n'est pas un ensemble fixe : rien à mémoriser avec `useLastView`, on ne
-  // veut pas rouvrir la dernière liste consultée en revenant sur l'onglet.
-  const openListId = scope ? view : undefined;
+  // Troisième segment : un id de liste, ou `d/<id>` pour le contenu d'un
+  // dossier. Contrairement à un sous-menu, ce n'est pas un ensemble fixe :
+  // rien à mémoriser avec `useLastView`, on ne veut pas rouvrir le dernier
+  // enregistrement consulté en revenant sur l'onglet.
+  const openFolderId = scope && view === FOLDER_SEGMENT ? sub : undefined;
+  const openListId = scope && view !== FOLDER_SEGMENT ? view : undefined;
+  const basePath = `/listes/${tab}`;
 
-  // Une liste ouverte est une sous-page : elle prend toute la barre du haut
-  // (retour + nom de la liste), donc plus d'onglets.
+  // Une liste ouverte — ou un dossier ouvert — est une sous-page : elle prend
+  // toute la barre du haut (retour + nom), donc plus d'onglets.
   usePageTabs(
     tab,
-    openListId ? [] : TABS.map((t) => ({ value: t.id, label: t.label })),
+    openListId || openFolderId ? [] : TABS.map((t) => ({ value: t.id, label: t.label })),
     (v) => navigate(`/listes/${v}`),
   );
 
@@ -70,9 +91,9 @@ export default function Listes() {
       {tab === "wishlist" && <WishList />}
       {scope &&
         (openListId ? (
-          <ListDetail scope={scope} listId={openListId} backTo={`/listes/${tab}`} />
+          <ListDetail scope={scope} listId={openListId} basePath={basePath} />
         ) : (
-          <CustomLists scope={scope} basePath={`/listes/${tab}`} />
+          <CustomLists scope={scope} basePath={basePath} folderId={openFolderId} />
         ))}
     </div>
   );
@@ -82,15 +103,28 @@ export default function Listes() {
 
 const listQueryKey = (scope: ListScope) => ["lists", scope];
 
+/** Réponse de `GET /api/lists` : les dossiers d'un onglet et toutes ses listes. */
+type ListsPayload = { folders: ListFolder[]; lists: CustomList[] };
+
 /** Pastille de tête d'une liste : son emoji, ou une icône neutre s'il manque. */
-function ListEmoji({ emoji, size = "md" }: { emoji: string | null; size?: "sm" | "md" }) {
+function ListEmoji({
+  emoji,
+  size = "md",
+  folder = false,
+}: {
+  emoji: string | null;
+  size?: "sm" | "md";
+  /** Repli sur l'icône dossier au lieu de l'icône liste. */
+  folder?: boolean;
+}) {
   const dim = size === "sm" ? "h-9 w-9 text-lg" : "h-11 w-11 text-xl";
+  const Fallback = folder ? IconFolder : IconList;
   return (
     <span
       aria-hidden="true"
       className={`flex ${dim} shrink-0 items-center justify-center rounded-xl bg-surface-2 leading-none`}
     >
-      {emoji || <IconList size={20} className="text-ink-2" />}
+      {emoji || <Fallback size={20} className="text-ink-2" />}
     </span>
   );
 }
@@ -114,6 +148,8 @@ function ListFormModal({
   submitLabel,
   initialName = "",
   initialEmoji = null,
+  placeholder = "Nom de la liste…",
+  folder = false,
   onSubmit,
   onClose,
 }: {
@@ -121,6 +157,9 @@ function ListFormModal({
   submitLabel: string;
   initialName?: string;
   initialEmoji?: string | null;
+  placeholder?: string;
+  /** Formulaire de dossier : le « sans icône » montre un dossier, pas une liste. */
+  folder?: boolean;
   onSubmit: (v: { name: string; emoji: string | null }) => void;
   onClose: () => void;
 }) {
@@ -148,7 +187,7 @@ function ListFormModal({
           autoFocus
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="Nom de la liste…"
+          placeholder={placeholder}
         />
         <div className="space-y-1.5">
           <div className="eyebrow">Icône</div>
@@ -162,7 +201,11 @@ function ListFormModal({
                 emoji === null ? "border-brand-600 bg-surface-2" : "border-line"
               }`}
             >
-              <IconList size={20} className="text-ink-2" />
+              {folder ? (
+                <IconFolder size={20} className="text-ink-2" />
+              ) : (
+                <IconList size={20} className="text-ink-2" />
+              )}
             </button>
             {LIST_EMOJIS.map((e) => (
               <button
@@ -192,6 +235,135 @@ function ListFormModal({
   );
 }
 
+/* ---------------- Dossiers ---------------- */
+
+/**
+ * Rangée de dossier (mobile). Même grammaire qu'une rangée de liste : on entre
+ * d'une touche, le compte tient lieu d'avancement. Renommer / supprimer vivent
+ * dans le « ⋯ » de la sous-page du dossier.
+ */
+function FolderRow({ folder, to, last }: { folder: ListFolder; to: string; last: boolean }) {
+  return (
+    <div className={last ? "" : "border-b border-hairline"}>
+      <Link to={to} className="flex min-h-[64px] items-center gap-3 py-2.5">
+        <ListEmoji emoji={folder.emoji} folder />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-base font-semibold">{folder.name}</span>
+          <span className="block text-xs text-slate-400">
+            {folder.listCount === 0
+              ? "Dossier vide"
+              : `${folder.listCount} liste${folder.listCount > 1 ? "s" : ""}`}
+          </span>
+        </span>
+        <IconChevronRight size={20} className="shrink-0 text-slate-400" />
+      </Link>
+    </div>
+  );
+}
+
+/**
+ * Tuile de dossier (ordinateur). Compacte, à l'inverse des cartes de listes
+ * qui sont dépliées : un dossier n'a rien à montrer tant qu'on ne l'ouvre pas.
+ */
+function FolderCard({ folder, to }: { folder: ListFolder; to: string }) {
+  return (
+    <Link
+      to={to}
+      className="card flex min-h-[64px] items-center gap-3 transition hover:border-brand-500"
+    >
+      <ListEmoji emoji={folder.emoji} size="sm" folder />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate font-semibold">{folder.name}</span>
+        <span className="block text-xs text-slate-400">
+          {folder.listCount === 0
+            ? "Vide"
+            : `${folder.listCount} liste${folder.listCount > 1 ? "s" : ""}`}
+        </span>
+      </span>
+      <IconChevronRight size={20} className="shrink-0 text-slate-400" />
+    </Link>
+  );
+}
+
+/** Choix du dossier d'une liste. La racine est une option comme une autre. */
+function MoveToFolderModal({
+  folders,
+  current,
+  onPick,
+  onClose,
+}: {
+  folders: ListFolder[];
+  current: string | null;
+  onPick: (folderId: string | null) => void;
+  onClose: () => void;
+}) {
+  const options: { id: string | null; name: string; emoji: string | null }[] = [
+    { id: null, name: "Aucun dossier (racine)", emoji: null },
+    ...folders.map((f) => ({ id: f.id, name: f.name, emoji: f.emoji })),
+  ];
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center"
+      onClick={onClose}
+    >
+      <div onClick={(e) => e.stopPropagation()} className="card w-full max-w-sm space-y-3">
+        <div className="font-semibold">Déplacer vers un dossier</div>
+        {folders.length === 0 && (
+          <p className="text-sm text-slate-400">
+            Aucun dossier dans cet onglet — crée-en un depuis l'index des listes.
+          </p>
+        )}
+        <div className="flex flex-col">
+          {options.map((o, i) => (
+            <button
+              key={o.id ?? "root"}
+              type="button"
+              onClick={() => {
+                onPick(o.id);
+                onClose();
+              }}
+              aria-pressed={current === o.id}
+              className={`flex min-h-[52px] items-center gap-3 text-left ${
+                i === options.length - 1 ? "" : "border-b border-hairline"
+              }`}
+            >
+              <ListEmoji emoji={o.emoji} size="sm" folder={o.id !== null} />
+              <span className="min-w-0 flex-1 truncate text-base">{o.name}</span>
+              {current === o.id && (
+                <span aria-hidden="true" className="shrink-0 text-brand-600">
+                  ✓
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="flex justify-end">
+          <button type="button" onClick={onClose} className="btn-ghost">
+            Annuler
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Libellés de la bascule perso ↔ partagée. La conséquence est écrite : passer
+ * une liste en perso la retire de la vue de l'autre membre.
+ */
+const SCOPE_SWITCH: Record<ListScope, { to: ListScope; label: string; confirm: string }> = {
+  personal: {
+    to: "shared",
+    label: "Rendre partagée",
+    confirm: "Rendre cette liste partagée ? Tout le foyer pourra la voir et la modifier.",
+  },
+  shared: {
+    to: "personal",
+    label: "Rendre perso",
+    confirm: "Rendre cette liste perso ? Elle ne sera plus visible que par toi.",
+  },
+};
+
 /* ---------------- Index : la liste des listes ---------------- */
 
 /**
@@ -204,14 +376,26 @@ function ListRow({
   to,
   last,
   onOpen,
+  match,
+  folderName,
+  disabled = false,
 }: {
   list: CustomList;
   to: string;
   last: boolean;
   onOpen: (e: React.MouseEvent) => void;
+  /** Élément qui a fait ressortir la liste dans une recherche : sans lui, la
+   *  rangée aurait l'air de ne pas correspondre (le nom, lui, ne matche pas). */
+  match?: string;
+  /** Dossier qui la range : la recherche traverse les dossiers, il faut dire
+   *  d'où vient un résultat. */
+  folderName?: string;
+  /** Une recherche filtre l'index : déplacer une rangée y renumérote à côté. */
+  disabled?: boolean;
 }) {
   const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: list.id,
+    disabled,
   });
   const done = list.items.filter((i) => i.done).length;
   const total = list.items.length;
@@ -245,6 +429,13 @@ function ListRow({
               </span>
             </span>
           )}
+          {(match || folderName) && (
+            <span className="mt-1 block truncate text-xs text-slate-400">
+              {[folderName && `Dans « ${folderName} »`, match && `contient « ${match} »`]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
+          )}
         </span>
         <IconChevronRight size={20} className="shrink-0 text-slate-400" />
       </Link>
@@ -252,10 +443,27 @@ function ListRow({
   );
 }
 
-function CustomLists({ scope, basePath }: { scope: ListScope; basePath: string }) {
+/**
+ * Index d'un onglet (racine) **ou** contenu d'un dossier : c'est le même écran,
+ * seul le périmètre change. `folderId` renseigné = sous-page du dossier, avec
+ * retour vers la racine dans la barre du haut.
+ */
+function CustomLists({
+  scope,
+  basePath,
+  folderId,
+}: {
+  scope: ListScope;
+  basePath: string;
+  folderId?: string;
+}) {
   const pageTitle = scope === "shared" ? "Listes partagées" : "Listes perso";
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [renamingFolder, setRenamingFolder] = useState(false);
+  const [search, setSearch] = useState("");
   // Les poignées de glisser-déposer n'apparaissent qu'en mode réorganisation
   // (ordinateur) ; sur mobile, l'appui long suffit.
   const [reorderMode, setReorderMode] = useState(false);
@@ -274,25 +482,85 @@ function CustomLists({ scope, basePath }: { scope: ListScope; basePath: string }
 
   const { data, isLoading } = useQuery({
     queryKey: listQueryKey(scope),
-    queryFn: () => api.get<{ lists: CustomList[] }>(`/api/lists?scope=${scope}`),
+    queryFn: () => api.get<ListsPayload>(`/api/lists?scope=${scope}`),
   });
   const invalidate = () => qc.invalidateQueries({ queryKey: ["lists"] });
   const create = useMutation({
     mutationFn: (v: { name: string; emoji: string | null }) =>
-      api.post("/api/lists", { scope, name: v.name, emoji: v.emoji }),
+      api.post("/api/lists", { scope, name: v.name, emoji: v.emoji, folderId: folderId ?? null }),
     onSuccess: invalidate,
+  });
+  const createFolder = useMutation({
+    mutationFn: (v: { name: string; emoji: string | null }) =>
+      api.post("/api/lists/folders", { scope, name: v.name, emoji: v.emoji }),
+    onSuccess: invalidate,
+  });
+  const patchFolder = useMutation({
+    mutationFn: (v: { name?: string; emoji?: string | null }) =>
+      api.patch(`/api/lists/folders/${folderId}`, v),
+    onSuccess: invalidate,
+  });
+  const removeFolder = useMutation({
+    mutationFn: () => api.del(`/api/lists/folders/${folderId}`),
+    onSuccess: () => {
+      invalidate();
+      navigate(basePath, { replace: true });
+    },
   });
   const reorder = useMutation({
     mutationFn: (orderedIds: string[]) => api.patch("/api/lists/reorder", { orderedIds }),
     onSuccess: invalidate,
   });
 
-  const lists = data?.lists ?? [];
+  const allLists = data?.lists ?? [];
+  const allFolders = data?.folders ?? [];
+  const folder = folderId ? allFolders.find((f) => f.id === folderId) : undefined;
+
+  // La recherche porte aussi sur le contenu : avec dix listes « Idées cadeaux »,
+  // on retrouve la bonne par ce qu'il y a dedans, pas par son nom.
+  const q = search.trim().toLowerCase();
+  const searching = q.length > 0;
+  const matchOf = (l: CustomList) => l.items.find((i) => i.label.toLowerCase().includes(q));
+
+  // À la racine, chercher c'est vouloir retrouver une liste où qu'elle soit :
+  // la recherche traverse les dossiers (et les dossiers eux-mêmes s'effacent,
+  // ils ne sont pas des résultats). Dans un dossier, on reste dans le dossier —
+  // son nom est écrit en haut de l'écran, en sortir sans le dire mentirait.
+  const scoped = folderId
+    ? allLists.filter((l) => l.folderId === folderId)
+    : allLists.filter((l) => !l.folderId);
+  const haystack = folderId ? scoped : allLists;
+  const lists = searching
+    ? haystack.filter((l) => l.name.toLowerCase().includes(q) || !!matchOf(l))
+    : scoped;
+  const folders = searching || folderId ? [] : allFolders;
+  const folderNameOf = (l: CustomList) =>
+    l.folderId ? allFolders.find((f) => f.id === l.folderId)?.name : undefined;
+
   const openItems = lists.reduce((n, l) => n + l.items.filter((i) => !i.done).length, 0);
-  usePageHeader(
-    pageTitle,
-    `${lists.length} liste${lists.length > 1 ? "s" : ""} · ${openItems} à faire`,
-  );
+  const countLabel = `${lists.length} liste${lists.length > 1 ? "s" : ""} · ${openItems} à faire`;
+
+  // Un dossier ouvert est une sous-page : titre du dossier, retour vers la
+  // racine, et ses actions dans le « ⋯ » de la barre du haut.
+  const folderActions: OverflowItem[] = [
+    { label: "Modifier", onClick: () => setRenamingFolder(true) },
+    {
+      label: "Supprimer le dossier",
+      danger: true,
+      onClick: () => {
+        if (
+          folder &&
+          confirm(
+            `Supprimer le dossier « ${folder.name} » ? Ses listes ne sont pas supprimées : elles reviennent à la racine.`,
+          )
+        )
+          removeFolder.mutate();
+      },
+    },
+  ];
+  // Déclarés avant tout retour anticipé : ce sont des hooks.
+  usePageHeader(folderId ? (folder?.name ?? "Dossier") : pageTitle, countLabel, folder?.emoji);
+  usePageChrome(folderId ? basePath : null, folderActions);
 
   const onDragEnd = (e: DragEndEvent) => {
     window.setTimeout(() => (dragged.current = false), 250);
@@ -306,49 +574,129 @@ function CustomLists({ scope, basePath }: { scope: ListScope; basePath: string }
 
   if (isLoading) return <PageLoader variant="taches" />;
 
-  const hint =
-    scope === "shared"
+  if (folderId && !folder) {
+    return (
+      <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+        <p>Ce dossier n'existe plus.</p>
+        <Link to={basePath} className="btn-primary">
+          Revenir aux listes
+        </Link>
+      </div>
+    );
+  }
+
+  const hint = folderId
+    ? "Les listes de ce dossier. Les autres sont restées à la racine."
+    : scope === "shared"
       ? "Listes partagées avec tout le foyer."
       : "Listes personnelles : personne d'autre ne les voit.";
+  // Vide se juge sur les données, pas sur le résultat filtré : sans ça, une
+  // recherche sans réponse afficherait « aucune liste pour l'instant ».
+  const empty = folderId ? scoped.length === 0 : allLists.length === 0 && allFolders.length === 0;
+  const searchable = !empty;
+
+  const searchField = searchable ? (
+    <SearchField value={search} onChange={setSearch} placeholder="Nom de liste ou élément…" />
+  ) : null;
+
+  const noResult = (
+    <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
+      <p>Aucune liste ne correspond à « {search.trim()} ».</p>
+      <button type="button" onClick={() => setSearch("")} className="btn-ghost">
+        Effacer la recherche
+      </button>
+    </div>
+  );
 
   return (
     <>
       {/* ---- Mobile : un index de rangées, une carte, une action ---- */}
       <div className="flex flex-col gap-3 pb-28 md:hidden">
-        {lists.length === 0 ? (
+        {searchField}
+        {empty ? (
           <div className="card flex flex-col items-start gap-3 text-sm text-slate-400">
-            <p>Aucune liste pour l'instant.</p>
+            <p>{folderId ? "Ce dossier est vide." : "Aucune liste pour l'instant."}</p>
             <button type="button" onClick={() => setCreating(true)} className="btn-primary">
               Créer la première
             </button>
           </div>
+        ) : lists.length === 0 && searching ? (
+          noResult
         ) : (
           <>
-            <div className="card">
-              <DndContext
-                sensors={rowSensors}
-                collisionDetection={closestCenter}
-                onDragStart={() => (dragged.current = true)}
-                onDragEnd={onDragEnd}
-              >
-                <SortableContext
-                  items={lists.map((l) => l.id)}
-                  strategy={verticalListSortingStrategy}
+            {folders.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <SectionLabel
+                  right={
+                    <button
+                      type="button"
+                      onClick={() => setCreatingFolder(true)}
+                      className="btn-ghost text-xs"
+                    >
+                      + Dossier
+                    </button>
+                  }
                 >
-                  {lists.map((l, i) => (
-                    <ListRow
-                      key={l.id}
-                      list={l}
-                      to={`${basePath}/${l.id}`}
-                      last={i === lists.length - 1}
-                      onOpen={(e) => {
-                        if (dragged.current) e.preventDefault();
-                      }}
+                  Dossiers · {folders.length}
+                </SectionLabel>
+                <div className="card">
+                  {folders.map((f, i) => (
+                    <FolderRow
+                      key={f.id}
+                      folder={f}
+                      to={`${basePath}/${FOLDER_SEGMENT}/${f.id}`}
+                      last={i === folders.length - 1}
                     />
                   ))}
-                </SortableContext>
-              </DndContext>
-            </div>
+                </div>
+              </div>
+            )}
+            {lists.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                {folders.length > 0 && <SectionLabel>Listes · {lists.length}</SectionLabel>}
+                <div className="card">
+                  <DndContext
+                    sensors={rowSensors}
+                    collisionDetection={closestCenter}
+                    onDragStart={() => (dragged.current = true)}
+                    onDragEnd={onDragEnd}
+                  >
+                    <SortableContext
+                      items={lists.map((l) => l.id)}
+                      strategy={verticalListSortingStrategy}
+                    >
+                      {lists.map((l, i) => (
+                        <ListRow
+                          key={l.id}
+                          list={l}
+                          to={`${basePath}/${l.id}`}
+                          last={i === lists.length - 1}
+                          disabled={searching}
+                          match={
+                            searching && !l.name.toLowerCase().includes(q)
+                              ? matchOf(l)?.label
+                              : undefined
+                          }
+                          folderName={searching ? folderNameOf(l) : undefined}
+                          onOpen={(e) => {
+                            if (dragged.current) e.preventDefault();
+                          }}
+                        />
+                      ))}
+                    </SortableContext>
+                  </DndContext>
+                </div>
+              </div>
+            )}
+            {folders.length === 0 && !searching && !folderId && (
+              <button
+                type="button"
+                onClick={() => setCreatingFolder(true)}
+                className="btn-ghost self-start text-sm"
+              >
+                + Nouveau dossier
+              </button>
+            )}
             <p className="px-1 text-xs text-slate-400">{hint}</p>
           </>
         )}
@@ -357,10 +705,29 @@ function CustomLists({ scope, basePath }: { scope: ListScope; basePath: string }
 
       {/* ---- Ordinateur : les listes dépliées côte à côte ---- */}
       <div className="hidden flex-col gap-4 md:flex">
+        {folder && (
+          <div className="flex items-center gap-3">
+            <Link
+              to={basePath}
+              aria-label="Retour aux listes"
+              className="flex h-tap w-tap shrink-0 items-center justify-center rounded-xl bg-surface-2 text-ink"
+            >
+              <IconChevronLeft />
+            </Link>
+            <ListEmoji emoji={folder.emoji} folder />
+            <div className="min-w-0 flex-1">
+              <div className="eyebrow">{pageTitle}</div>
+              <div className="truncate text-xl font-semibold">{folder.name}</div>
+            </div>
+            <OverflowMenu label="Actions du dossier" items={folderActions} />
+          </div>
+        )}
+
         <div className="flex items-center justify-between gap-2">
           <p className="text-xs text-slate-400">{hint}</p>
           <div className="flex shrink-0 items-center gap-2">
-            {lists.length > 0 && (
+            {/* Réorganiser et filtrer se contredisent : le bouton s'efface. */}
+            {lists.length > 0 && !searching && (
               <button
                 type="button"
                 onClick={() => setReorderMode((v) => !v)}
@@ -371,44 +738,92 @@ function CustomLists({ scope, basePath }: { scope: ListScope; basePath: string }
                 {reorderMode ? "Terminer" : "Réorganiser"}
               </button>
             )}
+            {!folderId && (
+              <button type="button" onClick={() => setCreatingFolder(true)} className="btn-ghost">
+                Nouveau dossier
+              </button>
+            )}
             <button type="button" onClick={() => setCreating(true)} className="btn-primary">
               Nouvelle liste
             </button>
           </div>
         </div>
 
-        {lists.length === 0 ? (
-          <div className="card text-sm text-slate-400">
-            Aucune liste pour l'instant — crée-en une pour commencer.
+        {searchField}
+
+        {folders.length > 0 && (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {folders.map((f) => (
+              <FolderCard key={f.id} folder={f} to={`${basePath}/${FOLDER_SEGMENT}/${f.id}`} />
+            ))}
           </div>
+        )}
+
+        {empty ? (
+          <div className="card text-sm text-slate-400">
+            {folderId
+              ? "Ce dossier est vide — crée une liste dedans."
+              : "Aucune liste pour l'instant — crée-en une pour commencer."}
+          </div>
+        ) : lists.length === 0 && searching ? (
+          noResult
         ) : (
-          <DndContext
-            sensors={deskSensors}
-            collisionDetection={closestCenter}
-            onDragEnd={onDragEnd}
-          >
-            <SortableContext items={lists.map((l) => l.id)} strategy={verticalListSortingStrategy}>
-              <div className="grid items-start gap-4 lg:grid-cols-2">
-                {lists.map((l) => (
-                  <SortableListCard
-                    key={l.id}
-                    list={l}
-                    reorderMode={reorderMode}
-                    onChanged={invalidate}
-                  />
-                ))}
-              </div>
-            </SortableContext>
-          </DndContext>
+          lists.length > 0 && (
+            <DndContext
+              sensors={deskSensors}
+              collisionDetection={closestCenter}
+              onDragEnd={onDragEnd}
+            >
+              <SortableContext items={lists.map((l) => l.id)} strategy={verticalListSortingStrategy}>
+                {/* Colonnes CSS plutôt qu'une grille : une carte courte ne laisse
+                    pas un trou sous elle en attendant la carte haute d'à côté.
+                    L'espacement vertical vient du `mb-4` de chaque carte. */}
+                <div className="lg:columns-2 lg:gap-4">
+                  {lists.map((l) => (
+                    <SortableListCard
+                      key={l.id}
+                      list={l}
+                      folders={allFolders}
+                      folderName={searching ? folderNameOf(l) : undefined}
+                      reorderMode={reorderMode && !searching}
+                      onChanged={invalidate}
+                    />
+                  ))}
+                </div>
+              </SortableContext>
+            </DndContext>
+          )
         )}
       </div>
 
       {creating && (
         <ListFormModal
-          title="Nouvelle liste"
+          title={folder ? `Nouvelle liste dans « ${folder.name} »` : "Nouvelle liste"}
           submitLabel="Créer"
           onSubmit={(v) => create.mutate(v)}
           onClose={() => setCreating(false)}
+        />
+      )}
+      {creatingFolder && (
+        <ListFormModal
+          title="Nouveau dossier"
+          submitLabel="Créer"
+          placeholder="Nom du dossier…"
+          folder
+          onSubmit={(v) => createFolder.mutate(v)}
+          onClose={() => setCreatingFolder(false)}
+        />
+      )}
+      {renamingFolder && folder && (
+        <ListFormModal
+          title="Renommer le dossier"
+          submitLabel="Enregistrer"
+          initialName={folder.name}
+          initialEmoji={folder.emoji}
+          placeholder="Nom du dossier…"
+          folder
+          onSubmit={(v) => patchFolder.mutate(v)}
+          onClose={() => setRenamingFolder(false)}
         />
       )}
     </>
@@ -460,17 +875,19 @@ function DetailItemRow({
 function ListDetail({
   scope,
   listId,
-  backTo,
+  basePath,
 }: {
   scope: ListScope;
   listId: string;
-  backTo: string;
+  /** Racine de l'onglet ; le retour vise le dossier de la liste s'il y en a un. */
+  basePath: string;
 }) {
   const me = useMe();
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [newItem, setNewItem] = useState("");
   const [renaming, setRenaming] = useState(false);
+  const [moving, setMoving] = useState(false);
   const [showDone, setShowDone] = useState(true);
   const [editing, setEditing] = useState<{ id: string; label: string } | null>(null);
   const sensors = useSensors(
@@ -480,11 +897,16 @@ function ListDetail({
 
   const { data, isLoading } = useQuery({
     queryKey: listQueryKey(scope),
-    queryFn: () => api.get<{ lists: CustomList[] }>(`/api/lists?scope=${scope}`),
+    queryFn: () => api.get<ListsPayload>(`/api/lists?scope=${scope}`),
   });
-  const all = data?.lists ?? [];
-  const list = all.find((l) => l.id === listId);
-  const index = all.findIndex((l) => l.id === listId);
+  const folders = data?.folders ?? [];
+  const list = (data?.lists ?? []).find((l) => l.id === listId);
+  // Le voisinage d'une liste, c'est son dossier : « déplacer vers le haut »
+  // doit la faire monter parmi ses sœurs, pas parmi toutes les listes.
+  const siblings = (data?.lists ?? []).filter((l) => l.folderId === (list?.folderId ?? null));
+  const index = siblings.findIndex((l) => l.id === listId);
+  // Une liste rangée dans un dossier revient au dossier, pas à la racine.
+  const backTo = list?.folderId ? `${basePath}/${FOLDER_SEGMENT}/${list.folderId}` : basePath;
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["lists"] });
   const reorder = useMutation({
@@ -492,9 +914,24 @@ function ListDetail({
     onSuccess: invalidate,
   });
   const patchList = useMutation({
-    mutationFn: (v: { name?: string; emoji?: string | null }) =>
-      api.patch(`/api/lists/${listId}`, v),
+    mutationFn: (v: {
+      name?: string;
+      emoji?: string | null;
+      folderId?: string | null;
+      scope?: ListScope;
+    }) => api.patch(`/api/lists/${listId}`, v),
     onSuccess: invalidate,
+  });
+  // Changer de portée sort la liste de l'onglet courant : on la rouvre là où
+  // elle a atterri, sinon l'écran se vide sur une liste « qui n'existe plus ».
+  const switchScope = useMutation({
+    mutationFn: (target: ListScope) => api.patch(`/api/lists/${listId}`, { scope: target }),
+    onSuccess: (_r, target) => {
+      invalidate();
+      navigate(`/listes/${target === "shared" ? "partagees" : "perso"}/${listId}`, {
+        replace: true,
+      });
+    },
   });
   const remove = useMutation({
     mutationFn: () => api.del(`/api/lists/${listId}`),
@@ -523,10 +960,13 @@ function ListDetail({
   });
 
   const members = me.household.members;
+  const folderName = list?.folderId
+    ? folders.find((f) => f.id === list.folderId)?.name
+    : undefined;
   const eyebrow =
-    scope === "shared"
+    (scope === "shared"
       ? `Partagée · ${members.a.name} & ${members.b.name}`
-      : `Perso · ${members[me.member].name}`;
+      : `Perso · ${members[me.member].name}`) + (folderName ? ` · ${folderName}` : "");
 
   /**
    * Actions de la liste. Le déplacement figure ici parce que l'index mobile ne
@@ -534,11 +974,19 @@ function ListDetail({
    * entrées sont la voie au clic — indispensable au tactile.
    */
   const move = (dir: -1 | 1) =>
-    reorder.mutate(arrayMove(all, index, index + dir).map((l) => l.id));
+    reorder.mutate(arrayMove(siblings, index, index + dir).map((l) => l.id));
+  const scopeSwitch = SCOPE_SWITCH[scope];
   const listActions: OverflowItem[] = [
-    { label: "Renommer / changer l'icône", onClick: () => setRenaming(true) },
+    { label: "Modifier", onClick: () => setRenaming(true) },
+    { label: "Déplacer", onClick: () => setMoving(true) },
+    {
+      label: scopeSwitch.label,
+      onClick: () => {
+        if (confirm(scopeSwitch.confirm)) switchScope.mutate(scopeSwitch.to);
+      },
+    },
     ...(index > 0 ? [{ label: "Déplacer vers le haut", onClick: () => move(-1) }] : []),
-    ...(index >= 0 && index < all.length - 1
+    ...(index >= 0 && index < siblings.length - 1
       ? [{ label: "Déplacer vers le bas", onClick: () => move(1) }]
       : []),
     {
@@ -730,6 +1178,14 @@ function ListDetail({
         </div>
       )}
 
+      {moving && (
+        <MoveToFolderModal
+          folders={folders}
+          current={list.folderId}
+          onPick={(fid) => patchList.mutate({ folderId: fid })}
+          onClose={() => setMoving(false)}
+        />
+      )}
       {renaming && (
         <ListFormModal
           title="Modifier la liste"
@@ -886,10 +1342,16 @@ function SortableItemRow({
 
 function SortableListCard({
   list,
+  folders,
+  folderName,
   reorderMode,
   onChanged,
 }: {
   list: CustomList;
+  /** Destinations possibles pour « Déplacer ». */
+  folders: ListFolder[];
+  /** Dossier d'origine, affiché seulement quand la recherche les traverse. */
+  folderName?: string;
   reorderMode: boolean;
   onChanged: () => void;
 }) {
@@ -898,11 +1360,16 @@ function SortableListCard({
   });
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
   const [editingList, setEditingList] = useState(false);
+  const [moving, setMoving] = useState(false);
   const [newItem, setNewItem] = useState("");
 
   const patchList = useMutation({
-    mutationFn: (v: { name?: string; emoji?: string | null }) =>
-      api.patch(`/api/lists/${list.id}`, v),
+    mutationFn: (v: {
+      name?: string;
+      emoji?: string | null;
+      folderId?: string | null;
+      scope?: ListScope;
+    }) => api.patch(`/api/lists/${list.id}`, v),
     onSuccess: onChanged,
   });
   const remove = useMutation({
@@ -946,23 +1413,37 @@ function SortableListCard({
 
   const done = list.items.filter((i) => i.done).length;
 
+  const scopeSwitch = SCOPE_SWITCH[list.scope];
+
   return (
     <div
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition }}
-      className={`card flex flex-col gap-2 ${isDragging ? "ring-2 ring-brand-400" : ""}`}
+      className={`card mb-4 flex break-inside-avoid flex-col gap-2 ${isDragging ? "ring-2 ring-brand-400" : ""}`}
     >
       <div className="flex items-center gap-2">
         {reorderMode && <DragHandle attributes={attributes} listeners={listeners} />}
         <ListEmoji emoji={list.emoji} size="sm" />
-        <span className="min-w-0 flex-1 break-words font-semibold">{list.name}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block break-words font-semibold">{list.name}</span>
+          {folderName && (
+            <span className="block truncate text-xs text-slate-400">Dans « {folderName} »</span>
+          )}
+        </span>
         <span className="shrink-0 text-xs text-slate-400">
           {done}/{list.items.length}
         </span>
         <OverflowMenu
           label={`Actions sur « ${list.name} »`}
           items={[
-            { label: "Renommer / changer l'icône", onClick: () => setEditingList(true) },
+            { label: "Modifier", onClick: () => setEditingList(true) },
+            { label: "Déplacer", onClick: () => setMoving(true) },
+            {
+              label: scopeSwitch.label,
+              onClick: () => {
+                if (confirm(scopeSwitch.confirm)) patchList.mutate({ scope: scopeSwitch.to });
+              },
+            },
             {
               label: "Supprimer la liste",
               danger: true,
@@ -1024,6 +1505,14 @@ function SortableListCard({
           initialEmoji={list.emoji}
           onSubmit={(v) => patchList.mutate(v)}
           onClose={() => setEditingList(false)}
+        />
+      )}
+      {moving && (
+        <MoveToFolderModal
+          folders={folders}
+          current={list.folderId}
+          onPick={(folderId) => patchList.mutate({ folderId })}
+          onClose={() => setMoving(false)}
         />
       )}
     </div>

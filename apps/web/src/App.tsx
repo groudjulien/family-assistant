@@ -19,6 +19,8 @@ import Vacances from "./pages/Vacances";
 import Sport from "./pages/Sport";
 import Chat from "./pages/Chat";
 import Settings from "./pages/Settings";
+import InvitationPage from "./pages/Invitation";
+import FindInvitationPage from "./pages/FindInvitation";
 
 /** /courses/idees/<vue> → /repas/idees/<vue> (ancienne URL des idées repas). */
 function LegacyIdeasRedirect() {
@@ -56,6 +58,24 @@ export default function App() {
   // la requête « me » est en pause (fetchStatus idle) donc isLoading serait false
   // alors que `me` n'est pas encore chargé → on redirigeait à tort vers /login puis /.
   const { data: me, isPending } = useMeQuery();
+  const { pathname } = useLocation();
+
+  // Faire-part public : hors session, hors `Layout`, et **avant** l'attente de
+  // « me » — un invité n'a pas de compte, il ne doit voir ni le loader de l'app
+  // ni la redirection vers /login.
+  //
+  // `/i` seul est l'adresse **unique** qu'on communique à tout le monde : on y
+  // retrouve son foyer par son adresse postale. `/i/<code>` reste le lien
+  // direct d'un foyer, celui qu'on lui a envoyé.
+  if (pathname === "/i" || pathname.startsWith("/i/")) {
+    return (
+      <Routes>
+        <Route path="/i" element={<FindInvitationPage />} />
+        <Route path="/i/" element={<FindInvitationPage />} />
+        <Route path="/i/:code" element={<InvitationPage />} />
+      </Routes>
+    );
+  }
 
   if (isPending) return <AppLoader />;
 
@@ -83,6 +103,8 @@ export default function App() {
           <Route path="/money/:tab/:view" element={<PageGate variant="argent"><Money /></PageGate>} />
           <Route path="/wedding" element={<PageGate variant="mariage"><Wedding /></PageGate>} />
           <Route path="/wedding/:tab" element={<PageGate variant="mariage"><Wedding /></PageGate>} />
+          {/* Un foyer ouvert est une sous-page : /wedding/invites/<idDuChefDeFamille>. */}
+          <Route path="/wedding/:tab/:record" element={<PageGate variant="mariage"><Wedding /></PageGate>} />
           <Route path="/courses" element={<PageGate variant="repas"><Courses /></PageGate>} />
           {/* Anciennes URLs : /courses portait aussi recettes et idées repas,
               parties dans /repas. On redirige (liens partagés, dernier chemin
@@ -99,6 +121,8 @@ export default function App() {
           <Route path="/listes" element={<Listes />} />
           <Route path="/listes/:tab" element={<Listes />} />
           <Route path="/listes/:tab/:view" element={<Listes />} />
+          {/* 4e segment : `/listes/perso/d/<idDossier>` — le contenu d'un dossier. */}
+          <Route path="/listes/:tab/:view/:sub" element={<Listes />} />
           <Route path="/tools/wish" element={<Navigate to="/listes/wishlist" replace />} />
           <Route path="/tools/wish/:view" element={<LegacyToolsRedirect base="/listes/wishlist" />} />
           <Route path="/films" element={<PageGate variant="activites"><Films /></PageGate>} />

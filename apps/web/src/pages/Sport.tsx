@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Navigate, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -193,26 +193,34 @@ const scopeLabel = (period: GoalPeriod) =>
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /**
- * Total d'une activité sur la séance complète : la valeur saisie est **par
- * série**, on la multiplie donc par le nombre de séries. « 23 SÉRIES · POMPES
- * 210 » ne disait pas lequel des deux chiffres était le total.
+ * Total d'une activité sur la séance complète : la valeur saisie est celle
+ * d'**une série**, on la multiplie donc par les séries de l'activité puis par
+ * les tours. « 23 SÉRIES · POMPES 210 » ne disait pas lequel des deux chiffres
+ * était le total.
  */
-function itemTotalLabel(a: WellnessActivity, amount: number, series: number): string {
-  const total = amount * series;
+function itemTotalLabel(a: WellnessActivity, amount: number, times: number): string {
+  const total = amount * times;
   const secs = ACTIVITY_UNIT_META[a.unit].seconds;
   return secs
     ? `${fmtDuration(total * secs)} de ${a.name.toLowerCase()}`
     : `${total} ${a.name.toLowerCase()}`;
 }
 
+/** « 2 × 10 rép. » — quantité d'une activité sur un tour. */
+const perRoundLabel = (unit: ActivityUnit, amount: number, series: number) =>
+  series > 1 ? `${series} × ${amountLabel(unit, amount)}` : amountLabel(unit, amount);
+
+/** « 3 tours » / « 1 tour » — répétition de toute la liste d'activités. */
+const roundsLabel = (rounds: number) => `${rounds} tour${rounds > 1 ? "s" : ""}`;
+
 /** « soit 210 pompes · 630 s de gainage » — total réel de la séance. */
 function sessionTotalLabel(
-  session: { series: number; items: { activityId: string; amount: number }[] },
+  session: { series: number; items: { activityId: string; amount: number; series: number }[] },
   activities: WellnessActivity[],
 ): string {
   const parts = session.items.flatMap((it) => {
     const a = activities.find((x) => x.id === it.activityId);
-    return a ? [itemTotalLabel(a, it.amount, session.series)] : [];
+    return a ? [itemTotalLabel(a, it.amount, it.series * session.series)] : [];
   });
   return parts.join(" · ");
 }
@@ -654,7 +662,7 @@ function DailyView({
             hint:
               s.items.length === 0
                 ? "aucune activité"
-                : `${s.series} série${s.series > 1 ? "s" : ""} · ${sessionTotalLabel(s, model.activities)}`,
+                : `${roundsLabel(s.series)} · ${sessionTotalLabel(s, model.activities)}`,
             onClick: () => {
               const done = model.logged(selected, picker.id);
               model.save(selected, picker.id, done.length + 1, [
@@ -747,7 +755,9 @@ function snapshot(session: WellnessSession, activities: WellnessActivity[]): Wel
     series: session.series,
     items: session.items.flatMap((it) => {
       const a = activities.find((x) => x.id === it.activityId);
-      return a ? [{ name: a.name, icon: a.icon, unit: a.unit, amount: it.amount }] : [];
+      return a
+        ? [{ name: a.name, icon: a.icon, unit: a.unit, amount: it.amount, series: it.series }]
+        : [];
     }),
   };
 }
@@ -859,7 +869,7 @@ function LoggedSessionRow({
   const [open, setOpen] = useState(false);
   const totals = session.items
     .map((it) => {
-      const total = it.amount * session.series;
+      const total = it.amount * it.series * session.series;
       const secs = ACTIVITY_UNIT_META[it.unit].seconds;
       return secs
         ? `${fmtDuration(total * secs)} de ${it.name.toLowerCase()}`
@@ -875,7 +885,7 @@ function LoggedSessionRow({
             {session.emoji} {session.name}
           </span>
           <span className="mt-0.5 block truncate text-xs text-ink-2">
-            {session.series} série{session.series > 1 ? "s" : ""}
+            {roundsLabel(session.series)}
             {totals && ` · ${totals}`}
           </span>
         </span>
@@ -889,25 +899,31 @@ function LoggedSessionRow({
       {open && (
         <div className="mt-2 flex flex-col gap-2">
           <SheetNumber
-            label="Séries"
+            label="Tours"
             value={session.series}
             min={1}
             onChange={(v) => onChange({ ...session, series: Math.max(1, v) })}
           />
-          {session.items.map((it, i) => (
-            <SheetNumber
-              key={i}
-              label={`${it.icon} ${it.name}`}
-              suffix={ACTIVITY_UNIT_META[it.unit].short}
-              value={it.amount}
-              onChange={(v) =>
-                onChange({
-                  ...session,
-                  items: session.items.map((x, j) => (j === i ? { ...x, amount: Math.max(0, v) } : x)),
-                })
-              }
-            />
-          ))}
+          {session.items.map((it, i) => {
+            const patch = (x: WellnessLoggedSession["items"][number]) =>
+              onChange({ ...session, items: session.items.map((y, j) => (j === i ? x : y)) });
+            return (
+              <Fragment key={i}>
+                <SheetNumber
+                  label={`${it.icon} ${it.name}`}
+                  suffix={ACTIVITY_UNIT_META[it.unit].short}
+                  value={it.amount}
+                  onChange={(v) => patch({ ...it, amount: Math.max(0, v) })}
+                />
+                <SheetNumber
+                  label="↳ séries par tour"
+                  value={it.series}
+                  min={1}
+                  onChange={(v) => patch({ ...it, series: Math.max(1, v) })}
+                />
+              </Fragment>
+            );
+          })}
         </div>
       )}
     </div>
@@ -1577,8 +1593,10 @@ function NatureOption({
 type SessionDraft = {
   name: string;
   emoji: string;
+  /** Tours : toute la liste d'activités est répétée à chaque tour. */
   series: number;
-  items: { activityId: string; amount: number }[];
+  /** `series` = séries de cette activité **dans un tour** (2 × 10 pompes). */
+  items: { activityId: string; amount: number; series: number }[];
 };
 
 type ActivityDraft = { name: string; icon: string; unit: ActivityUnit };
@@ -1643,7 +1661,7 @@ function SessionsTab({ model }: { model: Model }) {
             <div className="card">
               <div className="text-sm text-ink-2">Aucune séance pour l'instant.</div>
               <div className="mt-1 text-xs text-slate-400">
-                Une séance = un nombre de séries et une liste d'activités.
+                Une séance = une liste d'activités, répétée sur un nombre de tours.
               </div>
               <button type="button" onClick={() => setSession("new")} className="btn-primary mt-3">
                 Créer la première
@@ -1794,7 +1812,7 @@ function SessionsTab({ model }: { model: Model }) {
 }
 
 /**
- * Ligne d'une séance : ses activités par série, puis le **total réel** de la
+ * Ligne d'une séance : ses activités sur un tour, puis le **total réel** de la
  * séance complète. Une séance vide est signalée en ambre : elle n'est pas
  * neutre, elle est inutilisable.
  */
@@ -1824,9 +1842,7 @@ function SessionRow({
             <span className="min-w-0 truncate text-base font-medium">
               {s.emoji} {s.name}
             </span>
-            <span className="shrink-0 text-xs text-slate-400">
-              {s.series} série{s.series > 1 ? "s" : ""}
-            </span>
+            <span className="shrink-0 text-xs text-slate-400">{roundsLabel(s.series)}</span>
           </span>
 
           {empty ? (
@@ -1853,7 +1869,7 @@ function SessionRow({
                       key={it.activityId}
                       className="rounded-full bg-surface-2 px-2 py-1 text-xs text-ink-2"
                     >
-                      {a.icon} {a.name} · {amountLabel(a.unit, it.amount)}
+                      {a.icon} {a.name} · {perRoundLabel(a.unit, it.amount, it.series)}
                     </span>
                   );
                 })}
@@ -1881,9 +1897,11 @@ function SessionRow({
 }
 
 /**
- * Formulaire d'une séance. La valeur saisie est celle **d'une série** — le
- * total de la séance est calculé et affiché sous la liste, pour qu'on ne se
- * demande plus lequel des deux chiffres on lit.
+ * Formulaire d'une séance, en deux niveaux de répétition : les **tours**
+ * répètent toute la liste, les **séries** répètent une seule activité dans le
+ * tour (« 3 tours, dont 2 séries de 10 pompes »). La valeur saisie reste celle
+ * d'une série — le total réel est calculé et affiché sous la liste, pour qu'on
+ * ne se demande plus lequel des chiffres on lit.
  */
 function SessionSheet({
   model,
@@ -1936,22 +1954,51 @@ function SessionSheet({
           groups={ACTIVITY_EMOJI_GROUPS}
         />
 
-        <Field label="Nombre de séries" hint="la liste est répétée à chaque série">
+        <Field label="Nombre de tours" hint="toute la liste d'activités est répétée à chaque tour">
           <Stepper value={d.series} min={1} onChange={(v) => set("series", v)} />
         </Field>
 
         <div>
-          <div className="eyebrow">Activités par série</div>
+          <div className="eyebrow">Activités d'un tour</div>
           <div className="mt-2 flex flex-col divide-y divide-hairline">
             {d.items.map((it, i) => {
               const a = model.activities.find((x) => x.id === it.activityId);
               if (!a) return null;
+              const patch = (v: Partial<SessionDraft["items"][number]>) =>
+                set("items", d.items.map((x, j) => (j === i ? { ...x, ...v } : x)));
               return (
-                <div key={it.activityId} className="flex items-center gap-2 py-2">
-                  <span className="min-w-0 flex-1 truncate text-base">
-                    {a.icon} {a.name}
-                  </span>
-                  <span className="flex shrink-0 items-center gap-1.5">
+                <div key={it.activityId} className="py-2">
+                  {/* Le nom garde sa ligne : deux champs et un « ⋯ » à côté de
+                      lui le rognaient à trois lettres sur un téléphone. */}
+                  <div className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-base">
+                      {a.icon} {a.name}
+                    </span>
+                    <OverflowMenu
+                      items={[
+                        {
+                          label: "Retirer de la séance",
+                          danger: true,
+                          onClick: () => set("items", d.items.filter((_, j) => j !== i)),
+                        },
+                      ]}
+                    />
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                    <span className="block w-[4rem] shrink-0">
+                      <Input
+                        type="number"
+                        min={1}
+                        inputMode="numeric"
+                        value={it.series}
+                        aria-label={`Séries de ${a.name} par tour`}
+                        onChange={(e) => patch({ series: Math.max(1, Number(e.target.value) || 1) })}
+                        className="text-center"
+                      />
+                    </span>
+                    <span className="shrink-0 text-xs text-slate-400">
+                      série{it.series > 1 ? "s" : ""} de
+                    </span>
                     <span className="block w-[4.5rem] shrink-0">
                       <Input
                         type="number"
@@ -1959,30 +2006,19 @@ function SessionSheet({
                         inputMode="numeric"
                         value={it.amount}
                         aria-label={`Quantité de ${a.name} par série`}
-                        onChange={(e) =>
-                          set(
-                            "items",
-                            d.items.map((x, j) =>
-                              j === i ? { ...x, amount: Math.max(0, Number(e.target.value) || 0) } : x,
-                            ),
-                          )
-                        }
+                        onChange={(e) => patch({ amount: Math.max(0, Number(e.target.value) || 0) })}
                         className="text-center"
                       />
                     </span>
-                    <span className="w-8 text-xs text-slate-400">
+                    <span className="shrink-0 text-xs text-slate-400">
                       {ACTIVITY_UNIT_META[a.unit].short}
                     </span>
-                  </span>
-                  <OverflowMenu
-                    items={[
-                      {
-                        label: "Retirer de la séance",
-                        danger: true,
-                        onClick: () => set("items", d.items.filter((_, j) => j !== i)),
-                      },
-                    ]}
-                  />
+                    {it.series > 1 && (
+                      <span className="shrink-0 text-xs text-slate-400">
+                        = {amountLabel(a.unit, it.series * it.amount)} par tour
+                      </span>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -2000,7 +2036,10 @@ function SessionSheet({
                     key={a.id}
                     type="button"
                     onClick={() => {
-                      set("items", [...d.items, { activityId: a.id, amount: defaultAmount(a) }]);
+                      set("items", [
+                        ...d.items,
+                        { activityId: a.id, amount: defaultAmount(a), series: 1 },
+                      ]);
                       setAdding(false);
                     }}
                     className="flex min-h-tap items-center gap-2 rounded-lg px-2 text-left text-base hover:bg-surface"
@@ -2216,7 +2255,7 @@ function StatsView({
           const cur = totals.get(it.name) ?? { icon: it.icon, unit: it.unit, total: 0 };
           const secs = ACTIVITY_UNIT_META[it.unit].seconds;
           // Les unités de temps sont normalisées en secondes avant cumul.
-          cur.total += it.amount * s.series * (secs ?? 1);
+          cur.total += it.amount * it.series * s.series * (secs ?? 1);
           totals.set(it.name, cur);
         }
       }

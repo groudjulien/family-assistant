@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Recipe, RecipeIdea, MeatType, StarchType, CourseType } from "@gfa/shared";
 import { MEAT_TYPES, MEAT_META, STARCH_TYPES, STARCH_META, COURSE_TYPES, COURSE_META } from "@gfa/shared";
 import { api, ApiError } from "../lib/api";
+import { splitIngredient, joinIngredient } from "../lib/ingredients";
 import PageLoader from "../components/PageLoader";
 import {
   Input,
@@ -829,7 +830,7 @@ function RecipeDetail({ recipe: r, backTo }: { recipe?: Recipe; backTo: string }
   const navigate = useNavigate();
   const [servings, setServings] = useState(r?.servings ?? 4);
   const [editing, setEditing] = useState(false);
-  // Ingrédients cochés pendant la préparation (par défaut aucun).
+  // Ingrédients cochés = ceux qui partiront à la liste de courses (aucun au départ).
   const [checked, setChecked] = useState<Set<number>>(new Set());
   const toggle = (i: number) =>
     setChecked((prev) => {
@@ -853,7 +854,7 @@ function RecipeDetail({ recipe: r, backTo }: { recipe?: Recipe; backTo: string }
     },
     onError: () => toast.error("Impossible d'ajouter les ingrédients."),
   });
-  const cookTonight = useMutation({
+  const addToMenu = useMutation({
     mutationFn: (id: string) => api.post("/api/courses/meal-plan/add", { recipeId: id }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["meal-plan"] });
@@ -898,6 +899,9 @@ function RecipeDetail({ recipe: r, backTo }: { recipe?: Recipe; backTo: string }
     };
   });
   const allNames = scaled.map((s) => joinIngredient(s.qty, s.name));
+  // Ce qui part aux courses : les lignes cochées, aux quantités affichées.
+  const pickedNames = allNames.filter((_, i) => checked.has(i));
+  const allChecked = checked.size === allNames.length && allNames.length > 0;
 
   const Stat = ({ label, children }: { label: string; children: ReactNode }) => (
     <div className="flex flex-col items-center rounded-2xl border border-line bg-surface px-2 py-2.5">
@@ -947,18 +951,22 @@ function RecipeDetail({ recipe: r, backTo }: { recipe?: Recipe; backTo: string }
 
       <div>
         <div className="mb-2 flex items-baseline justify-between gap-3">
-          <span className="eyebrow">Ingrédients · {r.ingredients.length}</span>
+          <span className="eyebrow">
+            Ingrédients · {checked.size > 0 ? `${checked.size}/${r.ingredients.length}` : r.ingredients.length}
+          </span>
           <button
             type="button"
-            onClick={() => addToList.mutate(allNames)}
+            onClick={() =>
+              setChecked(allChecked ? new Set() : new Set(allNames.map((_, i) => i)))
+            }
             className="shrink-0 text-sm font-semibold text-brand-600"
           >
-            Tout aux courses
+            {allChecked ? "Tout décocher" : "Tout cocher"}
           </button>
         </div>
         <div className="card">
           {scaled.map((ing, i) => {
-            const done = checked.has(i);
+            const picked = checked.has(i);
             return (
               <div
                 key={i}
@@ -966,23 +974,17 @@ function RecipeDetail({ recipe: r, backTo }: { recipe?: Recipe; backTo: string }
                   i === scaled.length - 1 ? "" : "border-b border-hairline"
                 }`}
               >
-                <Checkbox size="lg" checked={done} onChange={() => toggle(i)} />
+                <Checkbox size="lg" checked={picked} onChange={() => toggle(i)} />
                 <button
                   type="button"
                   onClick={() => toggle(i)}
                   className={`min-w-0 flex-1 py-2 text-left text-base ${
-                    done ? "text-slate-400 line-through" : ""
+                    picked ? "font-medium" : ""
                   }`}
                 >
                   {ing.name}
                 </button>
-                {ing.qty && (
-                  <span
-                    className={`shrink-0 text-sm tabular-nums ${done ? "text-slate-400" : "text-ink-2"}`}
-                  >
-                    {ing.qty}
-                  </span>
-                )}
+                {ing.qty && <span className="shrink-0 text-sm tabular-nums text-ink-2">{ing.qty}</span>}
               </div>
             );
           })}
@@ -1027,28 +1029,45 @@ function RecipeDetail({ recipe: r, backTo }: { recipe?: Recipe; backTo: string }
       >
         <button
           type="button"
-          onClick={() => cookTonight.mutate(r.id)}
+          onClick={() => addToMenu.mutate(r.id)}
           className="pointer-events-auto flex h-[52px] flex-1 items-center justify-center rounded-full bg-brand-600 text-base font-semibold text-on-brand shadow-lg"
         >
-          Cuisiner ce soir
+          Ajouter au menu
         </button>
         <button
           type="button"
-          onClick={() => addToList.mutate(allNames)}
-          aria-label="Envoyer les ingrédients aux courses"
-          className="pointer-events-auto flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-full border border-line bg-surface text-ink shadow-lg"
+          onClick={() => addToList.mutate(pickedNames)}
+          disabled={pickedNames.length === 0 || addToList.isPending}
+          aria-label={
+            pickedNames.length > 0
+              ? `Envoyer ${pickedNames.length} ingrédient${pickedNames.length > 1 ? "s" : ""} aux courses`
+              : "Coche des ingrédients pour les envoyer aux courses"
+          }
+          className="pointer-events-auto relative flex h-[52px] w-[52px] shrink-0 items-center justify-center rounded-full border border-line bg-surface text-ink shadow-lg disabled:opacity-40"
         >
           <IconCart size={22} />
+          {pickedNames.length > 0 && (
+            <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-600 px-1 text-2xs font-bold text-on-brand">
+              {pickedNames.length}
+            </span>
+          )}
         </button>
       </div>
 
       {/* Ordinateur : les mêmes actions, en ligne. */}
       <div className="hidden items-center gap-2 md:flex">
-        <button type="button" onClick={() => cookTonight.mutate(r.id)} className="btn-primary">
-          Cuisiner ce soir
+        <button type="button" onClick={() => addToMenu.mutate(r.id)} className="btn-primary">
+          Ajouter au menu
         </button>
-        <button type="button" onClick={() => addToList.mutate(allNames)} className="btn">
-          Envoyer aux courses
+        <button
+          type="button"
+          onClick={() => addToList.mutate(pickedNames)}
+          disabled={pickedNames.length === 0 || addToList.isPending}
+          className="btn disabled:opacity-40"
+        >
+          {pickedNames.length > 0
+            ? `Envoyer ${pickedNames.length} ingrédient${pickedNames.length > 1 ? "s" : ""} aux courses`
+            : "Envoyer aux courses"}
         </button>
       </div>
 
@@ -1085,6 +1104,7 @@ function RecipeDetailModal({
   onDelete,
   isChecked,
   toggleIng,
+  selectedCount,
   onAddToList,
   onSaved,
 }: {
@@ -1095,6 +1115,8 @@ function RecipeDetailModal({
   onDelete: () => void;
   isChecked: (i: number) => boolean;
   toggleIng: (i: number) => void;
+  /** Ingrédients cochés : le bouton « Liste de course » reste gris à zéro. */
+  selectedCount: number;
   onAddToList: () => void;
   onSaved: () => void;
 }) {
@@ -1154,14 +1176,27 @@ function RecipeDetailModal({
 
             <div className="grid gap-4 md:grid-cols-2">
               <div>
-                <div className="mb-1 text-sm font-semibold">Ingrédients</div>
-                <ul className="space-y-1 text-sm">
+                <div className="mb-1 text-sm font-semibold">
+                  Ingrédients{selectedCount > 0 ? ` · ${selectedCount}/${r.ingredients.length}` : ""}
+                </div>
+                <ul className="text-sm">
                   {r.ingredients.map((ing, i) => (
-                    <li key={i} className="flex items-start gap-2">
-                      <span className="mt-0.5">
-                        <Checkbox size="sm" checked={isChecked(i)} onChange={() => toggleIng(i)} />
-                      </span>
-                      <span className={isChecked(i) ? "" : "text-slate-400 line-through"}>{ing}</span>
+                    <li
+                      key={i}
+                      className={`flex min-h-[52px] items-center gap-3 ${
+                        i === r.ingredients.length - 1 ? "" : "border-b border-hairline"
+                      }`}
+                    >
+                      <Checkbox size="lg" checked={isChecked(i)} onChange={() => toggleIng(i)} />
+                      <button
+                        type="button"
+                        onClick={() => toggleIng(i)}
+                        className={`min-w-0 flex-1 py-2 text-left text-base ${
+                          isChecked(i) ? "font-medium" : ""
+                        }`}
+                      >
+                        {ing}
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -1199,8 +1234,12 @@ function RecipeDetailModal({
                 <button onClick={() => setEdit(true)} className="btn">
                   Modifier
                 </button>
-                <button onClick={onAddToList} className="btn-primary">
-                  + Liste de course
+                <button
+                  onClick={onAddToList}
+                  disabled={selectedCount === 0}
+                  className="btn-primary disabled:opacity-40"
+                >
+                  + Liste de course{selectedCount > 0 ? ` (${selectedCount})` : ""}
                 </button>
               </div>
             </div>
@@ -1261,11 +1300,16 @@ function WeekMealPlan() {
   // Repas dont la feuille d'actions est ouverte, et sélecteur « choisir moi-même ».
   const [sheet, setSheet] = useState<Recipe | null>(null);
   const [picking, setPicking] = useState<Recipe | null>(null);
-  // Ingrédients décochés par recette (pour la modale et l'ajout à la liste).
-  const [unchecked, setUnchecked] = useState<Record<string, Set<number>>>({});
-  const isChecked = (rid: string, i: number) => !(unchecked[rid]?.has(i));
+  /**
+   * Ingrédients cochés par recette : rien au départ, on coche ce qu'il manque.
+   * Ne concerne que le bouton « Liste de course » de la recette ouverte — le
+   * bouton de la semaine, lui, envoie tout ce que les repas à cuisiner
+   * demandent.
+   */
+  const [checkedIng, setCheckedIng] = useState<Record<string, Set<number>>>({});
+  const isChecked = (rid: string, i: number) => !!checkedIng[rid]?.has(i);
   const toggleIng = (rid: string, i: number) =>
-    setUnchecked((prev) => {
+    setCheckedIng((prev) => {
       const cur = new Set(prev[rid] ?? []);
       cur.has(i) ? cur.delete(i) : cur.add(i);
       return { ...prev, [rid]: cur };
@@ -1437,7 +1481,7 @@ function WeekMealPlan() {
   const todo = recipes.filter((r) => !cooked[r.id]);
   const done = recipes.filter((r) => cooked[r.id]);
   // Ce qu'il reste à acheter : les ingrédients des repas pas encore cuisinés.
-  const pendingIngredients = todo.flatMap((r) => selectedIngredients(r));
+  const pendingIngredients = todo.flatMap((r) => r.ingredients);
 
   // Équilibre : combien de chaque famille, et les deux chiffres de temps.
   const counts = MEAL_FAMILIES.map((f) => ({
@@ -1784,13 +1828,10 @@ function WeekMealPlan() {
               }}
               isChecked={(i) => isChecked(r.id, i)}
               toggleIng={(i) => toggleIng(r.id, i)}
+              selectedCount={selectedIngredients(r).length}
               onAddToList={() => {
                 const sel = selectedIngredients(r);
-                if (sel.length === 0) {
-                  toast.error("Aucun ingrédient sélectionné.");
-                  return;
-                }
-                addToList.mutate(sel);
+                if (sel.length > 0) addToList.mutate(sel);
               }}
               onSaved={() => {
                 setModal({ id: r.id, edit: false });
@@ -2004,19 +2045,6 @@ function MealIdeas() {
 }
 
 /* ---------------- Édition d'une recette ---------------- */
-
-// Sépare "200 g de farine" -> { qty: "200 g", name: "farine" } (heuristique, sans perte).
-function splitIngredient(line: string): { qty: string; name: string } {
-  const m = line
-    .trim()
-    .match(
-      /^([\d.,/]+\s*(?:g|kg|mg|ml|cl|l|cs|cc|càs|càc|cuillères?(?:\s?à\s?(?:soupe|café))?|pincées?|sachets?|gousses?|tranches?|pièces?|verres?|tasses?|bottes?|boîtes?|rouleaux?|feuilles?|brins?|bouquets?|filets?|barquettes?|c\.?\s?à\.?\s?[sc]\.?)?\.?)\s+(?:de\s+|d['’])?(.+)$/i,
-    );
-  if (m && /\d/.test(m[1])) return { qty: m[1].trim(), name: m[2].trim() };
-  return { qty: "", name: line.trim() };
-}
-const joinIngredient = (qty: string, name: string) =>
-  [qty.trim(), name.trim()].filter(Boolean).join(" ");
 
 function RecipeEditor({
   recipe,

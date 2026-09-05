@@ -1,5 +1,7 @@
 import { useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { Recipe } from "@gfa/shared";
 import {
   DEFAULT_SHOPPING_CATEGORIES,
   FALLBACK_SHOPPING_CATEGORY,
@@ -10,8 +12,10 @@ import {
   type ShoppingItem,
 } from "@gfa/shared";
 import { api } from "../lib/api";
+import { sameIngredient } from "../lib/ingredients";
 import PageLoader from "../components/PageLoader";
-import { Input, MobileActionBar, Select, Switch } from "../components/ui";
+import { ActionSheet, Input, MobileActionBar, Select, Switch } from "../components/ui";
+import { IconMeal } from "../components/icons";
 import { usePageHeader } from "../components/PageHeader";
 import { useMe } from "../auth";
 
@@ -27,6 +31,32 @@ export default function Courses() {
 // Affichage : une majuscule au début de chaque mot (sans toucher au stockage).
 const titleCase = (s: string) =>
   s.replace(/(^|[\s\-'’])(\p{L})/gu, (_, sep, ch) => sep + ch.toUpperCase());
+
+/** Une recette du menu qui réclame ce produit, et la ligne qui le demande. */
+interface MenuUse {
+  recipe: Recipe;
+  line: string;
+}
+
+/**
+ * Pourquoi ce produit est sur la liste : les repas du menu de la semaine dont
+ * il est un ingrédient. Le menu est déjà chargé par la page Repas (même clé de
+ * cache), donc au pire une requête, jamais une par article.
+ */
+function useMenuUses(): (name: string) => MenuUse[] {
+  const { data } = useQuery({
+    queryKey: ["meal-plan"],
+    queryFn: () => api.get<{ recipes: Recipe[] } | null>("/api/courses/meal-plan"),
+  });
+  return useMemo(() => {
+    const recipes = data?.recipes ?? [];
+    return (name: string) =>
+      recipes.flatMap((recipe) => {
+        const line = recipe.ingredients.find((ing) => sameIngredient(name, ing));
+        return line ? [{ recipe, line }] : [];
+      });
+  }, [data]);
+}
 
 /** Rayons du foyer (Réglages → Courses), sinon les rayons par défaut. */
 function useShoppingCategories(): ShoppingCategory[] {
@@ -117,15 +147,20 @@ function AddArticleForm({
 function AisleRow({
   item,
   pending,
+  uses,
   onCheck,
   onQty,
+  onShowUses,
   last,
 }: {
   item: ShoppingItem;
   /** Retrait en cours : la rangée s'estompe le temps de l'aller-retour réseau. */
   pending: boolean;
+  /** Repas du menu qui réclament ce produit (vide = ajout à la main). */
+  uses: MenuUse[];
   onCheck: () => void;
   onQty: (quantity: number) => void;
+  onShowUses: () => void;
   last: boolean;
 }) {
   return (
@@ -151,9 +186,25 @@ function AisleRow({
       >
         {iconFor(item.name)}
       </span>
-      {/* Pas de `truncate` : un nom long doit rester lisible en rayon, quitte à
-          passer sur deux lignes (la rangée grandit). */}
-      <span className="min-w-0 flex-1 py-2 font-medium">{titleCase(item.name)}</span>
+      {/* Pas de `truncate` sur le nom : un nom long doit rester lisible en
+          rayon, quitte à passer sur deux lignes (la rangée grandit). La
+          seconde ligne dit pour quel repas on l'achète, et s'ouvre au toucher. */}
+      {uses.length > 0 ? (
+        <button
+          type="button"
+          onClick={onShowUses}
+          className="min-w-0 flex-1 py-2 text-left"
+          aria-label={`${item.name} : voir les recettes du menu`}
+        >
+          <span className="block font-medium">{titleCase(item.name)}</span>
+          <span className="mt-0.5 flex items-center gap-1 text-xs text-ink-2">
+            <IconMeal size={14} className="shrink-0" />
+            <span className="truncate">{uses.map((u) => u.recipe.title).join(" · ")}</span>
+          </span>
+        </button>
+      ) : (
+        <span className="min-w-0 flex-1 py-2 font-medium">{titleCase(item.name)}</span>
+      )}
       <div className="flex shrink-0 items-center">
         <button
           type="button"
@@ -181,8 +232,12 @@ function AisleRow({
 
 function ShoppingList() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const categories = useShoppingCategories();
+  const menuUses = useMenuUses();
   const [addOpen, setAddOpen] = useState(false);
+  // Article dont on regarde les recettes du menu (feuille du bas).
+  const [usesOf, setUsesOf] = useState<ShoppingItem | null>(null);
   /**
    * Mode recette (ordinateur) : on ajuste les quantités et une tuile ne se
    * supprime plus au clic. Sans objet sur mobile, dont la liste porte déjà des
@@ -313,6 +368,8 @@ function ShoppingList() {
                         key={it.id}
                         item={it}
                         pending={deletingIds.has(it.id)}
+                        uses={menuUses(it.name)}
+                        onShowUses={() => setUsesOf(it)}
                         onCheck={() => deleteItem(it)}
                         onQty={(q) => (q <= 0 ? deleteItem(it) : setQty.mutate({ id: it.id, quantity: q }))}
                         last={i === a.items.length - 1}
@@ -378,6 +435,20 @@ function ShoppingList() {
                             </span>
                           </button>
                         )}
+                        {menuUses(it.name).length > 0 && (
+                          // Au-dessus des demi-boutons de quantité du mode
+                          // recette, qui couvrent toute la tuile.
+                          <button
+                            type="button"
+                            onClick={() => setUsesOf(it)}
+                            title="Voir les recettes du menu qui l'utilisent"
+                            aria-label={`${it.name} : voir les recettes du menu`}
+                            className="absolute right-1 top-1 z-20 flex h-6 items-center gap-1 rounded-full border border-line bg-surface pl-1.5 pr-2 text-2xs font-bold text-ink-2"
+                          >
+                            <IconMeal size={12} />
+                            {menuUses(it.name).length}
+                          </button>
+                        )}
                         {it.quantity > 1 && (
                           // `pointer-events-none` : la pastille ne doit pas absorber le clic
                           // de la moitié gauche en mode recette.
@@ -441,6 +512,34 @@ function ShoppingList() {
           </div>
         </div>
       )}
+
+      {/* « Pourquoi ce produit ? » : les repas du menu qui le réclament, avec la
+          ligne d'ingrédient exacte. Une touche mène à la recette. */}
+      {usesOf &&
+        (() => {
+          const uses = menuUses(usesOf.name);
+          return (
+            <ActionSheet
+              title={titleCase(usesOf.name)}
+              subtitle={`Dans ${uses.length} repas du menu`}
+              thumbnail={
+                <span
+                  aria-hidden="true"
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-xl"
+                >
+                  {iconFor(usesOf.name)}
+                </span>
+              }
+              items={uses.map((u) => ({
+                label: u.recipe.title,
+                hint: u.line,
+                icon: <IconMeal size={20} />,
+                onClick: () => navigate(`/repas/recettes/${u.recipe.id}`),
+              }))}
+              onClose={() => setUsesOf(null)}
+            />
+          );
+        })()}
 
       <MobileActionBar label="Ajouter un produit" onClick={() => setAddOpen(true)} />
 

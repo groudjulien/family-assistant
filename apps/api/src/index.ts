@@ -27,6 +27,7 @@ import lunchflowRoutes from "./routes/lunchflow";
 import wishRoutes from "./routes/wish";
 import listsRoutes from "./routes/lists";
 import setupRoutes from "./routes/setup";
+import invitationRoutes from "./routes/invitation";
 
 const app = new Hono<AppContext>();
 
@@ -73,6 +74,14 @@ const setupApp = new Hono<AppContext>();
 setupApp.use("*", requireSameOrigin);
 setupApp.route("/", setupRoutes);
 app.route("/api/setup", setupApp);
+
+// Faire-part public : /public/invite/<code> — hors session (le code de 4
+// caractères est la seule clé, cf. routes/invitation.ts). La protection CSRF
+// reste appliquée : la page qui l'appelle est servie par APP_URL.
+const inviteApp = new Hono<AppContext>();
+inviteApp.use("*", requireSameOrigin);
+inviteApp.route("/", invitationRoutes);
+app.route("/public/invite", inviteApp);
 
 // Protected API
 const api = new Hono<AppContext>();

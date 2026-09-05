@@ -557,6 +557,8 @@ function AccountSheet({
     qc.invalidateQueries({ queryKey: ["balance"] });
     qc.invalidateQueries({ queryKey: ["cashflow"] });
     qc.invalidateQueries({ queryKey: ["money-summary"] });
+    // Le total de l'épargne mariage se lit sur les comptes marqués.
+    qc.invalidateQueries({ queryKey: ["wedding-summary"] });
   };
 
   const patchAccount = useMutation({
@@ -564,6 +566,7 @@ function AccountSheet({
       type?: string;
       isPrimary?: boolean;
       forecast?: boolean;
+      weddingSavings?: boolean;
       currentBalance?: number;
     }) => api.patch(`/api/accounts/${a.id}`, payload),
     onSuccess: invalidate,
@@ -736,6 +739,16 @@ function AccountSheet({
           hint="compté dans le reste à vivre"
           trailing={
             <Switch checked={a.forecast} onChange={() => patchAccount.mutate({ forecast: !a.forecast })} />
+          }
+        />
+        <SheetRow
+          label="Épargne mariage"
+          hint="son solde alimente le total épargné du mariage"
+          trailing={
+            <Switch
+              checked={a.weddingSavings}
+              onChange={() => patchAccount.mutate({ weddingSavings: !a.weddingSavings })}
+            />
           }
         />
 

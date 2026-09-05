@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   Listbox,
@@ -13,7 +13,7 @@ import {
 } from "@headlessui/react";
 import { DayPicker, type MonthCaptionProps } from "react-day-picker";
 import { fr } from "react-day-picker/locale";
-import { IconClose, IconFilter } from "./icons";
+import { IconChevronDown, IconClose, IconFilter } from "./icons";
 
 /* ------------------------------------------------------------------ */
 /* Select                                                              */
@@ -25,6 +25,12 @@ export interface Option {
   icon?: ReactNode; // pastille/logo optionnel affiché devant le label (Select)
 }
 
+/**
+ * Le popover des listes prend la largeur de **son contenu**, jamais moins que
+ * son bouton : cloué à la largeur du bouton, un choix plus long que son
+ * déclencheur se lisait « Convier — Ven… ». Le plafond (22 rem) évite qu'une
+ * option bavarde ne traverse l'écran.
+ */
 export function Select({
   value,
   onChange,
@@ -51,7 +57,7 @@ export function Select({
         </ListboxButton>
         <ListboxOptions
           anchor="bottom start"
-          className="z-50 mt-1 max-h-60 w-[var(--button-width)] overflow-auto rounded-xl border border-slate-200 bg-white p-1 shadow-lg focus:outline-none dark:border-slate-700 dark:bg-slate-900"
+          className="z-50 mt-1 max-h-60 w-max min-w-[var(--button-width)] max-w-[min(22rem,90vw)] overflow-auto rounded-xl border border-slate-200 bg-white p-1 shadow-lg focus:outline-none dark:border-slate-700 dark:bg-slate-900"
         >
           {options.map((o) => (
             <ListboxOption
@@ -100,7 +106,7 @@ export function MultiSelect({
         </ListboxButton>
         <ListboxOptions
           anchor="bottom start"
-          className="z-50 mt-1 max-h-60 w-[var(--button-width)] overflow-auto rounded-xl border border-slate-200 bg-white p-1 shadow-lg focus:outline-none dark:border-slate-700 dark:bg-slate-900"
+          className="z-50 mt-1 max-h-60 w-max min-w-[var(--button-width)] max-w-[min(22rem,90vw)] overflow-auto rounded-xl border border-slate-200 bg-white p-1 shadow-lg focus:outline-none dark:border-slate-700 dark:bg-slate-900"
         >
           {options.map((o) => (
             <ListboxOption
@@ -343,19 +349,30 @@ export function FilterChips({
   value,
   onChange,
   items,
+  wrap = false,
   className = "",
 }: {
   value: string;
   onChange: (value: string) => void;
   /** `icon` : un avatar ou une pastille, posé avant le libellé. */
   items: { value: string; label: string; icon?: ReactNode }[];
+  /**
+   * Passer à la ligne au lieu de défiler. Dans une **modale**, une rangée qui
+   * défile cache ses dernières pastilles sans le dire : le bord de la boîte ne
+   * se lit pas comme le bord de l'écran, et rien n'invite à faire glisser.
+   */
+  wrap?: boolean;
   className?: string;
 }) {
   return (
     // `-ml-4 pl-4` : les pastilles défilent jusqu'au bord gauche de l'écran au
     // lieu de s'arrêter sur la marge de la page. Le débordement s'arrête à
     // droite, pour ne pas passer sous un bouton posé en fin de rangée.
-    <div className={`-ml-4 flex gap-2 overflow-x-auto pb-1 pl-4 md:ml-0 md:pl-0 ${className}`}>
+    <div
+      className={`flex gap-2 pb-1 ${
+        wrap ? "flex-wrap" : "-ml-4 overflow-x-auto pl-4 md:ml-0 md:pl-0"
+      } ${className}`}
+    >
       {items.map((it) => (
         <button
           key={it.value}
@@ -586,6 +603,20 @@ export function FilterToggle({
   );
 }
 
+/**
+ * Étiquette de section, au-dessus d'une carte (« PRIORITÉS », « DOSSIERS · 3 »).
+ * L'œil balaie la colonne des étiquettes ; un titre *dans* la carte ne se voit
+ * qu'une fois qu'on y est. `right` porte l'action de la section, s'il y en a une.
+ */
+export function SectionLabel({ children, right }: { children: ReactNode; right?: ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <div className="eyebrow">{children}</div>
+      {right}
+    </div>
+  );
+}
+
 export interface OverflowItem {
   label: string;
   onClick: () => void;
@@ -600,15 +631,173 @@ export interface OverflowItem {
  * supprimer, partager) vit ici. Évite d'aligner trois cibles de 22 px dont une
  * destructive à côté d'une case à cocher (règle 1).
  */
+/* ------------------------------------------------------------------ */
+/* Sélecteur de catégories                                             */
+/* ------------------------------------------------------------------ */
+
+export interface TagOption {
+  id: string;
+  name: string;
+}
+
+/**
+ * Choix multiple avec recherche, et **création à la volée**.
+ *
+ * La liste des catégories part vide et se construit à l'usage : demander
+ * d'aller la remplir ailleurs avant de pouvoir poser la première étiquette
+ * ferait abandonner. Quand la recherche ne donne rien, « Ajouter » crée la
+ * catégorie sous le nom tapé et la pose dans la foulée.
+ */
+export function TagSelect({
+  options,
+  value,
+  onChange,
+  onCreate,
+  label,
+  placeholder = "Aucune",
+  className = "",
+}: {
+  options: TagOption[];
+  value: string[];
+  onChange: (next: string[]) => void;
+  /** Crée la catégorie et renvoie son id — c'est l'appelant qui la persiste. */
+  onCreate?: (name: string) => Promise<string> | string;
+  label?: string;
+  placeholder?: string;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [busy, setBusy] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+
+  // Fermer au clic extérieur : le panneau tient un champ de saisie, il ne peut
+  // pas se contenter d'un `onBlur`.
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const matches = q ? options.filter((o) => o.name.toLowerCase().includes(q)) : options;
+  const exact = options.some((o) => o.name.trim().toLowerCase() === q);
+  const canCreate = !!onCreate && q.length > 0 && !exact;
+  const chosen = value.map((id) => options.find((o) => o.id === id)).filter(Boolean) as TagOption[];
+
+  const toggle = (id: string) =>
+    onChange(value.includes(id) ? value.filter((x) => x !== id) : [...value, id]);
+
+  const create = async () => {
+    if (!onCreate || busy) return;
+    setBusy(true);
+    try {
+      const id = await onCreate(query.trim());
+      if (id) onChange([...value, id]);
+      setQuery("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div ref={box} className={`relative ${className}`}>
+      {label && <span className="mb-1.5 block text-sm font-medium">{label}</span>}
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className={`flex min-h-tap w-full items-center gap-2 rounded-xl border px-3 py-1.5 text-left transition ${
+          open ? "border-brand-600" : "border-line hover:border-brand-400"
+        }`}
+      >
+        <span className="flex min-w-0 flex-1 flex-wrap gap-1.5">
+          {chosen.length === 0 ? (
+            <span className="text-sm text-slate-400">{placeholder}</span>
+          ) : (
+            chosen.map((o) => (
+              <span
+                key={o.id}
+                className="rounded-full bg-surface-2 px-2.5 py-0.5 text-xs font-medium text-ink-2"
+              >
+                {o.name}
+              </span>
+            ))
+          )}
+        </span>
+        <IconChevronDown size={18} className={`shrink-0 text-slate-400 ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 right-0 z-40 mt-1 overflow-hidden rounded-xl border border-line bg-surface shadow-lg">
+          <div className="p-2">
+            <SearchField value={query} onChange={setQuery} placeholder="Rechercher…" />
+          </div>
+          <div className="max-h-60 overflow-y-auto border-t border-hairline">
+            {matches.length === 0 ? (
+              <div className="px-3 py-4 text-sm text-slate-400">Aucun résultat</div>
+            ) : (
+              matches.map((o) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  onClick={() => toggle(o.id)}
+                  className="flex min-h-tap w-full items-center gap-2.5 px-3 text-left text-sm transition hover:bg-surface-2"
+                >
+                  <Checkbox checked={value.includes(o.id)} onChange={() => toggle(o.id)} size="sm" />
+                  <span className="min-w-0 flex-1 truncate">{o.name}</span>
+                </button>
+              ))
+            )}
+          </div>
+          {canCreate && (
+            <button
+              type="button"
+              onClick={() => void create()}
+              disabled={busy}
+              className="flex min-h-tap w-full items-center gap-2 border-t border-hairline px-3 text-left text-sm font-semibold text-brand-600 transition hover:bg-surface-2 disabled:opacity-50"
+            >
+              {busy ? "Création…" : `Ajouter « ${query.trim()} »`}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Les catégories posées, en pastilles — pour une ligne de liste. */
+export function TagChips({ ids, options, className = "" }: { ids: string[]; options: TagOption[]; className?: string }) {
+  const names = ids.map((id) => options.find((o) => o.id === id)?.name).filter(Boolean);
+  if (names.length === 0) return null;
+  return (
+    <span className={`flex flex-wrap gap-1 ${className}`}>
+      {names.map((n) => (
+        <span key={n} className="rounded-full bg-surface-2 px-2 py-0.5 text-2xs font-medium text-ink-2">
+          {n}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 export function OverflowMenu({
   items,
   label = "Autres actions",
   className = "",
+  vertical = false,
   buttonClassName = "flex h-tap w-9 items-center justify-center rounded-lg text-ink-2 transition hover:text-ink",
 }: {
   items: OverflowItem[];
   label?: string;
   className?: string;
+  /** « ⋮ » au lieu de « ⋯ » : dans une ligne de tableau dense, la colonne
+   *  d'actions est étroite et les points verticaux y tiennent sans l'élargir. */
+  vertical?: boolean;
   /** Pour un « ⋯ » qui n'est pas en fin de ligne (à côté d'un bouton d'action). */
   buttonClassName?: string;
 }) {
@@ -628,9 +817,9 @@ export function OverflowMenu({
         className={buttonClassName}
       >
         <svg viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5" aria-hidden="true">
-          <circle cx="5.5" cy="12" r="1.6" />
+          <circle cx={vertical ? 12 : 5.5} cy={vertical ? 5.5 : 12} r="1.6" />
           <circle cx="12" cy="12" r="1.6" />
-          <circle cx="18.5" cy="12" r="1.6" />
+          <circle cx={vertical ? 12 : 18.5} cy={vertical ? 18.5 : 12} r="1.6" />
         </svg>
       </button>
       {open && (

@@ -55,6 +55,7 @@ const RECORD_TABS = [
   "/repas/recettes",
   "/vacances/prevu",
   "/vacances/archive",
+  "/wedding/invites",
 ];
 const memorablePath = (path: string) => {
   const tab = RECORD_TABS.find((t) => path.startsWith(`${t}/`));
